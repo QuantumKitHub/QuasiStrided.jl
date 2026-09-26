@@ -369,10 +369,8 @@ end
 # The interleaved tile reader: 1m's `_store_tile_onem!` (src/microkernels/
 # onem.jl) verbatim but for the kernel type -- the accumulator layout is the
 # same, so is the reader, and the test suite checks the two agree bitwise on
-# one accumulator. Scattered/scalar only, like 1m's; there is no unit-stride
-# vector store counterpart to planar's `_store_tile_planar_vector!` yet (the
-# accumulator is already in native `Complex{T}` order, so one would need no
-# interleave shuffle -- a deliberately deferred follow-up).
+# one accumulator. The scalar fallback of `store_tile!` below, for every
+# destination `_store_tile_fmaddsub_vector!` is ineligible for.
 @generated function _store_tile_fmaddsub!(
         destination::QSTile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::FMAddSubKernel{MR, NR, T, W},
@@ -424,13 +422,195 @@ end
     end
 end
 
+# ----------------------------------------------------------------------------
+# The vectorized store for a unit-stride destination
+# ----------------------------------------------------------------------------
+#
+# The accumulator is already in `Complex{R}`'s native `[re, im, re, im, ...]`
+# order, so unlike planar's `_store_tile_planar_vector!` no interleave shuffle
+# is needed: one `W`-real accumulator vector IS `W÷2` consecutive destination
+# elements, and `C = alpha*R + beta*C` is computed lane-wise with the two
+# primitives the K loop already uses. Per full block:
+#
+#     beta == 0:  alpha*r            = addsub(ar*r, ai*swap(r))
+#     beta == 1:  muladd(alpha, r, C) = fmaddsub(ar, r, fmaddsub(ai, swap(r), C))
+#     otherwise:  as beta == 1 with C := addsub(br*C, bi*swap(C))
+#
+# where `swap` is `_swap_pairs`, `addsub(p, q)` is `p - q` in even (real) lanes
+# and `p + q` in odd (imaginary) lanes, and `fmaddsub(x, y, c)` is `x*y - c` /
+# `x*y + c` fused. These are exactly Base's `Complex` expression trees as
+# `_axpby_tile!` (src/microkernels/interface.jl) reaches them -- `*` is
+# `(zr*wr - zi*wi, zr*wi + zi*wr)`, two separately rounded products, and
+# `muladd(z, w, x)` is `(muladd(zr, wr, -muladd(zi, wi, -xr)), muladd(zr, wi,
+# muladd(zi, wr, xi)))`, fused at both levels -- so on the lanes it vectorizes
+# the fast path is bitwise identical to a fused transcription of those trees
+# (test/microkernels/test_fmaddsub_store_fastpath.jl pins this with `isequal`),
+# and agrees with the scalar fallback exactly at `beta == 0` and `beta == 1`
+# and to within LLVM's `muladd` contraction choice otherwise, as planar's does.
+#
+# Why it exists: the scalar reader above was 46% of an 8x8x8 ComplexF64
+# `execute!` (0.19 of 0.41 us, ~3 ns per element through `_axpby_tile!`;
+# ccqlin038, Julia 1.12.7, profile of `execute!` alone) -- and this kernel is
+# the one the AVX-512 small-M demotion selects for every complex contraction
+# with `Qm < 24`, so that store is on the per-call floor of exactly the small
+# problems where the floor is what matters. Measured, same host and probe
+# (medians of 15 x 2000 calls, scalar store then this one, back to back, not
+# interleaved), `execute!` on a dense ComplexF64 GEMM at the `8x8/W8` shape:
+# 8x8x8 0.41 -> 0.27 us, 16x16x16 1.64 -> 1.00 us, 4x4 outer product 0.20 ->
+# 0.15 us; through the TensorOperations adapter the 16x16x16 call went from
+# 1.33x StridedBLAS's time to 0.93x. Re-measured interleaved (two rounds,
+# benchmark/probes/probe_call_floor.jl, scalar-only store vs this one, whole
+# `tensorcontract!` calls): 8x8x8 0.68 -> 0.53 us, 16x16x16 1.97 -> 1.35 us,
+# dim-4 outer product 1.45 -> 0.84 us.
+
+# `p - q` in even lanes, `p + q` in odd lanes, both separately rounded: Base's
+# unfused `Complex` `*` on interleaved data.
+@generated function _addsub(p::Vec{N, R}, q::Vec{N, R}) where {N, R}
+    iseven(N) || return :(throw(ArgumentError("_addsub: expected even N, got $N")))
+    idx = ntuple(k -> iseven(k - 1) ? k - 1 : N + k - 1, N)
+    return :(Base.@_inline_meta; shufflevector(p - q, p + q, Val($idx)))
+end
+
+# One full `W÷2`-row block of one column: `at` is the ZERO-based index of the
+# block's first REAL in the reinterpreted storage, i.e. twice the complex
+# element index. `ar`/`ai`/`br`/`bi` are pre-broadcast once per `store_tile!`
+# call; `beta` itself is passed only so the two `iszero`/`isone` tests are the
+# identical tests `_axpby_tile!` makes on the identical value.
+@inline function _fmaddsub_store_block!(
+        sp::Ptr{R}, at::Int, r::Vec{W, R},
+        ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
+        beta::Complex{R}
+    ) where {R, W}
+    s = _swap_pairs(r)
+    if iszero(beta)
+        new = _addsub(ar * r, ai * s)
+    else
+        old = vload(Vec{W, R}, sp + sizeof(R) * at)
+        x = isone(beta) ? old : _addsub(br * old, bi * _swap_pairs(old))
+        new = _fmaddsub(ar, r, _fmaddsub(ai, s, x))
+    end
+    vstore(new, sp + sizeof(R) * at)
+    return nothing
+end
+
+# Vectorized FMAddSub store. The same `@generated` unroll as planar's
+# `_store_tile_planar_vector!` -- every `acc[...]` a literal tuple index
+# (Cliff B), the same full-block vs. row-tail split, the same `j < n` column
+# guard -- with a "row block" being one accumulator vector of `W÷2` complex
+# rows. `rows::AffineAxis` is pinned in the signature so an ineligible tile is
+# a MethodError rather than a wrong answer; the caller checks
+# `_complex_vector_eligible` first. The scalar row tail goes through
+# `storage` itself via `_axpby_at!`, character-identical to the fallback's
+# arithmetic. GC.@preserve: the raw `Ptr{R}` is derived from `storage` and
+# every dereference happens inside the preserve block.
+@generated function _store_tile_fmaddsub_vector!(
+        destination::QSTile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, R}},
+        alpha::T, beta::T, kernel::FMAddSubKernel{MR, NR, T, W},
+        m::Int, n::Int
+    ) where {S, MR, NR, T, W, R, NV}
+    R === real(T) ||
+        throw(
+        ArgumentError(
+            "_store_tile_fmaddsub_vector!: accumulator lane type $R does not match " *
+                "real($T) = $(real(T))"
+        )
+    )
+    # The bitcast below is only sound on rank-1 dense storage of exactly `T`.
+    S <: DenseVector{T} ||
+        throw(
+        ArgumentError(
+            "_store_tile_fmaddsub_vector!: destination storage $S is not a DenseVector{$T}"
+        )
+    )
+    iseven(W) ||
+        throw(ArgumentError("_store_tile_fmaddsub_vector!: requires an even W, got $W"))
+    MV = (2 * MR) ÷ W
+    MV * NR == NV ||
+        throw(
+        ArgumentError(
+            "_store_tile_fmaddsub_vector!: accumulator length $NV does not match " *
+                "(2*mr÷W)*nr = $(MV * NR) for MR=$MR, NR=$NR, W=$W"
+        )
+    )
+    HW = W ÷ 2
+
+    blocks = Any[]
+    for j in 0:(NR - 1)
+        vblocks = Any[]
+        for v in 0:(MV - 1)
+            idx = v + MV * j + 1
+            push!(
+                vblocks, quote
+                    vec = acc[$idx]
+                    if $((v + 1) * HW) <= m
+                        # Rows v*HW .. v*HW+HW-1 all inside [0, m): one W-real
+                        # load/store at that block's first real.
+                        _fmaddsub_store_block!(
+                            sp, 2 * (colbase + $(v * HW)), vec, ar, ai, br, bi, beta
+                        )
+                    elseif $(v * HW) < m
+                        # Row tail: this vector straddles m, so store the
+                        # valid rows one at a time through the SAME
+                        # `_axpby_at!` arithmetic the scalar reader uses.
+                        for u in 0:$(HW - 1)
+                            i = $(v * HW) + u
+                            i < m || break
+                            _axpby_at!(
+                                storage, colbase + i + 1, alpha,
+                                Complex(vec[2 * u + 1], vec[2 * u + 2]), beta
+                            )
+                        end
+                    end
+                end
+            )
+        end
+        push!(
+            blocks, quote
+                if $j < n
+                    colbase = rowbase0 + axis_offset(cols, $j)  # zero-based element address of (i=0, j)
+                    $(vblocks...)
+                end
+            end
+        )
+    end
+
+    return quote
+        storage = destination.storage
+        cols = destination.cols
+        # zero-based element address at (i=0, j=0)'s row contribution; rows are
+        # unit-stride, so row `i` is `rowbase0 + i`.
+        rowbase0 = destination.base + destination.rows.base
+        ar = Vec{$W, $R}(real(alpha))
+        ai = Vec{$W, $R}(imag(alpha))
+        br = Vec{$W, $R}(real(beta))
+        bi = Vec{$W, $R}(imag(beta))
+        GC.@preserve storage begin
+            sp = reinterpret(Ptr{$R}, pointer(storage))
+            @inbounds begin
+                $(blocks...)
+            end
+        end
+        return destination
+    end
+end
+
 """
     store_tile!(destination::QSTile, acc, alpha::T, beta::T, kernel::FMAddSubKernel) -> destination
 
 Same contract as every other kernel's `store_tile!`: `C = alpha*R + beta*C`
 over the valid rectangle only, `alpha == 0` never reads `acc`, `beta == 0`
 never reads old `C`, padding lanes are never read, an empty destination is a
-no-op. Reads the interleaved accumulator exactly as 1m's does.
+no-op.
+
+Two paths, chosen by `_complex_vector_eligible` (src/microkernels/planar.jl),
+the same gate as planar's store: a unit-stride `AffineAxis` row axis into
+rank-1 dense `Complex` storage on a shipped ISA takes
+`_store_tile_fmaddsub_vector!`, one `W`-real load (only when `beta != 0`)
+and store per full `W÷2`-row block with the arithmetic done in the
+accumulator's own interleaved layout; everything else takes the scalar
+reader `_store_tile_fmaddsub!`, which reads the interleaved accumulator
+exactly as 1m's does. The two agree bitwise at `beta == 0` and `beta == 1`;
+compare the general-`beta` case with a tolerance, as for planar.
 """
 function store_tile!(
         destination::QSTile, acc::NTuple{NV, Vec{W, R}},
@@ -438,5 +618,10 @@ function store_tile!(
     ) where {MR, NR, T, W, R, NV}
     m, n = _store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
+
+    if _complex_vector_eligible(destination, T)
+        return _store_tile_fmaddsub_vector!(destination, acc, alpha, beta, kernel, m, n)
+    end
+
     return _store_tile_fmaddsub!(destination, acc, alpha, beta, kernel, m, n)
 end
