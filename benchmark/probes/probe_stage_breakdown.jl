@@ -68,7 +68,17 @@ B = randn(rng, T, ntuple(_ -> DIM, length(LB))...)
 C = zeros(T, ntuple(_ -> DIM, length(LC))...)
 Av, Bv, Cv = StridedView(A), StridedView(B), StridedView(C)
 
-plan = plan_contract(Cv, Av, indA, Bv, indB, indC; oracle = false)
+# `--shape MR,NR,W` names a menu kernel shape (e.g. `8,6,4`, the AVX2 Float64
+# shape) instead of the host default, to reason about another ISA's register
+# tile on this host (its cache geometry is still this host's, of course).
+const SHAPE = argval("shape")
+using QuasiStrided: _kernel_from_shape
+plan = if SHAPE === nothing
+    plan_contract(Cv, Av, indA, Bv, indB, indC; oracle = false)
+else
+    shape = Tuple(parse.(Int, split(SHAPE, ',')))::NTuple{3, Int}
+    plan_contract(Cv, Av, indA, Bv, indB, indC; oracle = false, kernel = _kernel_from_shape(shape, T))
+end
 
 # Optional hand-made M split (see probe_msplit_prototype.jl): `--msplit-pos P
 # --msplit-li L` splits A's fastest M axis into (L, rest) and moves the inner
