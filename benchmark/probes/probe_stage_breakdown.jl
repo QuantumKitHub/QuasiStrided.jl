@@ -62,10 +62,42 @@ const indA = Tuple(label.(LA))
 const indB = Tuple(label.(LB))
 const indC = Tuple(label.(LC))
 
+# `--nothp 1` backs A and C by 4 KB pages only (anonymous mmap +
+# madvise(MADV_NOHUGEPAGE)), to emulate a node whose transparent huge pages
+# are off (or not granted) on a host where they are on for Julia's arrays.
+const NOTHP = argopt("nothp", 0) == 1
+function smallpage_array(::Type{T}, dims::Dims) where {T}
+    n = prod(dims) * sizeof(T)
+    len = cld(n, 4096) * 4096
+    PROT_RW, MAP_PRIVATE_ANON, MADV_NOHUGEPAGE = Cint(3), Cint(0x22), Cint(15)
+    p = ccall(:mmap, Ptr{Cvoid}, (Ptr{Cvoid}, Csize_t, Cint, Cint, Cint, Int64), C_NULL, len, PROT_RW, MAP_PRIVATE_ANON, -1, 0)
+    p == Ptr{Cvoid}(-1) && error("mmap failed")
+    ccall(:madvise, Cint, (Ptr{Cvoid}, Csize_t, Cint), p, len, MADV_NOHUGEPAGE) == 0 || error("madvise failed")
+    return unsafe_wrap(Array, Ptr{T}(p), dims; own = false)  # leaked on purpose: probe lifetime
+end
 rng = MersenneTwister(1234)
 A = randn(rng, T, ntuple(_ -> DIM, length(LA))...)
 B = randn(rng, T, ntuple(_ -> DIM, length(LB))...)
 C = zeros(T, ntuple(_ -> DIM, length(LC))...)
+if NOTHP
+    A = copyto!(smallpage_array(T, size(A)), A)
+    C = fill!(smallpage_array(T, size(C)), zero(T))
+end
+# `--pad P` stores A (and C) with the first axis padded to `DIM + P` in the
+# parent, so no stride is a power of two (a power-of-two `--dim` otherwise
+# puts every axis at a 2^k stride: cache-set / DRAM-bank aliasing test).
+const PAD = argopt("pad", 0)
+function padded(X::Array{T}) where {T}
+    pdims = (size(X, 1) + PAD, Base.tail(size(X))...)
+    P = NOTHP ? fill!(smallpage_array(T, pdims), zero(T)) : zeros(T, pdims)
+    V = view(P, 1:size(X, 1), ntuple(_ -> Colon(), ndims(X) - 1)...)
+    copyto!(V, X)
+    return V
+end
+if PAD > 0
+    A = padded(A)
+    C = padded(C)
+end
 Av, Bv, Cv = StridedView(A), StridedView(B), StridedView(C)
 
 # `--shape MR,NR,W` names a menu kernel shape (e.g. `8,6,4`, the AVX2 Float64
@@ -106,7 +138,7 @@ end
 # ---------------------------------------------------------------------------
 # Plan report
 # ---------------------------------------------------------------------------
-println("case = $CASE  expr = $EXPR  dim = $DIM  T = $T")
+println("case = $CASE  expr = $EXPR  dim = $DIM  T = $T  nothp = $NOTHP  pad = $PAD")
 println("A labels ", join(LA), " strides ", strides(Av))
 println("B labels ", join(LB), " strides ", strides(Bv))
 println("C labels ", join(LC), " strides ", strides(Cv))
@@ -117,7 +149,7 @@ for (name, g, ops) in (("M", plan.mgroup, "(A,C)"), ("N", plan.ngroup, "(B,C)"),
     println("$name group $ops: lengths=", g.lengths, " strides=", g.strides, "  Q=", axis_length(g), "  ramp=", affine_ramp(g)[1])
 end
 flops = 2.0 * axis_length(plan.mgroup) * axis_length(plan.ngroup) * axis_length(plan.kgroup)
-println("flops = ", flops, "  bytes(A+B+C) = ", sizeof(A) + sizeof(B) + sizeof(C))
+println("flops = ", flops, "  bytes(A+B+C) = ", (length(A) + length(B) + length(C)) * sizeof(T))
 
 # ---------------------------------------------------------------------------
 # Instrumented nest (copy of `_execute_nest!`, timers added, nothing else)
