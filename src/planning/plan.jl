@@ -81,9 +81,9 @@ labels inside the M composite (A's free labels) and the N composite (B's free
 labels) are each stable-sorted by `abs(stride)` of the label's axis *in `C`*,
 ascending, ties keeping the operand's own axis order -- so each composite is
 enumerated with `C`'s fastest axis fastest, whatever A's or B's layout is. The
-K composite is stable-sorted by `abs(stride)` in whichever of `A`/`B` has the
-smaller minimum K stride (ties: the operand with the larger free extent, then
-`A`), so the operand in which K is the inner group walks it contiguously (see
+K composite keeps `indA` order unless a cost model of the two packs (page-
+crossing K walks, cache lines refetched once the lines in flight exceed L2)
+prefers the order sorted by `abs(stride)` in `A` or in `B` (see
 `_order_contract_labels`). Then, if the sorted M list does *not* begin
 with a unit-stride run of at least `mr(kernel)` elements in `C` while the sorted
 N list does, the operand roles are swapped: `B` feeds M and `A` feeds N, and
@@ -176,9 +176,10 @@ function plan_contract(
     Qm = axis_length(mgroup)
     Qn = axis_length(ngroup)
 
-    # The K order is decided by A's and B's layouts (`_order_contract_labels`,
-    # src/planning/labels.jl); it needs the free extents only as a tie-break.
-    korder = _order_contract_labels(klabels, indA, A, indB, B, Qm, Qn)
+    # The K order is decided by a cost model of the two packs
+    # (`_order_contract_labels`, src/planning/labels.jl), which needs each
+    # operand's free-label order (whole-line slivers or not) and free extent.
+    korder = _order_contract_labels(klabels, indA, A, morder, indB, B, norder, Qm, Qn)
     kgroup = _build_pair_group(korder, indA, A, indB, B)  # maps: (A, B)
 
     Qk = axis_length(kgroup)
