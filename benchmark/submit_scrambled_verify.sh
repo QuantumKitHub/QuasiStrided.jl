@@ -23,8 +23,11 @@
 # nothing on Intel), and intensli_7 at dims 12 and 24 fine on all three, so
 # the variants discriminate between causes:
 #   dim 12 / 24     non-power-of-two controls (dim 24 has 8x the pages of 16)
-#   --pad 1         dim 16 extents, A/C first axis padded to 17: no stride is
-#                   a power of two (cache-set / DRAM-bank aliasing)
+#   --pad 1         dim 16 extents, every A/C axis padded to 17 in the parent:
+#                   no stride is a multiple of 4 KB (set aliasing). On
+#                   ccqlin038 this is THE lever: intensli_7_dim24 pack A 52 ->
+#                   6.3 ns/elem, 0.42 -> 0.08 s (dims 24 and 32 alias there,
+#                   16 does not -- the trigger dims are machine-specific)
 #   --nothp 1       A/C on 4 KB pages only (TLB reach; THP state printed below)
 #   --msplit-pos 2  8 elements of A's unit-stride axis enumerated right after
 #                   C's leading run: pack A reuses each line from L1 instead of
@@ -83,11 +86,17 @@ stage() {
         stage --case "$case" --dim 12
         stage --case "$case" --dim 24
     done
-    # Pack-A walk in isolation at the Rome tile on other shapes of the same
-    # expression: dim 32 (power of two again, 8x the data of dim 16).
     stage --case intensli_7 --dim 32
     stage --case intensli_7 --dim 32 --pad 1
 } | tee "$OUTDIR/intensli_stage_breakdown.txt"
+
+echo "=== part 3: pack-A walk alone, aligned vs padded strides, sliver vs K-outer order ==="
+for dim in 16 20 24 28 32; do
+    for pad in 0 1; do
+        "$JULIA" --project=benchmark benchmark/probes/probe_pack_order.jl \
+            --case intensli_7 --dim "$dim" --pad "$pad" --reps 5 2>&1 | grep -v "^WARNING"
+    done
+done | tee "$OUTDIR/intensli_pack_order.txt"
 
 echo "=== node check ==="
 echo "SLURM_JOB_NODELIST = ${SLURM_JOB_NODELIST:-?}"

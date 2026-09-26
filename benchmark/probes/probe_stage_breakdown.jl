@@ -83,14 +83,15 @@ if NOTHP
     A = copyto!(smallpage_array(T, size(A)), A)
     C = fill!(smallpage_array(T, size(C)), zero(T))
 end
-# `--pad P` stores A (and C) with the first axis padded to `DIM + P` in the
-# parent, so no stride is a power of two (a power-of-two `--dim` otherwise
-# puts every axis at a 2^k stride: cache-set / DRAM-bank aliasing test).
+# `--pad P` stores A (and C) in a parent with EVERY axis padded to `DIM + P`,
+# so no stride is a multiple of 4 KB (at a power-of-two or 24 `--dim` the
+# plain layout puts A's outer strides at 4 KB multiples: cache-set / slice /
+# DRAM-bank aliasing test; padding one axis leaves the outer strides aligned).
 const PAD = argopt("pad", 0)
 function padded(X::Array{T}) where {T}
-    pdims = (size(X, 1) + PAD, Base.tail(size(X))...)
+    pdims = size(X) .+ PAD
     P = NOTHP ? fill!(smallpage_array(T, pdims), zero(T)) : zeros(T, pdims)
-    V = view(P, 1:size(X, 1), ntuple(_ -> Colon(), ndims(X) - 1)...)
+    V = view(P, map(n -> 1:n, size(X))...)
     copyto!(V, X)
     return V
 end
