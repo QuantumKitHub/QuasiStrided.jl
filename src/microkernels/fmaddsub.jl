@@ -355,7 +355,7 @@ function Base.accumulate(
         packed_a::PA, packed_b::PB, kc::Int
     ) where {MR, NR, T, W, R, NA, PA, PB}
     kc == 0 && return acc
-    kc > 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
+    kc > 0 || _throw_negative_kc(:accumulate, kc)
     @inbounds for p in 0:(kc - 1)
         acc = _accumulate_step_fmaddsub(kernel, acc, packed_a, packed_b, p)
     end
@@ -431,6 +431,12 @@ Same contract as every other kernel's `store_tile!`: `C = alpha*R + beta*C`
 over the valid rectangle only, `alpha == 0` never reads `acc`, `beta == 0`
 never reads old `C`, padding lanes are never read, an empty destination is a
 no-op. Reads the interleaved accumulator exactly as 1m's does.
+
+Deliberately NOT `@inline`, unlike the real and planar `store_tile!`: this
+kernel has only a scalar (per-element) store, ~64 `_axpby_tile!` calls at
+`(8,8)`, and inlining it was measured to cost time rather than save it
+(ComplexF64 16^3, tiles 1210 -> 1596 ns), presumably from the code growth,
+while the accumulator spill it would avoid is small next to the scalar stores.
 """
 function store_tile!(
         destination::QSTile, acc::NTuple{NV, Vec{W, R}},

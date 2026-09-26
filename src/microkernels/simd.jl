@@ -138,7 +138,7 @@ such as a `Vector` or unit-range `view`. `packed_a` may also be an
         packed_a::PA, packed_b::PB, kc::Int
     ) where {MR, NR, T, W, NV, PA, PB}
     kc == 0 && return acc
-    kc > 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
+    kc > 0 || _throw_negative_kc(:accumulate, kc)
     @inbounds for p in 0:(kc - 1)
         acc = _accumulate_step(kernel, acc, packed_a, packed_b, p)
     end
@@ -269,6 +269,7 @@ end
         )
     end
     return quote
+        Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
         # zero-based address at (i=0, j=0)'s row contribution; rows are
@@ -291,8 +292,20 @@ dense storage (`Vector`, `Memory`, ...) get vector load/store for whole
 valid rectangle); see [`_vector_store_eligible`](@ref) for exactly which
 storage qualifies. Otherwise falls back to the scalar path, one lane at a
 time. Empty destination is a no-op.
+
+`@inline`, and so is the vectorized store body: left to the inliner's cost
+model this call was made out of line, which forces the whole accumulator (12
+zmm at `(16,6,8)`) through the stack -- a spill after the K loop and a reload
+inside the store -- on every micro-tile. Inlined, the accumulator stays in
+registers from the last FMA to the `vstore`. Measured 2026-09-26 (ccqlin038,
+Cascade Lake, together with moving the prologue's throws out of line): the
+fixed per-tile cost of a 16x6 Float64 tile in `execute!` fell from ~37 to
+~26 ns, and a 128^3 matmul's tile phase from 56 to 47 us. The scattered store
+stays out of line: it is scalar per element (~160 ns per full tile), so the
+spill it forces is noise, while inlining it grows the tile function by ~4000
+instructions.
 """
-function store_tile!(
+@inline function store_tile!(
         destination::QSTile, acc::NTuple{NV, Vec{W, T}},
         alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, NV}

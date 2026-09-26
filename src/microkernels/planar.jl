@@ -239,7 +239,7 @@ function Base.accumulate(
         packed_a::PA, packed_b::PB, kc::Int
     ) where {MR, NR, T, W, R, NA, PA, PB}
     kc == 0 && return acc
-    kc > 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
+    kc > 0 || _throw_negative_kc(:accumulate, kc)
     @inbounds for p in 0:(kc - 1)
         acc = _accumulate_step_planar(kernel, acc, packed_a, packed_b, p)
     end
@@ -570,6 +570,7 @@ end
     end
 
     return quote
+        Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
         # zero-based element address at (i=0, j=0)'s row contribution; rows are
@@ -619,8 +620,13 @@ in the general-`beta` regime -- the fallback itself is not bit-reproducible
 against ITSELF across call sites there (LLVM inconsistently fuses Base's
 `muladd(::Complex,::Complex,::Complex)`; see the divergence measurement
 above). Compare the general-`beta` case with a tolerance, never `==`.
+
+`@inline`, with the vectorized store body, for the reason given at the real
+`store_tile!` (src/microkernels/simd.jl): an out-of-line store spills the
+whole two-plane accumulator to the stack on every micro-tile. The scalar
+fallback stays out of line, as the real path's does.
 """
-function store_tile!(
+@inline function store_tile!(
         destination::QSTile, acc::NTuple{NA, Vec{W, R}},
         alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NA}

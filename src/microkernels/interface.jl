@@ -155,12 +155,13 @@ pack_b!(
     pack_b!(packed, source, kernel.descriptor, transform)
 
 # Same forwarding for the bounds-check-skipping siblings (src/packing/pack.jl), with
-# the same per-argument type parameters for the same reason.
-unsafe_pack_a!(
+# the same per-argument type parameters for the same reason. `@inline`, like
+# the functions they forward to: these are the driver's per-sliver entry points.
+@inline unsafe_pack_a!(
     packed::V, source::QSTile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
     unsafe_pack_a!(packed, source, kernel.descriptor, transform)
-unsafe_pack_b!(
+@inline unsafe_pack_b!(
     packed::V, source::QSTile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
     unsafe_pack_b!(packed, source, kernel.descriptor, transform)
@@ -249,6 +250,22 @@ end
     )
 )
 
+# GUARDRAIL: every throw reachable from the per-tile prologue lives behind
+# one of these `@noinline` helpers, never as an inline
+# `throw(ArgumentError("...$m..."))`. An inline interpolated message pulls
+# `print_to_string` -- and with it a GC frame and ~1 KB of stack -- into the
+# hot tile function, which is entered once per micro-tile (measured 2026-09-26,
+# ccqlin038: the K=1 outer-product suite cases spend ~37 ns per 16x6 Float64
+# tile of pure fixed cost, of which this frame setup and the out-of-line store
+# call below are the two avoidable parts).
+@noinline _throw_tile_extent(which::Symbol, got::Int, limit::Int) = throw(
+    ArgumentError(
+        "destination valid $which extent $got exceeds $(which === :row ? "mr" : "nr")(kernel) = $limit"
+    )
+)
+@noinline _throw_negative_kc(where::Symbol, kc::Int) =
+    throw(ArgumentError("$where requires kc >= 0, got kc = $kc"))
+
 # `execute_tile!`'s validation sequence, in this order:
 # destination extent vs. kernel shape, `kc >= 0`, the alpha/beta converts, the
 # empty short-circuit, storage bounds BEFORE any `@inbounds` path,
@@ -275,9 +292,9 @@ end
     ) where {MR, NR, T, K <: DescriptorKernel{MR, NR, T}, PA, PB, BOUNDS}
     m = nrows(destination)
     n = ncols(destination)
-    m <= MR || throw(ArgumentError("destination valid row extent $m exceeds mr(kernel) = $MR"))
-    n <= NR || throw(ArgumentError("destination valid column extent $n exceeds nr(kernel) = $NR"))
-    kc >= 0 || throw(ArgumentError("execute_tile! requires kc >= 0, got kc = $kc"))
+    m <= MR || _throw_tile_extent(:row, m, MR)
+    n <= NR || _throw_tile_extent(:column, n, NR)
+    kc >= 0 || _throw_negative_kc(:execute_tile!, kc)
 
     alphaT = convert(T, alpha)
     betaT = convert(T, beta)

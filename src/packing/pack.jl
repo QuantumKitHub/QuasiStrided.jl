@@ -44,23 +44,33 @@ end
 @inline _check_pack_a(packed::V, source::QSTile, kernel::K) where {V, K} =
     _check_pack_a(packed, source, kernel, Val(true))
 
+# The throws live behind `@noinline` helpers so that the packers -- entered
+# once per sliver -- carry no inline string formatting (and hence no GC frame);
+# see `_throw_tile_extent` in src/microkernels/interface.jl for the reason.
+@noinline _throw_pack_extent(which::Symbol, name::Symbol, got::Int, limit::Int) = throw(
+    ArgumentError(
+        "$(which)!: source $(name) count $got must satisfy 0 <= $got <= $(which === :pack_a ? "mr" : "nr")(kernel)=$limit"
+    )
+)
+@noinline _throw_pack_kc(which::Symbol, kc::Int) =
+    throw(ArgumentError("$(which)!: source K extent (kc) must be nonnegative, got $kc"))
+@noinline _throw_pack_short(which::Symbol, got::Int, need::Int, kc::Int) = throw(
+    DimensionMismatch(
+        "$(which)!: packed buffer has length $got, " *
+            "need at least packed_$(which === :pack_a ? "a" : "b")_length(kernel, kc=$kc) = $need"
+    )
+)
+
 @inline function _check_pack_a(
         packed::V, source::QSTile, kernel::K, ::Val{BOUNDS}
     ) where {V, K, BOUNDS}
     MR = mr(kernel)
     m = nrows(source)
     kc = ncols(source)
-    (0 <= m <= MR) ||
-        throw(ArgumentError("pack_a!: source row count m=$m must satisfy 0 <= m <= mr(kernel)=$MR"))
-    kc >= 0 || throw(ArgumentError("pack_a!: source column count (kc) must be nonnegative, got $kc"))
+    (0 <= m <= MR) || _throw_pack_extent(:pack_a, :row, m, MR)
+    kc >= 0 || _throw_pack_kc(:pack_a, kc)
     needed = packed_a_length(kernel, kc)
-    length(packed) >= needed ||
-        throw(
-        DimensionMismatch(
-            "pack_a!: packed buffer has length $(length(packed)), " *
-                "need at least packed_a_length(kernel, kc=$kc) = $needed"
-        )
-    )
+    length(packed) >= needed || _throw_pack_short(:pack_a, length(packed), needed, kc)
     kc == 0 && return (m, 0)
     BOUNDS && checked_tile_storage_bounds(source)
     return (m, kc)
@@ -75,17 +85,10 @@ end
     NR = nr(kernel)
     kc = nrows(source)
     n = ncols(source)
-    kc >= 0 || throw(ArgumentError("pack_b!: source row count (kc) must be nonnegative, got $kc"))
-    (0 <= n <= NR) ||
-        throw(ArgumentError("pack_b!: source column count n=$n must satisfy 0 <= n <= nr(kernel)=$NR"))
+    kc >= 0 || _throw_pack_kc(:pack_b, kc)
+    (0 <= n <= NR) || _throw_pack_extent(:pack_b, :column, n, NR)
     needed = packed_b_length(kernel, kc)
-    length(packed) >= needed ||
-        throw(
-        DimensionMismatch(
-            "pack_b!: packed buffer has length $(length(packed)), " *
-                "need at least packed_b_length(kernel, kc=$kc) = $needed"
-        )
-    )
+    length(packed) >= needed || _throw_pack_short(:pack_b, length(packed), needed, kc)
     kc == 0 && return (n, 0)
     BOUNDS && checked_tile_storage_bounds(source)
     return (n, kc)
@@ -145,8 +148,11 @@ any of them -- an exactly equivalent test, because the block's slivers
 partition its offset buffer and all of them share the same K axis, so the
 block's offset range is the union of the slivers' and the check only ever
 looks at range extremes.
+
+`@inline` (as is `unsafe_pack_b!`): the driver calls these once per sliver,
+and out of line each call marshals the `QSTile` through the stack.
 """
-function unsafe_pack_a!(
+@inline function unsafe_pack_a!(
         packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F
     ) where {V, MR, NR, T2, FA, FB, F}
@@ -178,7 +184,7 @@ B-side counterpart of [`unsafe_pack_a!`](@ref), with the same precondition
 (the caller has validated every address `source` can read) and the same single
 caller in this package.
 """
-function unsafe_pack_b!(
+@inline function unsafe_pack_b!(
         packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F
     ) where {V, MR, NR, T2, FA, FB, F}
