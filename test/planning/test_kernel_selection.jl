@@ -33,15 +33,29 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
         @test default_blocking(Float32) === _fallback_blocking(Float32)
     end
 
-    @testset "derivation rule: MR = 2W, NR = NR_DEFAULT, NV = 12" begin
-        # NV = 12 everywhere keeps the rule safe on a 16-register AVX2 machine
-        # and on Julia 1.10, and it is also the measured optimum.
-        for (isakey, vb) in ((:avx512, 64), (:avx2, 32)), T in (Float64, Float32)
+    @testset "derivation rule: MR = MV*W, NR = NR_DEFAULT; MV = 4 on :avx512, 2 on :avx2" begin
+        # NV = 12 on AVX2 is what its 16 registers hold (12 + 2 A + 2 spare);
+        # AVX-512's 32 registers hold the MV = 4 tile (24 + 4 + 2), and the
+        # MV = 2 tile is front-end bound there (see `_rule_mv`).
+        for (isakey, vb, MV) in ((:avx512, 64, 4), (:avx2, 32, 2)), T in (Float64, Float32)
             MR, NR, W = _derived_shape(synthetic(isakey, vb), T)
             @test W == vb ÷ sizeof(T)
-            @test (MR, NR) == (2 * W, NR_DEFAULT)
-            @test (MR ÷ W) * NR == 12
+            @test (MR, NR) == (MV * W, NR_DEFAULT)
+            @test (MR ÷ W) * NR == 6 * MV
             @test MR % W == 0   # the packing/kernel contract
+            @test QuasiStrided._rule_mv(Val(isakey), RealMethod()) == MV
+        end
+        # The multiplier is a REAL-method, AVX-512-only refinement: every
+        # complex method keeps the validated MV = 2 rule shape.
+        for m in (PlanarMethod(), OneMMethod(), QuasiStrided.FMAddSubMethod())
+            @test QuasiStrided._rule_mv(Val(:avx512), m) == 2
+            @test QuasiStrided._rule_mv(Val(:avx2), m) == 2
+        end
+        # The default `mv` of `_rule_shape` is the unrefined rule.
+        for T in (Float64, Float32)
+            W = 64 ÷ sizeof(T)
+            @test QuasiStrided._rule_shape(64, T) === (2 * W, NR_DEFAULT, W)
+            @test QuasiStrided._rule_shape(64, T, 4) === (4 * W, NR_DEFAULT, W)
         end
         # On AVX2 the rule coincides with the fallback shape.
         @test _derived_shape(synthetic(:avx2, 32), Float64) === (8, 6, 4)
@@ -72,8 +86,11 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
                 @test _shape_override(Val(key), T) === nothing
             end
             W = 64 ÷ sizeof(T)
-            @test _derived_shape(synthetic(:avx512, 64), T) === (2 * W, NR_DEFAULT, W)
+            @test _derived_shape(synthetic(:avx512, 64), T) === (4 * W, NR_DEFAULT, W)
             @test _derived_shape(synthetic(:avx512, 64), T) in kernel_shapes(T)
+            # The MV = 2 sibling stays in the menu: it is the short-M
+            # step-down target and a `_demote_for_run` candidate.
+            @test (2 * W, NR_DEFAULT, W) in kernel_shapes(T)
         end
     end
 
@@ -113,6 +130,43 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
             small = _default_kernel(T, 1, 256)                # Qm < MR demotes
             @test (mr(small), nr(small), lanewidth(small)) === _fallback_shape(T)
             @test mr(_default_kernel(T, 0, 256)) == MR        # empty must not demote
+        end
+    end
+
+    @testset "_extent_shape: the MV = 4 real shape steps down to MV = 2 where it pads less" begin
+        ext = QuasiStrided._extent_shape
+        for T in (Float64, Float32)
+            p = synthetic(:avx512, 64)
+            tall = _derived_shape(p, T)
+            MR, NR, W = tall
+            @test MR == 4 * W
+            half = (2 * W, NR, W)
+            @test half in kernel_shapes(T)
+            @test ext(p, T, RealMethod(), 0) === tall            # empty: no step-down
+            for Qm in (1, 2 * W - 1, 2 * W, MR - 1)               # below one tall tile
+                @test ext(p, T, RealMethod(), Qm) === half
+            end
+            @test ext(p, T, RealMethod(), MR) === tall            # exactly one tall tile
+            for Qm in (MR + 1, MR + W, MR + 2 * W)                # (MR, 3MR/2]: half pads less
+                @test ext(p, T, RealMethod(), Qm) === half
+            end
+            for Qm in (MR + 2 * W + 1, 2 * MR - 1, 2 * MR, 2 * MR + 1, 3 * MR + W, 100 * MR)
+                @test ext(p, T, RealMethod(), Qm) === tall        # equal padding or >= 2 MR
+            end
+            # Through `_default_kernel` on the live host: only when the host's
+            # derived shape IS the tall one does the step-down apply; below
+            # `2W` the fitted-shape demotion still wins.
+            hostshape = _derived_shape(target_profile(), T)
+            if hostshape === tall
+                @test (mr(_default_kernel(T, MR + W, 256)), nr(_default_kernel(T, MR + W, 256))) == (2 * W, NR)
+                @test mr(_default_kernel(T, 2 * W, 256)) == 2 * W
+                @test mr(_default_kernel(T, 2 * W - 1, 256)) == _fallback_shape(T)[1]
+                @test mr(_default_kernel(T, 2 * MR, 256)) == MR
+            end
+            # Never below MV = 2, and complex methods are untouched.
+            avx2 = synthetic(:avx2, 32)
+            @test ext(avx2, T, RealMethod(), 3) === _derived_shape(avx2, T)
+            @test ext(p, ComplexF64, PlanarMethod(), 3) === _derived_shape(p, ComplexF64, PlanarMethod())
         end
     end
 end
@@ -208,10 +262,11 @@ end
         @test _shape_override(Val(key), T) === nothing
     end
     # The REAL rule is separate: a real element type reaches the real
-    # `_derived_shape` method, unaffected by the complex one.
+    # `_derived_shape` method, unaffected by the complex one (and carries the
+    # real-only MV = 4 refinement).
     for T in (Float64, Float32)
         W = 64 ÷ sizeof(T)
-        @test _derived_shape(synthetic(:avx512, 64), T) === (2 * W, NR_DEFAULT, W)
+        @test _derived_shape(synthetic(:avx512, 64), T) === (4 * W, NR_DEFAULT, W)
     end
 end
 
