@@ -55,10 +55,16 @@ end
     for (indA, indB, indC) in cases
         got = QS._classify_labels(indA, indB, indC)
         want = _ref_classify(indA, indB, indC)
-        @test got == want
+        # Statically sized tuples, one per composite, with the ranks fixed by
+        # the label tuples' lengths (`_group_ranks`); same labels, same order.
+        @test map(collect, got) == want
+        @test all(l -> l isa Tuple{Vararg{Int}}, got)
+        @test isconcretetype(typeof(got))
         # Trimmed to the real counts, not left at their `NA`/`NB` worst case.
         @test length(got[1]) + length(got[3]) == length(indA)
         @test length(got[2]) + length(got[3]) == length(indB)
+        @test (length(got[1]), length(got[2]), length(got[3])) ==
+            QS._group_ranks(length(indA), length(indB), length(indC))
     end
 
     # Rejections.
@@ -77,20 +83,20 @@ end
         indC = ntuple(identity, nd)
         st = Base.strides(C)
         labels = shuffle(collect(indC))[1:rand(1:nd)]
-        got = QS._order_free_labels(labels, indC, C)
+        got = QS._order_free_labels(Tuple(labels), indC, C)
         want = labels[sortperm([abs(st[l]) for l in labels]; alg = Base.Sort.DEFAULT_STABLE)]
-        @test got == want
-        # Never mutates its input (planning/test_plan_contract.jl's label-order pinning reads
-        # `_classify_labels`'s output after ordering it).
-        @test length(got) == length(labels)
+        @test collect(got) == want
+        # Same statically sized tuple type in as out (planning/test_plan_contract.jl's
+        # label-order pinning reads `_classify_labels`'s output after ordering it).
+        @test got isa NTuple{length(labels), Int}
     end
 
     # Ties keep input order, explicitly: a size-1 axis of a square array gives
     # equal |stride| only when the strides really are equal, so build the tie
     # by hand with a 1-element axis.
     C = StridedView(randn(1, 1, 3))
-    @test QS._order_free_labels([2, 1], (1, 2, 3), C) == [2, 1]
-    @test QS._order_free_labels([1, 2], (1, 2, 3), C) == [1, 2]
+    @test QS._order_free_labels((2, 1), (1, 2, 3), C) === (2, 1)
+    @test QS._order_free_labels((1, 2), (1, 2, 3), C) === (1, 2)
 end
 
 @testset "per-call floor: _build_pair_group matches a direct construction" begin
@@ -111,7 +117,9 @@ end
         )
         v2 = StridedView(randn(dims2))
 
-        g = QS._build_pair_group(labels, ind1, v1, ind2, v2)
+        # The label tuple's length IS the rank (`_group_ranks`), so the group
+        # type is concrete without any runtime rank ladder.
+        g = QS._build_pair_group(Tuple(labels), ind1, v1, ind2, v2)
         s1 = Base.strides(v1)
         s2 = Base.strides(v2)
         p1 = ntuple(d -> findfirst(==(labels[d]), ind1)::Int, shared)
@@ -121,15 +129,18 @@ end
         @test g.strides[2] == ntuple(d -> s2[p2[d]], shared)
         @test g isa AxisGroup{shared, 2}
         @test isconcretetype(typeof(g))
+        @test Base.return_types(
+            QS._build_pair_group, (typeof(Tuple(labels)), typeof(ind1), typeof(v1), typeof(ind2), typeof(v2))
+        ) == [AxisGroup{shared, 2}]
     end
 
     # A matched label whose lengths disagree is still a DimensionMismatch.
     v1 = StridedView(randn(3, 4))
     v2 = StridedView(randn(5, 4))
-    @test_throws DimensionMismatch QS._build_pair_group([1], (1, 2), v1, (1, 2), v2)
+    @test_throws DimensionMismatch QS._build_pair_group((1,), (1, 2), v1, (1, 2), v2)
 
     # Rank zero is reachable and well formed (an outer product's K group).
-    g0 = QS._build_pair_group(Int[], (1, 2), v1, (1, 2), v2)
+    g0 = QS._build_pair_group((), (1, 2), v1, (1, 2), v2)
     @test g0 isa AxisGroup{0, 2}
     @test axis_length(g0) == 1
 end

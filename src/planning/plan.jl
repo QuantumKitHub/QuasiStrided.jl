@@ -130,6 +130,70 @@ function plan_contract(
         allocator = TO.DefaultAllocator(),
         oracle::Bool = true
     ) where {NA, NB, NC}
+    return _planned(
+        identity, C, A, indA, B, indB, indC,
+        kernel, conjA, conjB, mc, kc, nc, workspace, allocator, oracle
+    )
+end
+
+# Everything `_plan_contract` needs that is already concretely typed BEFORE
+# the kernel is known: the continuation, the three groups (their ranks are
+# fixed by the label tuples' lengths, so `GM`/`GN`/`GK` are concrete), the
+# operand storage/base pairs, the leading unit-stride run of the chosen M
+# composite (for `_demote_for_run`), the blocking overrides and the
+# workspace/allocator choice. One value, so the kernel-resolution ladder
+# (`_plan_with_kernel`) forwards a single argument, and so the swapped and
+# as-is orientations differ only in how it is filled.
+#
+# `T` is a phantom parameter (the storage element type, `eltype(C)`), carried
+# so the barrier can check the kernel against it without re-deriving it.
+struct _PlanRequest{
+        T, F, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
+        WS <: Union{Nothing, ContractWorkspace}, AL,
+    }
+    f::F
+    mgroup::GM
+    ngroup::GN
+    kgroup::GK
+    Astorage::SA
+    Abase::Int
+    Bstorage::SB
+    Bbase::Int
+    Cstorage::SC
+    Cbase::Int
+    run::Int
+    mc::Union{Int, Nothing}
+    kc::Union{Int, Nothing}
+    nc::Union{Int, Nothing}
+    workspace::WS
+    allocator::AL
+    oracle::Bool
+end
+
+@inline function _plan_request(
+        ::Type{T}, f::F, mgroup::GM, ngroup::GN, kgroup::GK,
+        Astorage::SA, Abase::Int, Bstorage::SB, Bbase::Int, Cstorage::SC, Cbase::Int,
+        run::Int, mc, kc, nc, workspace::WS, allocator::AL, oracle::Bool
+    ) where {T, F, GM, GN, GK, SA, SB, SC, WS, AL}
+    return _PlanRequest{T, F, GM, GN, GK, SA, SB, SC, WS, AL}(
+        f, mgroup, ngroup, kgroup, Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
+        run, mc, kc, nc, workspace, allocator, oracle
+    )
+end
+
+# `plan_contract`'s body, with a continuation: `f(plan)` is applied INSIDE the
+# `_plan_contract` barrier, where the plan's type is concrete, and its result
+# returned. `plan_contract` passes `identity`; the TensorOperations adapter
+# (src/integrations/tensoroperations.jl) passes an executor, so that the plan
+# is built and consumed in one concretely typed frame. Positional throughout:
+# this is the hot path, and the keyword handling is `plan_contract`'s job.
+function _planned(
+        f::F, C::StridedView, A::StridedView, indA::NTuple{NA, Int},
+        B::StridedView, indB::NTuple{NB, Int}, indC::NTuple{NC, Int},
+        kernel, conjA::Bool, conjB::Bool,
+        mc::Union{Int, Nothing}, kc::Union{Int, Nothing}, nc::Union{Int, Nothing},
+        workspace::Union{Nothing, ContractWorkspace}, allocator, oracle::Bool
+    ) where {F, NA, NB, NC}
     T = eltype(C)
     eltype(A) === T ||
         throw(ArgumentError("eltype(A) = $(eltype(A)) does not match eltype(C) = $T"))
@@ -152,6 +216,9 @@ function plan_contract(
     atransform = _qs_isconj(A, conjA) ? conj : identity
     btransform = _qs_isconj(B, conjB) ? conj : identity
 
+    # Statically sized label tuples (src/planning/labels.jl): the three
+    # composite ranks follow from `NA`/`NB`/`NC`, so the groups built below
+    # are concretely typed and nothing here allocates.
     mlabels, nlabels, klabels = _classify_labels(indA, indB, indC)
 
     # C's layout, not A's/B's, decides the order within each composite.
@@ -175,62 +242,106 @@ function plan_contract(
     Qn = axis_length(ngroup)
     Qk = axis_length(kgroup)
 
-    # Resolved here, not in the signature default: the demotion needs Qm, and
-    # Qm depends on the orientation, so both candidates are resolved.
-    # Nothing between the eltype checks and here reads `kernel`.
-    kernel_asis = kernel === nothing ? _default_kernel(T, Qm, Qn) : kernel
-    kernel_swapped = kernel === nothing ? _default_kernel(T, Qn, Qm) : kernel
+    # The register width each orientation would run at (`_candidate_mrs`):
+    # only this much of the kernel choice is needed here, for the swap
+    # decision. The kernel itself is resolved by `_plan_with_kernel`, after
+    # the orientation is fixed -- and resolved as a `(shape, method)` value,
+    # not a kernel object, so no menu-wide Union is ever held in this frame.
+    mr_asis, mr_swapped = _candidate_mrs(T, kernel, Qm, Qn)
 
     # The swap is for real element types only. Extending it to complex
     # kernels, which now also have a vectorized store, is a deliberately
     # deferred, unmeasured follow-up. Real kernels (`SIMDKernel` and
     # `ScalarKernel`) keep it. Uses the precomputed `run_m`/`run_n` directly.
-    if T <: Real && _prefer_swap(run_m, run_n, mr(kernel_asis), mr(kernel_swapped))
+    if T <: Real && _prefer_swap(run_m, run_n, mr_asis, mr_swapped)
         # B takes the M role and A the N role. Everything operand-bound moves
         # together: the groups (each already carries its own C map), the K
         # group's two maps, the storage/base pair `_plan_contract` reads off
-        # its A/B arguments, and the packing transforms. The contraction is
-        # unchanged: `*` commutes on `T` and `conj` is elementwise, so
-        # `sum_k conj?(B[n,k]) * conj?(A[m,k])` is the same sum.
+        # the request's A/B fields, the run length the demotion is keyed on
+        # (N's own, i.e. the CHOSEN M orientation's) and the packing
+        # transforms. The contraction is unchanged: `*` commutes on `T` and
+        # `conj` is elementwise, so `sum_k conj?(B[n,k]) * conj?(A[m,k])` is
+        # the same sum.
         kgroup_swapped = _build_pair_group(klabels, indB, B, indA, A)  # maps: (B, A)
-        # Run-length demotion (see `_demote_for_run`): only for an auto-selected
-        # kernel, keyed on the CHOSEN (post-swap) M orientation, i.e. N's own
-        # run against the kernel it would actually run.
-        kernel_final = kernel === nothing ?
-            _demote_for_run(T, kernel_swapped, run_n, Qn, Qk) :
-            kernel_swapped
-        return _plan_contract(
-            C, B, A, indC, ngroup, mgroup, kgroup_swapped, Qn, Qm, Qk,
-            kernel_final, btransform, atransform, mc, kc, nc, workspace, allocator, oracle
+        req_swapped = _plan_request(
+            T, f, ngroup, mgroup, kgroup_swapped,
+            parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
+            run_n, mc, kc, nc, workspace, allocator, oracle
         )
+        return _plan_with_kernel(kernel, btransform, atransform, req_swapped)
     end
-    kernel_final = kernel === nothing ?
-        _demote_for_run(T, kernel_asis, run_m, Qm, Qk) :
-        kernel_asis
-    return _plan_contract(
-        C, A, B, indC, mgroup, ngroup, kgroup, Qm, Qn, Qk,
-        kernel_final, atransform, btransform, mc, kc, nc, workspace, allocator, oracle
+    req = _plan_request(
+        T, f, mgroup, ngroup, kgroup,
+        parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
+        run_m, mc, kc, nc, workspace, allocator, oracle
     )
+    return _plan_with_kernel(kernel, atransform, btransform, req)
 end
 
-# Function barrier: the small Unions from `_default_kernel` and from the
-# `conj`/`identity` transforms die here, so `ContractPlan`'s `Kern`, `TA` and
-# `TB` are concrete and `execute!` sees no abstract type. `TA`/`TB` each get
-# their own bound parameter for the same reason `K` does.
+# `mr` of the kernel each orientation would run: the as-is one at `(Qm, Qn)`
+# and the swapped one at `(Qn, Qm)`. A caller-named kernel runs either way;
+# an automatic one is `_default_shape`'s pick, whose two candidates differ
+# only when the small-M demotion applies to one orientation. The swapped
+# candidate is resolved for a real `T` only, the only `T` that can swap.
+@inline _candidate_mrs(::Type{T}, kernel, Qm::Int, Qn::Int) where {T} = (mr(kernel), mr(kernel))
+@inline function _candidate_mrs(::Type{T}, ::Nothing, Qm::Int, Qn::Int) where {T}
+    mr_asis = _default_shape(T, Qm, Qn)[1][1]
+    mr_swapped = T <: Real ? _default_shape(T, Qn, Qm)[1][1] : mr_asis
+    return mr_asis, mr_swapped
+end
+
+# Kernel resolution, the last step before the barrier. A caller-named kernel
+# goes straight through, never demoted. An automatic one is chosen as a
+# `(shape, method)` value (`_default_shape`) and built INSIDE
+# `_with_menu_kernel`'s unrolled ladder, so that `_plan_demoted` -- and
+# through it `_demote_for_run` and `_plan_contract` -- always runs on a
+# concrete kernel type and every call below this line is static.
+#
+# Why not simply `_plan_contract(_default_kernel(T, Qm, Qn), ...)`: that
+# value's type is the Union of `T`'s whole menu, ten members for ComplexF64,
+# past the four Julia union-splits, so the barrier call became a
+# `jl_apply_generic` that boxed the request and -- for reasons this file does
+# not claim to understand -- missed the method cache more often than not.
+# Measured on ccqlin038 (Julia 1.12.7, 8x8x8 ComplexF64, pooled workspace):
+# `plan_contract` 0.78 us and 704 B/call with the Union-typed call; the same
+# tail with a concrete kernel 0.09 us and 0 B. Float64 was already static
+# (a two-member Union) and is unchanged by this.
+@inline _plan_with_kernel(kernel, atransform, btransform, req::_PlanRequest) =
+    _plan_contract(kernel, atransform, btransform, req)
+@inline function _plan_with_kernel(::Nothing, atransform, btransform, req::_PlanRequest{T}) where {T}
+    shape, method = _default_shape(T, axis_length(req.mgroup), axis_length(req.ngroup))
+    return _with_menu_kernel(_plan_demoted, shape, T, method, atransform, btransform, req)
+end
+
+# Run-length demotion (`_demote_for_run`) of an automatically chosen kernel,
+# keyed on the chosen M orientation's own run (`req.run`), then the barrier.
+@inline function _plan_demoted(kernel, atransform, btransform, req::_PlanRequest{T}) where {T}
+    kernel_final = _demote_for_run(
+        T, kernel, req.run, axis_length(req.mgroup), axis_length(req.kgroup)
+    )
+    return _plan_contract(kernel_final, atransform, btransform, req)
+end
+
+# Function barrier: the `conj`/`identity` transform Unions die here (and, on
+# the real path, `_demote_for_run`'s small kernel Union), so `ContractPlan`'s
+# `Kern`, `TA` and `TB` are concrete and `execute!` sees no abstract type.
+# `TA`/`TB` each get their own bound parameter for the same reason `K` does.
+# The continuation `req.f` runs in here rather than on the returned plan:
+# `f(plan)` sees a concrete plan type, so an executor passed as `f` needs no
+# further dispatch and no boxed plan.
 function _plan_contract(
-        C::StridedView, A::StridedView, B::StridedView, indC::NTuple{NC, Int},
-        mgroup, ngroup, kgroup, Qm::Int, Qn::Int, Qk::Int,
-        kernel::K, atransform::TA, btransform::TB,
-        mc::Union{Int, Nothing}, kc::Union{Int, Nothing},
-        nc::Union{Int, Nothing}, workspace::Union{Nothing, ContractWorkspace},
-        allocator, oracle::Bool
-    ) where {NC, K, TA, TB}
-    T = eltype(C)
+        kernel::K, atransform::TA, btransform::TB, req::_PlanRequest{T}
+    ) where {K, TA, TB, T}
     scalartype(kernel) === T ||
         throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match eltype(C) = $T"))
 
+    Qm = axis_length(req.mgroup)
+    Qn = axis_length(req.ngroup)
+    Qk = axis_length(req.kgroup)
+
     defaults = default_blocking(kernel)
     # Blocking's own constructor validates all three >= 1.
+    mc, kc, nc = req.mc, req.kc, req.nc
     requested = Blocking(
         mc === nothing ? defaults.mc : mc,
         kc === nothing ? defaults.kc : kc,
@@ -252,19 +363,13 @@ function _plan_contract(
 
     blocking = Blocking(mc_eff, kc_eff, nc_eff)
 
-    Astorage = parent(A)
-    Abase = offset(A)
-    Bstorage = parent(B)
-    Bbase = offset(B)
-    Cstorage = parent(C)
-    Cbase = offset(C)
-
     # Buffers are `undef`-initialized, not zeroed; see `ContractWorkspace`.
-    ws = _resolve_workspace(T, workspace, kernel, blocking, oracle, allocator)
+    ws = _resolve_workspace(T, req.workspace, kernel, blocking, req.oracle, req.allocator)
 
-    return ContractPlan(
-        kernel, mgroup, ngroup, kgroup, blocking,
-        Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
+    plan = ContractPlan(
+        kernel, req.mgroup, req.ngroup, req.kgroup, blocking,
+        req.Astorage, req.Abase, req.Bstorage, req.Bbase, req.Cstorage, req.Cbase,
         atransform, btransform, ws
     )
+    return req.f(plan)
 end

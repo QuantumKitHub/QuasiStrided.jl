@@ -39,13 +39,14 @@ const SPECIFIC_QS_BUCKETS = [
     (
         "planning",
         [
-            "plan_contract", "_plan_contract", "_classify_labels", "_order_free_labels",
-            "_prefer_swap", "_default_kernel", "_kernel_from_shape",
-            "default_blocking",
+            "plan_contract", "_planned", "_plan_contract", "_plan_with_kernel",
+            "_plan_demoted", "_with_menu_kernel", "_classify_labels", "_order_free_labels",
+            "_prefer_swap", "_default_kernel", "_default_shape", "_resolved_defaults",
+            "_kernel_from_shape", "default_blocking",
             # These would land in "planning" through the ancestor walk anyway
             # (`plan_contract` is their only caller); naming them makes the
             # attribution explicit and cannot change any classification.
-            "_build_pair_group", "_pair_group_rank", "_pair_group_static",
+            "_build_pair_group", "_candidate_mrs",
         ],
     ),
     ("packing", ["pack_a!", "pack_b!", "_pack_panel!", "_pack_a_contiguous!", "_pack_sliver!", "_pack_emit", "_check_pack_a", "_check_pack_b"]),

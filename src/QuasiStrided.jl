@@ -44,6 +44,8 @@ include("planning/labels.jl")
 include("planning/conjugation.jl")
 include("planning/kernel_selection.jl")
 include("planning/blocking.jl")
+# The per-(profile, eltype) cache the two files above feed; it needs `Blocking`.
+include("planning/defaults.jl")
 # `ContractPlan` holds a `ContractWorkspace`, so the workspace comes first.
 include("execution/workspace.jl")
 include("planning/plan.jl")
