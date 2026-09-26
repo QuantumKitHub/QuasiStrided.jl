@@ -81,7 +81,10 @@ labels inside the M composite (A's free labels) and the N composite (B's free
 labels) are each stable-sorted by `abs(stride)` of the label's axis *in `C`*,
 ascending, ties keeping the operand's own axis order -- so each composite is
 enumerated with `C`'s fastest axis fastest, whatever A's or B's layout is. The
-K composite keeps `indA` order. Then, if the sorted M list does *not* begin
+K composite is stable-sorted by `abs(stride)` in whichever of `A`/`B` has the
+smaller minimum K stride (ties: the operand with the larger free extent, then
+`A`), so the operand in which K is the inner group walks it contiguously (see
+`_order_contract_labels`). Then, if the sorted M list does *not* begin
 with a unit-stride run of at least `mr(kernel)` elements in `C` while the sorted
 N list does, the operand roles are swapped: `B` feeds M and `A` feeds N, and
 the K maps, the storage/base fields and the conjugation transforms move with
@@ -169,10 +172,15 @@ function plan_contract(
 
     mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
     ngroup = _build_pair_group(norder, indB, B, indC, C)  # maps: (B, C)
-    kgroup = _build_pair_group(klabels, indA, A, indB, B)  # maps: (A, B)
 
     Qm = axis_length(mgroup)
     Qn = axis_length(ngroup)
+
+    # The K order is decided by A's and B's layouts (`_order_contract_labels`,
+    # src/planning/labels.jl); it needs the free extents only as a tie-break.
+    korder = _order_contract_labels(klabels, indA, A, indB, B, Qm, Qn)
+    kgroup = _build_pair_group(korder, indA, A, indB, B)  # maps: (A, B)
+
     Qk = axis_length(kgroup)
 
     # Resolved here, not in the signature default: the demotion needs Qm, and
@@ -192,7 +200,7 @@ function plan_contract(
         # its A/B arguments, and the packing transforms. The contraction is
         # unchanged: `*` commutes on `T` and `conj` is elementwise, so
         # `sum_k conj?(B[n,k]) * conj?(A[m,k])` is the same sum.
-        kgroup_swapped = _build_pair_group(klabels, indB, B, indA, A)  # maps: (B, A)
+        kgroup_swapped = _build_pair_group(korder, indB, B, indA, A)  # maps: (B, A)
         # Run-length demotion (see `_demote_for_run`): only for an auto-selected
         # kernel, keyed on the CHOSEN (post-swap) M orientation, i.e. N's own
         # run against the kernel it would actually run.

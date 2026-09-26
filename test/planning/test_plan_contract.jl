@@ -813,3 +813,119 @@ end
         @test isapprox(C, Cref; rtol = 200 * d * eps(real(T)))
     end
 end
+
+# =====================================================================
+# Contracted-label order (`_order_contract_labels`)
+# =====================================================================
+
+# Labels: a=1 b=2 c=3 d=4 e=5, distinct extents so a wrong order shows up as a
+# wrong stride, not a coincidentally equal one.
+const _KO_EXT = Dict(1 => 7, 2 => 3, 3 => 4, 4 => 5, 5 => 6)
+_ko_array(::Type{T}, ind) where {T} = randn(T, Tuple(_ko_EXT_get(l) for l in ind)...)
+_ko_EXT_get(l) = _KO_EXT[l]
+_ko_stride(v, ind, l) = Base.strides(v)[findfirst(==(l), ind)]
+
+@testset "K order: sorted by stride in the operand where K is the inner group" begin
+    T = Float64
+    A = _ko_array(T, (1, 2, 3, 4))        # A[a,b,c,d]: M = a unit-stride, K = (b,c,d) ascending
+    Av = StridedView(A)
+    C = zeros(T, _KO_EXT[1], _KO_EXT[5])  # C[a,e]
+    Cv = StridedView(C)
+
+    # contract_scrambled: B[d,c,b,e]. K is B's inner group (min stride 1 < A's
+    # min K stride 7), so the order follows B: (d, c, b).
+    Bs = StridedView(_ko_array(T, (4, 3, 2, 5)))
+    plan = plan_contract(Cv, Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), (1, 5))
+    @test plan.kgroup.lengths == (5, 4, 3)
+    @test plan.kgroup.strides[1] == Tuple(_ko_stride(Av, (1, 2, 3, 4), l) for l in (4, 3, 2))
+    @test plan.kgroup.strides[2] == (1, 5, 20)
+    @test issorted(abs.(plan.kgroup.strides[2]))
+
+    # gemm_ready B[b,c,d,e] and b_permuted B[b,e,c,d]: B is still the inner
+    # operand and its K strides are already ascending in indA order, so the
+    # order is exactly the pre-rule (indA) order.
+    for indB in ((2, 3, 4, 5), (2, 5, 3, 4))
+        Bv = StridedView(_ko_array(T, indB))
+        p = plan_contract(Cv, Av, (1, 2, 3, 4), Bv, indB, (1, 5))
+        @test p.kgroup.lengths == (3, 4, 5)
+        @test p.kgroup.strides[1] == (7, 21, 84)
+        @test p.kgroup.strides[2] == Tuple(_ko_stride(Bv, indB, l) for l in (2, 3, 4))
+    end
+
+    # A transposed as well (A[d,c,b,a]): K is inner in BOTH, min strides tie
+    # at 1, extents tie-break (Qm = 7 > Qn = 6) -> A's order (d, c, b).
+    At = StridedView(_ko_array(T, (4, 3, 2, 1)))
+    Bg = StridedView(_ko_array(T, (2, 3, 4, 5)))
+    p = plan_contract(Cv, At, (4, 3, 2, 1), Bg, (2, 3, 4, 5), (1, 5))
+    @test p.kgroup.lengths == (5, 4, 3)
+    @test p.kgroup.strides[1] == (1, 5, 20)
+    @test p.kgroup.strides[2] == (12, 3, 1)
+    # ... and B's order (b, c, d) once N is the larger free extent.
+    Bbig = StridedView(randn(T, 3, 4, 5, 9))
+    Cbig = StridedView(zeros(T, 7, 9))
+    p = plan_contract(Cbig, At, (4, 3, 2, 1), Bbig, (2, 3, 4, 5), (1, 5))
+    @test p.kgroup.lengths == (3, 4, 5)
+    @test p.kgroup.strides[1] == (20, 5, 1)
+    @test p.kgroup.strides[2] == (1, 3, 12)
+
+    # A singleton K axis does not count as "inner": A[a,b,c,d] with b of
+    # length 1 at unit stride in B (B[b,d,c,e]) -- B's smallest NON-singleton
+    # K stride is 1 (d) anyway here, so the order follows B, but the singleton
+    # `b` is placed by its (irrelevant) stride and never decides the operand.
+    A1 = StridedView(randn(T, 7, 1, 4, 5))
+    B1 = StridedView(randn(T, 1, 5, 4, 6))
+    p = plan_contract(Cv, A1, (1, 2, 3, 4), B1, (2, 4, 3, 5), (1, 5))
+    @test p.kgroup.lengths[findfirst(==(1), p.kgroup.lengths)] == 1
+    @test p.kgroup.strides[2][end] == 5 || p.kgroup.strides[2][end] == 1  # d or the singleton b last
+    @test issorted(abs.(p.kgroup.strides[2]))
+
+    # Single K label: nothing to order.
+    p = plan_contract(StridedView(zeros(T, 3, 5)), StridedView(randn(T, 3, 4)), (1, 2), StridedView(randn(T, 4, 5)), (2, 3), (1, 3))
+    @test p.kgroup.strides == ((3,), (1,))
+
+    # The swapped orientation (B feeds M) uses the same K order with the maps
+    # exchanged: C stored as (e, a) with an N run of 8 >= mr = 8 swaps.
+    Ct = zeros(T, 8, 7)                    # C[e,a] physically; labels (5, 1)
+    B8 = StridedView(randn(T, 5, 4, 3, 8))  # B[d,c,b,e], e = 8
+    kernel = SIMDKernel(Val(8), Val(6), T)
+    pt = plan_contract(StridedView(Ct), Av, (1, 2, 3, 4), B8, (4, 3, 2, 5), (5, 1); kernel = kernel)
+    @test pt.Astorage === parent(B8)
+    @test pt.kgroup.lengths == (5, 4, 3)
+    @test pt.kgroup.strides[1] == (1, 5, 20)                    # B's map first
+    @test pt.kgroup.strides[2] == (84, 21, 7)                   # then A's
+end
+
+@testset "K order: correctness on scrambled K (all dtypes, alpha/beta, conj, both orientations, oracle)" begin
+    Random.seed!(0x5C7A_0B1E)
+    for T in (Float64, Float32, ComplexF64, ComplexF32)
+        rtol = 500 * eps(real(T))
+        alpha = T <: Complex ? T(1.3, -0.4) : T(1.3)
+        beta = T <: Complex ? T(0.7, 0.2) : T(0.7)
+        for (indA, indB, indC) in (
+                ((1, 2, 3, 4), (4, 3, 2, 5), (1, 5)),   # scrambled, C[a,e]
+                ((1, 2, 3, 4), (4, 3, 2, 5), (5, 1)),   # scrambled, C[e,a] (swap for real T)
+                ((4, 3, 2, 1), (2, 3, 4, 5), (1, 5)),   # A transposed, K inner in both
+                ((4, 3, 2, 1), (3, 2, 4, 5), (5, 1)),   # both scrambled, C transposed
+            ), (conjA, conjB) in ((false, false), (true, false), (true, true))
+            (T <: Real) && conjA && continue
+            A = _ko_array(T, indA)
+            B = _ko_array(T, indB)
+            Av = conjA ? StridedView(A, size(A), strides(A), 0, conj) : StridedView(A)
+            Bv = StridedView(B)
+            C = randn(T, Tuple(_KO_EXT[l] for l in indC)...)
+            Cstart = copy(C)
+            Cv = StridedView(C)
+            Cref = _lo_reference(Cstart, Av, indA, Bv, indB, indC; conjA, conjB, alpha, beta)
+            plan = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
+            # The whole point: the K composite is ascending in the inner operand.
+            inner = plan.kgroup.strides[argmin(map(s -> minimum(abs, s), plan.kgroup.strides))]
+            @test issorted(abs.(inner))
+            execute!(plan, alpha, beta)
+            @test isapprox(C, Cref; rtol = rtol)
+            copyto!(C, Cstart)
+            plan_tw = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
+            execute_tilewise!(plan_tw, alpha, beta)
+            @test isapprox(C, Cref; rtol = rtol)
+        end
+    end
+end

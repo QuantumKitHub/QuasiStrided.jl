@@ -134,6 +134,87 @@ function _order_free_labels(
     return out
 end
 
+# ----------------------------------------------------------------------------
+# Contracted-label order. `_classify_labels` lists the K labels in `indA`
+# order, which is incidental to the memory walk: `_pack_panel!` steps through
+# K in the composite's enumeration order (its OUTER loop, one K step per
+# `mr`/`nr`-element sliver row), so the K order decides how BOTH packs walk
+# their operand. When the K axes sit in a different relative order in A and B
+# -- `C[a,e] = A[a,b,c,d] * B[d,c,b,e]`, the upstream suite's
+# `contract_scrambled` layout -- no single order suits both, and `indA` order
+# is the one that suits neither: B's unit-stride axis `d` becomes the SLOWEST K
+# coordinate, so `pack_b!` jumps `96^2` elements per K step and touches a new
+# cache line (and page) for every element it reads. Measured (dim 96, Float64,
+# Cascade Lake, benchmark/probes/probe_stage_breakdown.jl): 49 ns per B
+# element, 92% of a 4.6 s contraction, against 1.3 ns per A element of the
+# same case.
+# ----------------------------------------------------------------------------
+
+# Smallest `abs(stride)` among the K labels' non-singleton axes in one operand
+# (`typemax(Int)` when every K axis is a singleton, i.e. K does not walk that
+# operand at all).
+function _min_label_stride(
+        labels::Vector{Int}, ind::NTuple{N, Int}, v::StridedView
+    ) where {N}
+    st = Base.strides(v)
+    best = typemax(Int)
+    for l in labels
+        p = findfirst(==(l), ind)::Int
+        size(v, p) == 1 && continue
+        best = min(best, abs(st[p]))
+    end
+    return best
+end
+
+# Stable sort of `labels` by `abs(stride)` of each label's axis in `v` (the
+# same insertion sort as `_order_free_labels`, over a different operand).
+function _sort_labels_by_stride(
+        labels::Vector{Int}, ind::NTuple{N, Int}, v::StridedView
+    ) where {N}
+    st = Base.strides(v)
+    key(l::Int) = abs(st[findfirst(==(l), ind)::Int])
+    out = copy(labels)
+    @inbounds for i in 2:length(out)
+        x = out[i]
+        kx = key(x)
+        j = i - 1
+        while j >= 1 && key(out[j]) > kx
+            out[j + 1] = out[j]
+            j -= 1
+        end
+        out[j + 1] = x
+    end
+    return out
+end
+
+# The K order: sort by `abs(stride)` in the operand in which K is the more
+# "inner" group, i.e. has the smaller minimum K stride. That operand's pack has
+# no contiguous free axis to hide behind (its sliver rows are far apart in
+# memory), so its line locality has to come from consecutive K steps landing
+# in the same line; the other operand's free axis supplies the locality
+# instead (an `mr`-row unit-stride sliver per K step is already whole cache
+# lines, whatever the K stride). Ties -- K inner in both, `A[k..,m] * B[k..,n]`
+# with the K axes in different orders -- go to the operand with more elements
+# to read (the larger free extent), then to A. Stable, so labels with equal
+# strides keep `indA` order, and any layout whose K strides are already
+# ascending in the chosen operand (every gemm_ready/a_permuted/b_permuted
+# layout of the upstream suite) gets exactly the order it had before this rule
+# existed. The order is a property of the pair (A, B) and is the same whether
+# or not the M/N orientation is later swapped.
+function _order_contract_labels(
+        klabels::Vector{Int},
+        indA::NTuple{NA, Int}, A::StridedView,
+        indB::NTuple{NB, Int}, B::StridedView,
+        Qm::Int, Qn::Int
+    ) where {NA, NB}
+    length(klabels) <= 1 && return klabels
+    minA = _min_label_stride(klabels, indA, A)
+    minB = _min_label_stride(klabels, indB, B)
+    by_b = minB < minA || (minB == minA && Qn > Qm)
+    return by_b ? _sort_labels_by_stride(klabels, indB, B) :
+        _sort_labels_by_stride(klabels, indA, A)
+end
+
 # Element count of the leading unit-stride run when `labels` (already ordered
 # by `_order_free_labels`) is enumerated first-label-fastest into C: the first
 # non-singleton label must have C-stride exactly +1 (`_unit_stride_rows` is
