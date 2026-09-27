@@ -315,35 +315,26 @@ function TO.tensorcontract!(
     )
     Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β)
     # `plan_contract`'s body with `execute!` as the continuation (`_planned`,
-    # src/planning/plan.jl): the plan is built and run inside the
-    # `_plan_contract` barrier, where its type is concrete, so
-    # `execute!(plan, ...)` is a static call and the plan never escapes this
-    # frame -- `plan = plan_contract(...); execute!(plan, ...)` would instead
-    # dispatch `execute!` at runtime on a Union-typed plan and box it (the
-    # kernel choice is a runtime value; for a complex `T` its Union spans the
-    # whole menu). Measured on ccqlin038 (Julia 1.12.7, 8x8x8, pooled
-    # workspace): 1232 B and 1.1 us per Float64 call, 2032 B and 5.5 us per
-    # ComplexF64 call before this and the planning-side changes it is paired
-    # with (statically sized label tuples, the per-(profile, eltype) defaults
-    # cache and the static kernel ladder); 0 B and ~0.5 / ~0.7 us after.
+    # src/planning/plan.jl, and `_Execute`, src/execution/execute.jl): the
+    # plan is built and run on the far side of the kernel barrier, where its
+    # type is concrete and the execution path is already fixed, so the plan
+    # never escapes that frame and nothing is boxed -- `plan =
+    # plan_contract(...); execute!(plan, ...)` would instead return a plan of
+    # runtime type and box it. Measured on ccqlin038 (Julia 1.12.7, 8x8x8,
+    # pooled workspace): 1232 B and 1.1 us per Float64 call, 2032 B and 5.5
+    # us per ComplexF64 call before this and the planning-side changes it is
+    # paired with (statically sized label tuples, the per-(profile, eltype)
+    # defaults cache); 0 B and ~0.4 / ~0.45 us with the dispatch barriers
+    # (src/execution/barrier.jl) and the heap-allocated workspace.
     # `_planned` `reserve!`s the pooled workspace itself. oracle=false: the
     # backend path never needs `execute_tilewise!`'s buffers.
     _planned(
-        _QSExecute(α′, β′), Cv, Av, indA, Bv, indB, indC,
+        _Execute(α′, β′), Cv, Av, indA, Bv, indB, indC,
         nothing, conjA, conjB, nothing, nothing, nothing,
         _qs_task_workspace(eltype(C)), allocator, false
     )
     return C
 end
-
-# The continuation the method above hands `_planned`: `execute!` on the plan,
-# with `alpha`/`beta` already converted to `eltype(C)`. A callable struct
-# rather than a closure so the captured scalars are concretely typed fields.
-struct _QSExecute{T}
-    alpha::T
-    beta::T
-end
-(e::_QSExecute)(plan::ContractPlan) = (execute!(plan, e.alpha, e.beta); nothing)
 
 # NOT merged with the method above, although the two differ only in allocator
 # handling: this one needs the plan back after `execute!` (to `release!` its

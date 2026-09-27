@@ -40,7 +40,7 @@ const SPECIFIC_QS_BUCKETS = [
         "planning",
         [
             "plan_contract", "_planned", "_plan_contract", "_plan_with_kernel",
-            "_plan_demoted", "_with_menu_kernel", "_classify_labels", "_order_free_labels",
+            "_plan_resolved", "_menu_val", "_classify_labels", "_order_free_labels",
             "_prefer_swap", "_default_kernel", "_default_shape", "_resolved_defaults",
             "_kernel_from_shape", "default_blocking",
             # These would land in "planning" through the ancestor walk anyway

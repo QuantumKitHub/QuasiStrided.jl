@@ -16,20 +16,21 @@
 #
 # Real `T` only: the complex kernels' K = 1 tiles are not the bottleneck
 # there (the per-call floor is), and a complex outer product would need its
-# own interleaved arithmetic. Selected by `execute!` through
-# `_try_execute_outer!`; `_OUTER_MODE` overrides the choice for tests and
-# benchmarks.
+# own interleaved arithmetic. Selected by `execute!` through `_select_path`
+# when `_outer_applicable` holds; `_OUTER_MODE` overrides the choice for tests
+# and benchmarks.
 
 const _OUTER_MODE = Ref{Symbol}(:auto)
 
 """
-    _try_execute_outer!(plan::ContractPlan, alphaT, betaT, Qm, Qn) -> Bool
+    _outer_applicable(plan::ContractPlan, Qm) -> Bool
 
-Run the outer-product path if `plan` is eligible and return `true`; return
-`false` without touching anything otherwise. Eligible when `_OUTER_MODE[]` is
-not `:never`, `T` is real, `Qk == 1` (the caller checks), the M composite is
+Whether `execute!` takes the outer-product path on a `Qk == 1` plan
+(`_select_path`, src/execution/execute.jl, which checks `Qk` and then runs it
+as `_OuterPath{W}` with `W = _dot_lanewidth(T)`). Eligible when
+`_OUTER_MODE[]` is not `:never`, `T` is real, the M composite is
 the unit ramp `offset(m) = m` in BOTH its A and C maps (`_map_ramp_step`),
-`Qm >= W` for the lane width `W = _dot_lanewidth(T)`, and A and C are
+`Qm >= W`, and A and C are
 `DenseVector{T}` (raw-pointer vector loads/stores). N and B may have any
 layout: B is read one scalar per column through the N composite's offsets.
 
@@ -41,32 +42,18 @@ same data: 16x16 319 -> 227 ns (84), 63x63 2.40 -> 1.16 us (0.81), 128x128
 6.15 -> 2.70 us (3.07). ComplexF64 is not taken: the nest is already within
 ~10% of OpenBLAS there from 63x63 up (4.6 vs 4.2 us, 15.1 vs 15.6 us).
 """
-function _try_execute_outer!(
-        plan::ContractPlan{T}, alphaT::T, betaT::T, Qm::Int, Qn::Int
-    ) where {T}
-    _outer_applicable(plan, Qm) || return false
-    W = _dot_lanewidth(T)
-    if W == 16
-        _execute_outer!(plan, alphaT, betaT, Qm, Qn, Val(16))
-    elseif W == 8
-        _execute_outer!(plan, alphaT, betaT, Qm, Qn, Val(8))
-    elseif W == 4
-        _execute_outer!(plan, alphaT, betaT, Qm, Qn, Val(4))
-    else
-        _execute_outer!(plan, alphaT, betaT, Qm, Qn, Val(2))
-    end
-    return true
-end
+_outer_applicable(plan::ContractPlan{T}, Qm::Int) where {T} =
+    _outer_applicable(T, plan.Astorage, plan.Cstorage, plan.mgroup, Qm)
 
-# The eligibility rule of `_try_execute_outer!` (`Qk == 1` is the caller's),
-# as a side-effect-free predicate.
-function _outer_applicable(plan::ContractPlan{T}, Qm::Int) where {T}
+# The rule on the plan's parts, so that `plan_contract` can predict the path
+# before the plan exists (`_path_hint`).
+function _outer_applicable(::Type{T}, Astorage, Cstorage, mgroup::AxisGroup, Qm::Int) where {T}
     _OUTER_MODE[] === :never && return false
     T <: Real || return false
-    (plan.Astorage isa DenseVector{T} && plan.Cstorage isa DenseVector{T}) || return false
+    (Astorage isa DenseVector{T} && Cstorage isa DenseVector{T}) || return false
     Qm >= _dot_lanewidth(T) || return false
-    _map_ramp_step(plan.mgroup, 1) == 1 || return false
-    return _map_ramp_step(plan.mgroup, 2) == 1
+    _map_ramp_step(mgroup, 1) == 1 || return false
+    return _map_ramp_step(mgroup, 2) == 1
 end
 
 function _execute_outer!(

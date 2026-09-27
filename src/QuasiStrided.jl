@@ -48,6 +48,8 @@ include("planning/blocking.jl")
 include("planning/defaults.jl")
 # `ContractPlan` holds a `ContractWorkspace`, so the workspace comes first.
 include("execution/workspace.jl")
+# The dispatch barriers' slots and path markers, used by the plan and `execute!`.
+include("execution/barrier.jl")
 include("planning/plan.jl")
 
 # --- Execution: the five-loop nest, the tile-by-tile oracle, the opt-in

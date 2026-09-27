@@ -70,8 +70,14 @@ end
 @inline _unpacked_b_kernel_eligible(::FMAddSubKernel) = true
 @inline _unpacked_b_kernel_eligible(::Any) = false
 
+# The same, for the kernel an automatic `(shape, method)` choice builds
+# (`_kernel_type`: `SIMDKernel`, `PlanarKernel`, `FMAddSubKernel`, `OneMKernel`),
+# as `plan_contract` needs it to predict the path before the kernel exists.
+@inline _unpacked_b_method_eligible(::Union{RealMethod, PlanarMethod, FMAddSubMethod}) = true
+@inline _unpacked_b_method_eligible(::Any) = false
+
 # Test/benchmark override of the automatic rule: `:auto` (the rule below),
-# `:always`, `:never`. Read once per `execute!`.
+# `:always`, `:never`. Read once per `execute!` (by `_select_path`).
 const _UNPACKED_B_MODE = Ref{Symbol}(:auto)
 
 """
@@ -110,13 +116,17 @@ with a measured win on both dtypes; 512 is a wash. The strided-K wins at
 small K are left on the table deliberately: the same rule would have to
 model L1 set conflicts to avoid the 1.2-2.1x losses above.
 """
-@inline function _use_unpacked_b(plan::ContractPlan)
-    _unpacked_b_kernel_eligible(plan.kernel) || return false
+@inline _use_unpacked_b(plan::ContractPlan) =
+    _unpacked_b_kernel_eligible(plan.kernel) && _unpacked_b_rule(plan.mgroup, plan.kgroup)
+
+# Everything but the kernel's eligibility, on the plan's groups (`_select_path`
+# also applies it before the plan exists, src/execution/execute.jl).
+@inline function _unpacked_b_rule(mgroup::AxisGroup, kgroup::AxisGroup)
     mode = _UNPACKED_B_MODE[]
     mode === :always && return true
     mode === :never && return false
-    axis_length(plan.mgroup) <= _UNPACKED_B_MMAX || return false
-    (k_ramp, k_step) = affine_ramp(plan.kgroup)
+    axis_length(mgroup) <= _UNPACKED_B_MMAX || return false
+    (k_ramp, k_step) = affine_ramp(kgroup)
     return k_ramp && abs(k_step[2]) == 1
 end
 
@@ -161,20 +171,21 @@ end
 # the element loads are `@inbounds`. C is covered by the caller's check 3.
 @noinline function _micro_tiles_unpacked_b!(
         kernel::K, plan::ContractPlan, ws, rowsB_k::KA, m_slivers::Int, n_slivers::Int,
-        MRk::Int, NRk::Int, MRp::Int, kblock::Int, alphaT, beta_eff
-    ) where {K, KA <: Axis}
+        MRk::Int, NRk::Int, MRp::Int, kblock::Int, alphaT, beta_eff,
+        aff_mC::Val{MC}, aff_nC::Val{NC}
+    ) where {K, KA <: Axis, MC, NC}
     Bstorage = plan.Bstorage
     Bbase = plan.Bbase
     btransform = plan.btransform
     for s in 0:(n_slivers - 1)
         sfirst = s * NRk
-        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst)
+        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst, aff_nC)
         bview = _unpacked_b_view(
             kernel, Bstorage, Bbase, ws.n_desc_B[s + 1], ws.n_buf_B, sfirst, rowsB_k, btransform
         )
         for r in 0:(m_slivers - 1)
             rfirst = r * MRk
-            rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst)
+            rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst, aff_mC)
             apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
             unsafe_execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,

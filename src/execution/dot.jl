@@ -13,9 +13,9 @@
 # packed except the K-vector `v` (gathered once per K block, with its
 # conjugation folded in). This is what `?gemv` does for the transposed case.
 #
-# Selected by `execute!` through `_try_execute_dot!` (see there for the
-# eligibility rule and the measurement), before the five-loop nest; on an
-# ineligible plan it declines and the nest runs. `_DOT_MODE` overrides the
+# Selected by `execute!` through `_select_path` when `_dot_applicable` holds
+# (see there for the eligibility rule and the measurement), before the
+# five-loop nest; on an ineligible plan the nest runs. `_DOT_MODE` overrides the
 # automatic choice for tests and benchmarks.
 
 const _DOT_MODE = Ref{Symbol}(:auto)
@@ -61,11 +61,11 @@ function _map_ramp_step(g::AxisGroup{D, P}, p::Int) where {D, P}
 end
 
 """
-    _try_execute_dot!(plan::ContractPlan, alphaT, betaT, Qm, Qn, Qk) -> Bool
+    _dot_applicable(plan::ContractPlan, Qm, Qn, Qk) -> Bool
 
-Run the dot-product path if `plan` is eligible and return `true`; return
-`false` without touching anything otherwise. Eligible when `_DOT_MODE[]` is
-not `:never` and
+Whether `execute!` takes the dot-product path on `plan` (`_select_path`,
+src/execution/execute.jl, which then runs it as `_DotPath{Qm == 1, W}` with
+`W = _dot_lanewidth(T)`). Eligible when `_DOT_MODE[]` is not `:never` and
 
   * `Qm == 1` (the matrix operand is B, its free composite the N group) or
     `Qn == 1` (the matrix operand is A, the M group);
@@ -92,49 +92,37 @@ The nest's time there is the gather pack of the matrix operand, which this
 path does not perform at all. The K tail is one masked step (not a scalar
 loop): 1x36x216 Float64 went 3.0 -> 1.9 us with it.
 """
-function _try_execute_dot!(
-        plan::ContractPlan{T}, alphaT::T, betaT::T, Qm::Int, Qn::Int, Qk::Int
-    ) where {T}
-    _dot_applicable(plan, Qm, Qn, Qk) || return false
-    W = _dot_lanewidth(T)
-    matB = Qm == 1
-    # `W` is a runtime value; the ladder hands the kernel a literal.
-    if W == 16
-        _execute_dot!(plan, alphaT, betaT, matB, Val(16))
-    elseif W == 8
-        _execute_dot!(plan, alphaT, betaT, matB, Val(8))
-    elseif W == 4
-        _execute_dot!(plan, alphaT, betaT, matB, Val(4))
-    else
-        _execute_dot!(plan, alphaT, betaT, matB, Val(2))
-    end
-    return true
+function _dot_applicable(plan::ContractPlan{T}, Qm::Int, Qn::Int, Qk::Int) where {T}
+    return _dot_applicable(T, plan.Astorage, plan.Bstorage, plan.kgroup, Qm, Qn, Qk) &&
+        _dot_capacity_ok(plan)
 end
 
-# The eligibility rule of `_try_execute_dot!`, as a side-effect-free predicate.
-function _dot_applicable(plan::ContractPlan{T}, Qm::Int, Qn::Int, Qk::Int) where {T}
+# Every clause but the workspace capacity, on the plan's parts, so that
+# `plan_contract` can predict the path before the plan exists (`_path_hint`).
+function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, Qm::Int, Qn::Int, Qk::Int) where {T}
     _DOT_MODE[] === :never && return false
     (Qm == 1 || Qn == 1) || return false
     Qk >= _dot_lanewidth(T) || return false
     if Qm == 1
-        plan.Bstorage isa DenseVector{T} || return false
-        _map_ramp_step(plan.kgroup, 2) == 1 || return false
+        Bstorage isa DenseVector{T} || return false
+        _map_ramp_step(kgroup, 2) == 1 || return false
     else
-        plan.Astorage isa DenseVector{T} || return false
-        _map_ramp_step(plan.kgroup, 1) == 1 || return false
+        Astorage isa DenseVector{T} || return false
+        _map_ramp_step(kgroup, 1) == 1 || return false
     end
-    # The gathered vector (and, complex, its pair-swapped copy) lives in the
-    # packed-A buffer, reinterpreted as `T`.
+    return true
+end
+
+# The gathered vector (and, complex, its pair-swapped copy) lives in the
+# packed-A buffer, reinterpreted as `T`. Always true for an automatically
+# chosen kernel (the buffer holds `mr >= 2` K columns of reals per K step);
+# `nothing` is the prediction's "assume so".
+function _dot_capacity_ok(plan::ContractPlan{T}) where {T}
     need = (T <: Complex ? 2 : 1) * plan.blocking.kc
     return (length(plan.workspace.packed_a) * sizeof(real(T))) ÷ sizeof(T) >= need
 end
+_dot_capacity_ok(::Nothing) = true
 
-# Resolve the operand roles ONCE into concretely typed arguments: the matrix
-# operand (`m*`), the vector operand (`v*`), the matrix's free composite `g`
-# with its two offset buffers (map 1 = matrix, map 2 = C), the block length
-# those buffers are sized for, and the K buffer that receives the VECTOR's K
-# offsets. Branching on `matB` inside `_dot_nest!` would make every storage
-# type a Union.
 function _execute_dot!(plan::ContractPlan{T}, alphaT::T, betaT::T, matB::Bool, ::Val{W}) where {T, W}
     ws = plan.workspace
     if matB

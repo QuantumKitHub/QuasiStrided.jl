@@ -3,7 +3,11 @@
 # SIMDKernel default.
 # =====================================================================
 
-_ws_lengths(ws) = map(f -> length(getfield(ws, f)), fieldnames(typeof(ws)))
+# Buffer fields only: the workspace also holds its dispatch-barrier slot cache,
+# which is not a buffer and has no length.
+_ws_lengths(ws) = [
+    length(getfield(ws, f)) for f in fieldnames(typeof(ws)) if getfield(ws, f) isa AbstractVector
+]
 
 @testset "plan_contract: SIMDKernel is the engine-wide default kernel" begin
     for T in (Float64, Float32)

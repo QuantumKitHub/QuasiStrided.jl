@@ -174,27 +174,22 @@ _kernel_from_shape(shape::Tuple{Int, Int, Int}, ::Type{T}) where {T} =
 end
 
 """
-    _with_menu_kernel(g, shape, T, method, args...) -> g(kernel, args...)
+    _menu_val(shape, T, method) -> Val{shape}()
 
-`_kernel_from_shape`'s continuation-passing twin: build the `method` kernel
-for `T` at `shape` and hand it to `g` together with `args...`, so that `g`
-runs on a CONCRETE kernel type in every arm of the unrolled menu ladder.
-`_kernel_from_shape`'s return type is the Union of the whole menu, which a
-consumer has to dispatch on at runtime once the Union exceeds four members
-(ComplexF64's does: six planar plus four FMAddSub shapes); here the dispatch
-stays a chain of literal tuple compares and every `g` call is static. Same
-menu, same constructor and the same two throws as `_kernel_from_shape`. This
-is how `plan_contract` reaches its function barrier when the caller named no
-kernel; see `_plan_with_kernel` in src/planning/plan.jl for the measurement.
+`Val(shape)` for a `shape` in `kernel_shapes(T, method)`, built as a literal
+in an unrolled ladder over the menu (a plain `Val(shape)` would construct the
+type at runtime), with the same two throws as `_kernel_from_shape`. The
+result is a singleton, so it crosses `plan_contract`'s kernel barrier
+(`_plan_with_kernel`, src/planning/plan.jl) without boxing, and the callee is
+specialised on this one shape; building only menu shapes keeps that set of
+specialisations closed.
 """
-@generated function _with_menu_kernel(
-        g::G, shape::Tuple{Int, Int, Int}, ::Type{T}, method::M, args...
-    ) where {G, T, M}
+@generated function _menu_val(shape::Tuple{Int, Int, Int}, ::Type{T}, method::M) where {T, M}
     K = _kernel_type(M.instance, T)
     K === nothing && return :(_throw_no_kernel(shape, T, method))
     ex = :(_throw_shape_not_in_menu(shape, T, method))
     for (MR, NR, W) in reverse(kernel_shapes(T, M.instance))
-        ex = :(shape === ($MR, $NR, $W) ? g($K(Val($MR), Val($NR), T, Val($W)), args...) : $ex)
+        ex = :(shape === ($MR, $NR, $W) ? Val(($MR, $NR, $W)) : $ex)
     end
     return ex
 end
@@ -533,14 +528,31 @@ _small_m_shape(key::Val, profile::TargetProfile, ::Type{T}, Qm::Int) where {T} =
 # short-circuit holds the fraction is `1.0` anyway, so the order changes no
 # decision.
 function _demote_for_run(::Type{T}, kernel, run::Int, Qm::Int, Qk::Int) where {T}
-    T <: Real || return kernel
-    kmax = T === Float64 ? _RUN_DEMOTE_KMAX_F64 : _RUN_DEMOTE_KMAX_F32
-    Qk > kmax && return kernel
-    Qm == run && return kernel
-    run % mr(kernel) == 0 && return kernel
-    _RUN_DEMOTE_BROKEN_ENOUGH < 1.0 && _unbroken_fraction(Qm, run, mr(kernel)) > _RUN_DEMOTE_BROKEN_ENOUGH &&
-        return kernel
     method = complex_method(kernel)
+    target = _run_demotion_target(T, mr(kernel), method, run, Qm, Qk)
+    return target === nothing ? kernel : _kernel_from_shape(target, T, method)
+end
+
+# The same rule on a `(shape, method)` pair, as `plan_contract` applies it
+# before its kernel barrier (`_plan_with_kernel`, src/planning/plan.jl): the
+# kernel built from `shape` has `mr == shape[1]` for every method.
+@inline function _demote_shape_for_run(
+        ::Type{T}, shape::NTuple{3, Int}, method, run::Int, Qm::Int, Qk::Int
+    ) where {T}
+    target = _run_demotion_target(T, shape[1], method, run, Qm, Qk)
+    return target === nothing ? shape : target
+end
+
+# The menu shape `_demote_for_run` demotes a kernel of register height `mrk`
+# (under `method`) to, or `nothing` to keep it.
+function _run_demotion_target(::Type{T}, mrk::Int, method, run::Int, Qm::Int, Qk::Int) where {T}
+    T <: Real || return nothing
+    kmax = T === Float64 ? _RUN_DEMOTE_KMAX_F64 : _RUN_DEMOTE_KMAX_F32
+    Qk > kmax && return nothing
+    Qm == run && return nothing
+    run % mrk == 0 && return nothing
+    _RUN_DEMOTE_BROKEN_ENOUGH < 1.0 && _unbroken_fraction(Qm, run, mrk) > _RUN_DEMOTE_BROKEN_ENOUGH &&
+        return nothing
     best = nothing
     for shape in kernel_shapes(T, method)
         m = shape[1]
@@ -548,7 +560,7 @@ function _demote_for_run(::Type{T}, kernel, run::Int, Qm::Int, Qk::Int) where {T
             best = shape
         end
     end
-    return best === nothing ? kernel : _kernel_from_shape(best, T, method)
+    return best
 end
 
 # Deepest `Qk` at which run-length demotion still wins: it crosses over from a

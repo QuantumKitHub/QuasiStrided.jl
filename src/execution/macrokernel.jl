@@ -13,6 +13,21 @@
         PtrScatterAxis(pointer(buffer, first + 1), d.count)
 end
 
+# The same, with the sliver's axis type fixed statically by the execution
+# path (`_NestPath`, src/execution/barrier.jl): `Val(true)` where the
+# composite's map is an affine ramp, which makes every block descriptor
+# `describe_block` or `_ramp_descriptor` produces from it regular, so the axis
+# is always an `AffineAxis` and no `PtrScatterAxis` arm is compiled
+# downstream. The `regular` test stays as a cheap guard on that invariant.
+@inline _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{false}) =
+    _axis_of(d, buffer, first)
+@inline function _axis_of(d::BlockDescriptor, ::Vector{Int}, ::Int, ::Val{true})
+    d.regular || _throw_irregular_ramp_descriptor()
+    return AffineAxis(d.base, d.stride, d.count)
+end
+@noinline _throw_irregular_ramp_descriptor() =
+    throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))
+
 # `pack!` is pack_a!/pack_b! -- or their `unsafe_pack_a!`/`unsafe_pack_b!`
 # siblings (src/packing/pack.jl) -- as a plain function, specialized on, never a
 # closure; A and B differ only in which of rows/cols is the k axis, which the

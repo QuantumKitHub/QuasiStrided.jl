@@ -205,19 +205,32 @@ function execute_half_packed!(plan::ContractPlan{T}, alpha::Number, beta::Number
     (Qm == 0 || Qn == 0 || Qk == 0 || iszero(alphaT)) && return execute!(plan, alpha, beta)
 
     (_half_pack_static_eligible(plan) && Qm == mr(kernel)) || return execute!(plan, alpha, beta)
-    (ok, dM_A, dM_C) = _half_pack_m_descriptors!(plan)
+    (ok, _, _) = _half_pack_m_descriptors!(plan)
     ok || return execute!(plan, alpha, beta)
 
+    # Through `execute!`'s dispatch barrier (src/execution/barrier.jl), so the
+    # nest is compiled only for the axis types this plan's maps produce.
+    _execute_across_barrier!(
+        plan, alphaT, betaT, _half_pack_path(plan.mgroup, plan.ngroup, plan.kgroup)
+    )
+    return plan.Cstorage
+end
+
+function _execute_path!(plan::ContractPlan{T}, alphaT::T, betaT::T, path::_HalfPackPath) where {T}
+    # Recomputed rather than carried across the barrier: two descriptors,
+    # already known to be eligible.
+    (_, dM_A, dM_C) = _half_pack_m_descriptors!(plan)
     ws = plan.workspace
     Astorage = plan.Astorage
     # `ws`: the packed B panel and every `PtrScatterAxis` borrow its buffers.
     # `Astorage`: the in-place A loads are raw-pointer loads.
-    return GC.@preserve ws Astorage begin
+    GC.@preserve ws Astorage begin
         _execute_half_packed_nest!(
-            plan, ws, kernel, dM_A, dM_C, Qn, Qk,
-            plan.blocking.kc, plan.blocking.nc, alphaT, betaT
+            plan, ws, plan.kernel, dM_A, dM_C, axis_length(plan.ngroup), axis_length(plan.kgroup),
+            plan.blocking.kc, plan.blocking.nc, alphaT, betaT, path
         )
     end
+    return nothing
 end
 
 # `_execute_nest!` (src/execution/execute.jl) with the M side fixed at one full
@@ -225,8 +238,11 @@ end
 # pack -- is `_execute_nest!`'s verbatim.
 function _execute_half_packed_nest!(
         plan::ContractPlan{T}, ws, kernel::K, dM_A::BlockDescriptor, dM_C::BlockDescriptor,
-        Qn::Int, Qk::Int, kc_eff::Int, nc_eff::Int, alphaT::T, betaT::T
-    ) where {T, K}
+        Qn::Int, Qk::Int, kc_eff::Int, nc_eff::Int, alphaT::T, betaT::T,
+        ::_HalfPackPath{AFF}
+    ) where {T, K, AFF}
+    # The static affine-axis flags (`_NestPath`'s order; M in A is unused).
+    _, aff_mC, aff_nB, aff_nC, aff_kA, aff_kB = map(Val, AFF)
     MRk = mr(kernel)
     NRk = nr(kernel)
     NRp = packed_b_per_k(kernel)
@@ -292,8 +308,8 @@ function _execute_half_packed_nest!(
                     descriptor_offset_range(dB, ws.k_buf_B, 0),
                 )
             end
-            colsA_k = _axis_of(dK_A, ws.k_buf_A, 0)
-            rowsB_k = _axis_of(dK_B, ws.k_buf_B, 0)
+            colsA_k = _axis_of(dK_A, ws.k_buf_A, 0, aff_kA)
+            rowsB_k = _axis_of(dK_B, ws.k_buf_B, 0, aff_kB)
 
             # HOISTED CHECK (B) -- the whole B panel of this (jc, pc), exactly
             # as `_execute_nest!`'s check 1.
@@ -310,7 +326,7 @@ function _execute_half_packed_nest!(
             # Pack the whole B panel for this (jc, pc): every N-sliver.
             for s in 0:(n_slivers - 1)
                 sfirst = s * NRk
-                colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst)
+                colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst, aff_nB)
                 bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
                 _pack_sliver!(
                     unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
@@ -322,7 +338,7 @@ function _execute_half_packed_nest!(
             _half_packed_micro_tiles!(
                 kernel, plan.Cstorage, plan.Cbase, dM_C, ws,
                 plan.Astorage, arowbase, colsA_k, MRk, NRk, NRp,
-                n_slivers, kblock, alphaT, beta_eff
+                n_slivers, kblock, alphaT, beta_eff, aff_mC, aff_nC
             )
 
             firstpanel = false
@@ -339,17 +355,19 @@ end
 # the guardrail at the top of src/execution/macrokernel.jl), so the
 # `UnpackedAView` built below is concretely typed and the micro-tile calls
 # specialize on it. `unsafe_execute_micro_tile!`'s precondition is the caller's
-# hoisted C check.
-@inline function _half_packed_micro_tiles!(
+# hoisted C check. `@noinline` for compile time, as `_micro_tiles_packed_b!`
+# (src/execution/execute.jl): inlined, this nest's inference was 60 of the
+# 207 s test/execution/test_halfpack.jl spends inferring; out of line, 14.
+@noinline function _half_packed_micro_tiles!(
         kernel::K, Cstorage::SC, Cbase::Int, dM_C::BlockDescriptor, ws,
         Astorage::SA, arowbase::Int, colsA_k::CA, MRk::Int, NRk::Int, NRp::Int,
-        n_slivers::Int, kblock::Int, alphaT, beta_eff
-    ) where {K, SC, SA, CA <: Axis}
+        n_slivers::Int, kblock::Int, alphaT, beta_eff, aff_mC::Val{MC}, aff_nC::Val{NC}
+    ) where {K, SC, SA, CA <: Axis, MC, NC}
     apanel = UnpackedAView(Astorage, arowbase, colsA_k, MRk)
     for s in 0:(n_slivers - 1)
         sfirst = s * NRk
-        rowsC = _axis_of(dM_C, ws.m_buf_C, 0)
-        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst)
+        rowsC = _axis_of(dM_C, ws.m_buf_C, 0, aff_mC)
+        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst, aff_nC)
         bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
         unsafe_execute_micro_tile!(
             kernel, Cstorage, Cbase, rowsC, colsC,

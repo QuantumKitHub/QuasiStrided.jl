@@ -144,9 +144,10 @@ end
 # fixed by the label tuples' lengths, so `GM`/`GN`/`GK` are concrete), the
 # operand storage/base pairs, the leading unit-stride run of the chosen M
 # composite (for `_demote_for_run`), the blocking overrides and the
-# workspace/allocator choice. One value, so the kernel-resolution ladder
-# (`_plan_with_kernel`) forwards a single argument, and so the swapped and
-# as-is orientations differ only in how it is filled.
+# workspace/allocator choice. One value, so kernel resolution
+# (`_plan_with_kernel`) forwards a single argument -- and, with its storages
+# stripped, sends it through the kernel barrier's slot -- and so the swapped
+# and as-is orientations differ only in how it is filled.
 #
 # `T` is a phantom parameter (the storage element type, `eltype(C)`), carried
 # so the barrier can check the kernel against it without re-deriving it.
@@ -301,46 +302,93 @@ end
 
 # Kernel resolution, the last step before the barrier. A caller-named kernel
 # goes straight through, never demoted. An automatic one is chosen as a
-# `(shape, method)` value (`_default_shape`) and built INSIDE
-# `_with_menu_kernel`'s unrolled ladder, so that `_plan_demoted` -- and
-# through it `_demote_for_run` and `_plan_contract` -- always runs on a
-# concrete kernel type and every call below this line is static.
+# `(shape, method)` value -- `_default_shape`, then the run-length demotion
+# (`_demote_shape_for_run`) -- and the plan is built on the far side of a
+# dispatch barrier (src/execution/barrier.jl) specialised on that ONE shape,
+# so that only the chosen kernel's planning and execution code is ever
+# compiled.
 #
-# Why not simply `_plan_contract(_default_kernel(T, Qm, Qn), ...)`: that
-# value's type is the Union of `T`'s whole menu, ten members for ComplexF64,
-# past the four Julia union-splits, so the barrier call became a
-# `jl_apply_generic` that boxed the request and -- for reasons this file does
-# not claim to understand -- missed the method cache more often than not.
-# Measured on ccqlin038 (Julia 1.12.7, 8x8x8 ComplexF64, pooled workspace):
-# `plan_contract` 0.78 us and 704 B/call with the Union-typed call; the same
-# tail with a concrete kernel 0.09 us and 0 B. Float64 was already static
-# (a two-member Union) and is unchanged by this.
+# Two earlier forms, and why neither:
+#
+#   * `_plan_contract(_default_kernel(T, Qm, Qn), ...)`: the value's type is
+#     the Union of `T`'s whole menu, ten members for ComplexF64, so the call
+#     was a `jl_apply_generic` that boxed the request (0.78 us and 704 B per
+#     call, ccqlin038, Julia 1.12.7, 8x8x8 ComplexF64).
+#   * An unrolled ladder over the menu with a static, concrete call in every
+#     arm (0 B, ~0.1 us), which compiles EVERY arm the first time: 40 plans
+#     (10 kernels x 4 transform pairs) and 85 s of inference for the first
+#     ComplexF64 `@tensor` call, 6 plans and 26 s for Float64
+#     (benchmark/probes/probe_ttfx.jl, SnoopCompile).
+#
+# The barrier is a dynamic call whose arguments are all singletons (`Val` of
+# the shape, the method, the transforms, the execution-path hint) or heap
+# objects (the slot, the storages): 0 B, one method-cache hit per call.
 @inline _plan_with_kernel(kernel, atransform, btransform, req::_PlanRequest) =
-    _plan_contract(kernel, atransform, btransform, req)
+    _plan_contract(kernel, atransform, btransform, req, nothing)
 @inline function _plan_with_kernel(::Nothing, atransform, btransform, req::_PlanRequest{T}) where {T}
-    shape, method = _default_shape(T, axis_length(req.mgroup), axis_length(req.ngroup))
-    return _with_menu_kernel(_plan_demoted, shape, T, method, atransform, btransform, req)
-end
-
-# Run-length demotion (`_demote_for_run`) of an automatically chosen kernel,
-# keyed on the chosen M orientation's own run (`req.run`), then the barrier.
-@inline function _plan_demoted(kernel, atransform, btransform, req::_PlanRequest{T}) where {T}
-    kernel_final = _demote_for_run(
-        T, kernel, req.run, axis_length(req.mgroup), axis_length(req.kgroup)
+    Qm = axis_length(req.mgroup)
+    shape, method = _default_shape(T, Qm, axis_length(req.ngroup))
+    shape = _demote_shape_for_run(T, shape, method, req.run, Qm, axis_length(req.kgroup))
+    # Built from the menu (throwing for a shape outside it), so the callee is
+    # only ever specialised on a menu shape.
+    vshape = _menu_val(shape, T, method)
+    # Which execution path the continuation will take, predicted here so the
+    # callee is specialised on it too (`_path_hint`; `nothing` when the
+    # continuation does not execute). Only the method's unpacked-B
+    # eligibility is passed, as a `Bool`: `method` may be a Union
+    # (`PlanarMethod`/`FMAddSubMethod`, or with no `T <: Complex` guard
+    # upstream even for a real `T`), and a call union-split on it was
+    # measured to be emitted out of line, boxing `req` (256 B per call).
+    hint = _path_hint(req.f, req, _unpacked_b_method_eligible(method))
+    core = _strip_storage(req)
+    slot = _barrier_slot!(req.workspace, typeof(core))
+    slot[] = core
+    return Base.inferencebarrier(_plan_resolved)(
+        vshape, method, atransform, btransform, hint, slot,
+        req.Astorage, req.Bstorage, req.Cstorage
     )
-    return _plan_contract(kernel_final, atransform, btransform, req)
 end
 
-# Function barrier: the `conj`/`identity` transform Unions die here (and, on
-# the real path, `_demote_for_run`'s small kernel Union), so `ContractPlan`'s
-# `Kern`, `TA` and `TB` are concrete and `execute!` sees no abstract type.
-# `TA`/`TB` each get their own bound parameter for the same reason `K` does.
-# The continuation `req.f` runs in here rather than on the returned plan:
-# `f(plan)` sees a concrete plan type, so an executor passed as `f` needs no
-# further dispatch and no boxed plan.
+# The far side of the kernel barrier: everything from here down is static, on
+# one concrete kernel, transform pair and path hint.
+function _plan_resolved(
+        ::Val{S}, method::M, atransform::TA, btransform::TB, hint::H,
+        slot::Base.RefValue{R}, Astorage::SA, Bstorage::SB, Cstorage::SC
+    ) where {S, M, TA, TB, H, T, R <: _PlanRequest{T}, SA, SB, SC}
+    req = _with_storage(slot[], Astorage, Bstorage, Cstorage)
+    return _plan_contract(_kernel_from_shape(S, T, method), atransform, btransform, req, hint)
+end
+
+# The request without its three operand storages (`nothing` in their place),
+# which is what crosses the barrier in the slot; the storages cross as
+# arguments, so no slot ever retains a user array.
+@inline _strip_storage(req::_PlanRequest{T}) where {T} = _plan_request(
+    T, req.f, req.mgroup, req.ngroup, req.kgroup,
+    nothing, req.Abase, nothing, req.Bbase, nothing, req.Cbase,
+    req.run, req.mc, req.kc, req.nc, req.workspace, req.allocator, req.oracle
+)
+@inline _with_storage(req::_PlanRequest{T}, Astorage, Bstorage, Cstorage) where {T} = _plan_request(
+    T, req.f, req.mgroup, req.ngroup, req.kgroup,
+    Astorage, req.Abase, Bstorage, req.Bbase, Cstorage, req.Cbase,
+    req.run, req.mc, req.kc, req.nc, req.workspace, req.allocator, req.oracle
+)
+
+# The execution path a continuation will take on the plan (src/execution/
+# barrier.jl), or `nothing` for one that does not execute it. Only
+# `_Execute` (src/execution/execute.jl) executes.
+@inline _path_hint(f, req::_PlanRequest, unpack_ok::Bool) = nothing
+
+# Plan construction, on a concrete kernel and transform pair: reached through
+# the kernel barrier above for an automatic kernel, and directly for a
+# caller-named one (whose transform Unions then die here, in a function
+# barrier), so `ContractPlan`'s `Kern`, `TA` and `TB` are concrete and
+# `execute!` sees no abstract type. `TA`/`TB` each get their own bound
+# parameter for the same reason `K` does. The continuation `req.f` runs in
+# here rather than on the returned plan: `f(plan)` sees a concrete plan type,
+# so an executor passed as `f` needs no further dispatch and no boxed plan.
 function _plan_contract(
-        kernel::K, atransform::TA, btransform::TB, req::_PlanRequest{T}
-    ) where {K, TA, TB, T}
+        kernel::K, atransform::TA, btransform::TB, req::_PlanRequest{T}, hint::H
+    ) where {K, TA, TB, T, H}
     scalartype(kernel) === T ||
         throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match eltype(C) = $T"))
 
@@ -380,5 +428,9 @@ function _plan_contract(
         req.Astorage, req.Abase, req.Bstorage, req.Bbase, req.Cstorage, req.Cbase,
         atransform, btransform, ws
     )
-    return req.f(plan)
+    return _continue(req.f, plan, hint)
 end
+
+# Apply the continuation. `hint` is `_path_hint`'s prediction, used only by
+# an executing continuation (`_Execute`, src/execution/execute.jl).
+@inline _continue(f::F, plan::ContractPlan, hint) where {F} = f(plan)

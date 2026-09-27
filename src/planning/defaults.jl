@@ -123,15 +123,19 @@ _default_kernel(::Type{T}) where {T} =
 # `_kernel_from_shape` builds at `shape`.
 #
 # Returns the `(shape, method)` pair as plain values rather than the kernel:
-# `plan_contract` consumes it through `_with_menu_kernel`, so the choice is
-# made without ever holding a menu-wide kernel Union (ten members for
-# ComplexF64), which its function barrier would otherwise have to dispatch on
-# at runtime. `_default_kernel` below builds the kernel from the same pair.
+# `plan_contract` carries the shape across its kernel barrier as a singleton
+# `Val` (`_plan_with_kernel`, src/planning/plan.jl), so the choice is made
+# without ever holding a menu-wide kernel Union (ten members for ComplexF64).
+# `_default_kernel` below builds the kernel from the same pair.
 @inline function _default_shape(::Type{T}, Qm::Int, Qn::Int) where {T}
     d = _resolved_defaults(T)
     method = _default_method(T)
     shape = _extent_shape(d.shape, T, method, Qm)
     (Qm > 0 && Qm < shape[1]) || return (shape, method)
+    # The FMAddSub small-M demotion is complex-only (`_small_m_candidates` is
+    # empty for a real `T`); saying so statically keeps a real `T`'s method a
+    # concrete `RealMethod` rather than a Union with `FMAddSubMethod`.
+    T <: Complex || return (d.fitted, method)
     small = _small_m_shape(d.small_m, Qm)
     small === nothing || return (small, FMAddSubMethod())
     return (d.fitted, method)

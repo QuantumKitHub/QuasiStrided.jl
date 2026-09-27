@@ -2,7 +2,7 @@
 # with `K == 1` and unit-stride M in A and C streams `alpha * A * B[n]` column
 # by column instead of running the nest. Checked here:
 #
-#   1. `_try_execute_outer!` takes exactly the eligible plans (real `T`,
+#   1. the outer-product path takes exactly the eligible plans (real `T`,
 #      `K == 1`, unit-ramp M in both A and C, `Qm >= W`, dense A/C storage),
 #      declines the rest untouched, and obeys `_OUTER_MODE`.
 #   2. On eligible plans the result matches the nest (`_OUTER_MODE[] =

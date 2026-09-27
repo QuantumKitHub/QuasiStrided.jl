@@ -5,6 +5,20 @@
 # `Vector{Int}` -- acquired as non-temporaries, so only the packed panels
 # route through the allocator.
 
+# The workspace's typed slots for `_barrier_slot!` (src/execution/barrier.jl):
+# one `Base.RefValue{P}` per payload type `P` ever sent across a dispatch
+# barrier with this workspace, plus the most recently used one, so that the
+# common case -- the same contraction type as last time -- is one type-tag
+# compare. Mutable (and heap-allocated once, with the workspace) because the
+# slots must outlive every call: a payload is written into its slot and read
+# back on the far side of a dynamic call, which is what lets that call pass
+# only already-boxed arguments and allocate nothing.
+mutable struct _SlotCache
+    last::Any
+    const slots::IdDict{Any, Any}
+end
+_SlotCache() = _SlotCache(nothing, IdDict{Any, Any}())
+
 """
     ContractWorkspace{T,VT<:AbstractVector}
 
@@ -33,44 +47,58 @@ are allocated only under `oracle = true`. The four register-tile-sized
 `tile_*` offset buffers are always allocated: the beta-only pass of both
 drivers uses them, and so does the oracle's tile loop.
 
+A `mutable struct` with every field `const`: nothing is ever reassigned
+(buffers grow in place, `reserve!`), but a workspace must be ONE heap object,
+so that a plan holds a single pointer to it and a dispatch barrier
+(src/execution/barrier.jl) passes or stores it without copying its twenty-one
+fields: every copy of an immutable workspace -- into a plan, through a
+barrier slot, out of the task pool's `Dict` -- was twenty-one GC-tracked
+pointer copies. Measured through `tensorcontract!` (ccqlin038, Julia 1.12.7,
+pooled workspace, 8x8x8): Float64 0.47 -> 0.38 us, ComplexF64 0.54 -> 0.45
+us per call.
+
 Field layout is an implementation detail, not part of the public interface.
 """
-struct ContractWorkspace{T, VT <: AbstractVector}
+mutable struct ContractWorkspace{T, VT <: AbstractVector}
     # Macro-block-sized offset buffers: one fill_offsets! per jc/pc/ic block,
     # reused by every sliver inside it.
-    m_buf_A::Vector{Int}
-    m_buf_C::Vector{Int}
-    n_buf_B::Vector{Int}
-    n_buf_C::Vector{Int}
-    k_buf_A::Vector{Int}
-    k_buf_B::Vector{Int}
+    const m_buf_A::Vector{Int}
+    const m_buf_C::Vector{Int}
+    const n_buf_B::Vector{Int}
+    const n_buf_C::Vector{Int}
+    const k_buf_A::Vector{Int}
+    const k_buf_B::Vector{Int}
 
     # Per-sliver descriptors classified from the buffers above (3-arg
     # describe_block), reused across the pc/ic loops of a given jc/ic.
-    m_desc_A::Vector{BlockDescriptor}
-    m_desc_C::Vector{BlockDescriptor}
-    n_desc_B::Vector{BlockDescriptor}
-    n_desc_C::Vector{BlockDescriptor}
+    const m_desc_A::Vector{BlockDescriptor}
+    const m_desc_C::Vector{BlockDescriptor}
+    const n_desc_B::Vector{BlockDescriptor}
+    const n_desc_C::Vector{BlockDescriptor}
 
     # Packed macro-panel buffers: cld(mc,MRk)/cld(nc,NRk) slivers at kc-eff
     # depth. The ONLY allocator-routed temporaries in this struct.
-    packed_a::VT
-    packed_b::VT
+    const packed_a::VT
+    const packed_b::VT
 
     # One register tile's offsets (MR/NR-sized): the beta-only pass and the
     # oracle's tile loop.
-    tile_m_buf_A::Vector{Int}
-    tile_m_buf_C::Vector{Int}
-    tile_n_buf_B::Vector{Int}
-    tile_n_buf_C::Vector{Int}
+    const tile_m_buf_A::Vector{Int}
+    const tile_m_buf_C::Vector{Int}
+    const tile_n_buf_B::Vector{Int}
+    const tile_n_buf_C::Vector{Int}
 
     # execute_tilewise!'s own K-panel buffers (blocking.kc-sized). Deliberately
     # NOT shared with the macro buffers above: the oracle must have no packed
     # or K-offset state in common with the code it checks.
-    tw_k_buf_A::Vector{Int}
-    tw_k_buf_B::Vector{Int}
-    tw_packed_a::VT
-    tw_packed_b::VT
+    const tw_k_buf_A::Vector{Int}
+    const tw_k_buf_B::Vector{Int}
+    const tw_packed_a::VT
+    const tw_packed_b::VT
+
+    # Typed payload slots for the dispatch barriers (`_barrier_slot!`,
+    # src/execution/barrier.jl). Not a buffer: never sized, grown or released.
+    const slots::_SlotCache
 
     # GUARDRAIL, the one invariant the loose `VT` bound needs: the packed
     # panels hold `real(T)`, NEVER `T`. Enforced here so a mis-paired (T, VT)
@@ -98,7 +126,7 @@ struct ContractWorkspace{T, VT <: AbstractVector}
             m_desc_A, m_desc_C, n_desc_B, n_desc_C,
             packed_a, packed_b,
             tile_m_buf_A, tile_m_buf_C, tile_n_buf_B, tile_n_buf_C,
-            tw_k_buf_A, tw_k_buf_B, tw_packed_a, tw_packed_b,
+            tw_k_buf_A, tw_k_buf_B, tw_packed_a, tw_packed_b, _SlotCache(),
         )
     end
 end

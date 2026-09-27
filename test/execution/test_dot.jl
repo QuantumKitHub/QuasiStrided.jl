@@ -2,7 +2,7 @@
 # `M == 1` or `N == 1` whose matrix operand is K-contiguous runs a K-vectorized
 # gemv instead of the five-loop nest. Checked here:
 #
-#   1. `_try_execute_dot!` takes exactly the eligible plans (degenerate free
+#   1. the dot path takes exactly the eligible plans (degenerate free
 #      extent, unit-ramp K on the matrix operand, `DenseVector` storage,
 #      `Qk >= W`), declines the rest without touching C, and obeys `_DOT_MODE`.
 #   2. On eligible plans the result matches the nest (`_DOT_MODE[] = :never`),
