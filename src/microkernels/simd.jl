@@ -78,6 +78,16 @@ end
 # no runtime branch on any path.
 @inline _a_step_offset(::PA, kernel, i::Int, p::Int) where {PA} = packed_a_offset(kernel, i, p)
 
+# B's column `j` at K step `p`, as the scalar `_accumulate_step` broadcasts.
+# The default -- a packed panel -- is the packed formula, so the packed paths
+# compile to the same code as before this indirection existed. The one other
+# method is `UnpackedBView`'s (src/execution/unpackedb.jl), which reads B in
+# place from its own storage: the kernel only ever consumes B one scalar at a
+# time, so unlike A it needs no particular layout to be read unpacked.
+# Dispatch is on `packed_b`'s TYPE, so the choice is made at compile time.
+@inline _b_step_load(packed_b::PB, kernel, j::Int, p::Int) where {PB} =
+    panel_load(packed_b, packed_b_offset(kernel, j, p))
+
 # Fully unrolled, closure-free K-step body: one vector load per A row-vector,
 # one scalar load per B column, NVECA*NR FMAs, generated as straight-line code.
 @generated function _accumulate_step(
@@ -101,7 +111,7 @@ end
             for v in 0:(NVECA - 1)
     ]
     load_b = [
-        :($(bvars[j + 1]) = panel_load(packed_b, packed_b_offset(kernel, $j, p)))
+        :($(bvars[j + 1]) = _b_step_load(packed_b, kernel, $j, p))
             for j in 0:(NR - 1)
     ]
 

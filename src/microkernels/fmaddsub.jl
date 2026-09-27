@@ -310,14 +310,11 @@ end
 
     load_b = Any[]
     for j in 0:(NR - 1)
-        push!(
-            load_b,
-            :($(brv[j + 1]) = Vec{$W, $R}(panel_load(packed_b, packed_b_plane_offset(kernel, 0, $j, p))))
-        )
-        push!(
-            load_b,
-            :($(biv[j + 1]) = Vec{$W, $R}(panel_load(packed_b, packed_b_plane_offset(kernel, 1, $j, p))))
-        )
+        # `_b_step_load2` (src/microkernels/planar.jl): the planar `(re, im)`
+        # pair, from a packed panel or an `UnpackedBView`.
+        push!(load_b, :((br_s, bi_s) = _b_step_load2(packed_b, kernel, $j, p)))
+        push!(load_b, :($(brv[j + 1]) = Vec{$W, $R}(br_s)))
+        push!(load_b, :($(biv[j + 1]) = Vec{$W, $R}(bi_s)))
     end
 
     acc_exprs = Vector{Any}(undef, NA)

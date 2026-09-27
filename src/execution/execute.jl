@@ -126,6 +126,11 @@ function _execute_nest!(
     lenB = length(plan.Bstorage)
     lenC = length(plan.Cstorage)
 
+    # Whether B is read in place by the microkernel instead of packed
+    # (src/execution/unpackedb.jl). Decided once per call; the B pack below
+    # is skipped and loops 2/1 run through `_micro_tiles_unpacked_b!`.
+    unpacked_b = _use_unpacked_b(plan)
+
     # --- loop 5: jc over N in steps of nc_eff ---
     jc = 0
     while jc < Qn
@@ -179,15 +184,18 @@ function _execute_nest!(
 
             beta_eff = firstpanel ? betaT : one(T)
 
-            # Pack the whole B panel for this (jc, pc): every N-sliver.
-            for s in 0:(n_slivers - 1)
-                sfirst = s * NRk
-                colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst)
-                bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
-                _pack_sliver!(
-                    unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
-                    kernel, btransform
-                )
+            # Pack the whole B panel for this (jc, pc): every N-sliver --
+            # unless the kernel reads B in place for this plan.
+            if !unpacked_b
+                for s in 0:(n_slivers - 1)
+                    sfirst = s * NRk
+                    colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst)
+                    bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
+                    _pack_sliver!(
+                        unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
+                        kernel, btransform
+                    )
+                end
             end
 
             # --- loop 3: ic over M in steps of mc_eff ---
@@ -233,18 +241,25 @@ function _execute_nest!(
                 end
 
                 # --- loop 2: jr over N-slivers; loop 1: ir over M-slivers ---
-                for s in 0:(n_slivers - 1)
-                    sfirst = s * NRk
-                    colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst)
-                    bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
-                    for r in 0:(m_slivers - 1)
-                        rfirst = r * MRk
-                        rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst)
-                        apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
-                        unsafe_execute_micro_tile!(
-                            kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                            apanel, bpanel, kblock, alphaT, beta_eff
-                        )
+                if unpacked_b
+                    _micro_tiles_unpacked_b!(
+                        kernel, plan, ws, rowsB_k, m_slivers, n_slivers,
+                        MRk, NRk, MRp, kblock, alphaT, beta_eff
+                    )
+                else
+                    for s in 0:(n_slivers - 1)
+                        sfirst = s * NRk
+                        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst)
+                        bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
+                        for r in 0:(m_slivers - 1)
+                            rfirst = r * MRk
+                            rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst)
+                            apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
+                            unsafe_execute_micro_tile!(
+                                kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
+                                apanel, bpanel, kblock, alphaT, beta_eff
+                            )
+                        end
                     end
                 end
 
