@@ -14,9 +14,17 @@
 #     explicit override row, else the `MR = 2W` rule where it has been
 #     validated, else a conservative fitted shape (`_fitted_shape`);
 #   * two plan-time demotions: to the fitted shape when M cannot fill one
-#     register tile (`_default_kernel`; complex on `:avx512` goes to an
-#     FMAddSub shape instead, `_small_m_shape`), and to a menu shape that
-#     keeps every register sliver unit-stride in C (`_demote_for_run`).
+#     register tile (`_default_kernel`, src/planning/defaults.jl; complex on
+#     `:avx512` goes to an FMAddSub shape instead, `_small_m_shape`), and to
+#     a menu shape that keeps every register sliver unit-stride in C
+#     (`_demote_for_run`).
+#
+# Everything here is a pure function of a `TargetProfile` and `T`. The
+# engine's per-call entry points (`_default_kernel`, `default_blocking(kernel)`)
+# live in src/planning/defaults.jl, which resolves these once per (profile,
+# `T`) and caches the result: the `Val(profile.isa)` dispatch below is a
+# dynamic one (the ISA is a runtime `Symbol`), too slow to repeat on every
+# `plan_contract`.
 
 # ----------------------------------------------------------------------------
 # Methods, menus and kernel types
@@ -152,6 +160,32 @@ _kernel_from_shape(shape::Tuple{Int, Int, Int}, ::Type{T}) where {T} =
     ex = :(_throw_shape_not_in_menu(shape, T, method))
     for (MR, NR, W) in reverse(kernel_shapes(T, M.instance))
         ex = :(shape === ($MR, $NR, $W) ? $K(Val($MR), Val($NR), T, Val($W)) : $ex)
+    end
+    return ex
+end
+
+"""
+    _with_menu_kernel(g, shape, T, method, args...) -> g(kernel, args...)
+
+`_kernel_from_shape`'s continuation-passing twin: build the `method` kernel
+for `T` at `shape` and hand it to `g` together with `args...`, so that `g`
+runs on a CONCRETE kernel type in every arm of the unrolled menu ladder.
+`_kernel_from_shape`'s return type is the Union of the whole menu, which a
+consumer has to dispatch on at runtime once the Union exceeds four members
+(ComplexF64's does: six planar plus four FMAddSub shapes); here the dispatch
+stays a chain of literal tuple compares and every `g` call is static. Same
+menu, same constructor and the same two throws as `_kernel_from_shape`. This
+is how `plan_contract` reaches its function barrier when the caller named no
+kernel; see `_plan_with_kernel` in src/planning/plan.jl for the measurement.
+"""
+@generated function _with_menu_kernel(
+        g::G, shape::Tuple{Int, Int, Int}, ::Type{T}, method::M, args...
+    ) where {G, T, M}
+    K = _kernel_type(M.instance, T)
+    K === nothing && return :(_throw_no_kernel(shape, T, method))
+    ex = :(_throw_shape_not_in_menu(shape, T, method))
+    for (MR, NR, W) in reverse(kernel_shapes(T, M.instance))
+        ex = :(shape === ($MR, $NR, $W) ? g($K(Val($MR), Val($NR), T, Val($W)), args...) : $ex)
     end
     return ex
 end
@@ -325,33 +359,26 @@ function _fitted_shape(profile::TargetProfile, ::Type{T}, method::PlanarMethod) 
 end
 
 # ----------------------------------------------------------------------------
-# The engine's default kernel, and plan-time demotion
+# The default kernel for a profile, and the small-M demotion rule
 # ----------------------------------------------------------------------------
 
+# The default kernel for `T` on `profile`, uncached: what `_default_kernel(T)`
+# (src/planning/defaults.jl) resolves for the detected host, and the form the
+# tests use with synthetic profiles.
 @noinline _kernel_for(profile::TargetProfile, ::Type{T}) where {T} =
     _kernel_from_shape(_derived_shape(profile, T), T, _default_method(T))
-
-_default_kernel(::Type{T}) where {T} = _kernel_for(target_profile(), T)
-
-# Extent-aware variant, used only when the caller did not name a kernel: a
-# contraction whose M extent cannot fill one register tile pads every
-# micro-tile away, so demote to the fitted shape. Keys on padding waste, a
-# countable quantity known at plan time, not on a cache estimate.
-@noinline function _default_kernel(::Type{T}, Qm::Int, Qn::Int) where {T}
-    profile = target_profile()
-    kernel = _kernel_for(profile, T)
-    (Qm > 0 && Qm < mr(kernel)) || return kernel
-    small = _small_m_shape(Val(profile.isa), profile, T, Qm)
-    small === nothing || return _kernel_from_shape(small, T, FMAddSubMethod())
-    method = _default_method(T)
-    return _kernel_from_shape(_fitted_shape(profile, T, method), T, method)
-end
 
 # Small-M demotion target for complex `T` on AVX-512: the native-width
 # (`W == lanes`) FMAddSub menu shape that pads `Qm` least (`cld(Qm, MR) * MR`),
 # ties by the larger `MR * NR` tile; `nothing` (keep the planar fitted shape)
-# everywhere else. Reached only through the demotion above, i.e. when `Qm` is
-# below the planar override's `MR` (24 for ComplexF64, 48 for ComplexF32).
+# everywhere else. Reached only through `_default_kernel`'s extent demotion
+# (src/planning/defaults.jl), i.e. when `Qm` is below the planar override's
+# `MR` (24 for ComplexF64, 48 for ComplexF32).
+#
+# Split in two so the host-dependent half can be cached: `_small_m_candidates`
+# is the native-width slice of the FMAddSub menu (a property of the profile
+# and `T` alone, empty wherever the rule does not apply), and
+# `_small_m_shape(candidates, Qm)` is the pure pick among them.
 #
 # Why: the planar fitted shape is the LARGEST fitting tile, `(16,6,8)` /
 # `(32,6,16)` on AVX-512 -- the planar shape measured 38-41% worst there (see
@@ -380,13 +407,16 @@ end
 # 45-79% before). Not extended to `:avx2` (where
 # the planar override has `MR = 4`, so demotion needs `Qm < 4`; unmeasured)
 # or to other ISAs.
-_small_m_shape(::Val, ::TargetProfile, ::Type, ::Int) = nothing
-function _small_m_shape(::Val{:avx512}, profile::TargetProfile, ::Type{T}, Qm::Int) where {T <: Complex}
+_small_m_candidates(::Val, ::TargetProfile, ::Type) = NTuple{3, Int}[]
+function _small_m_candidates(::Val{:avx512}, profile::TargetProfile, ::Type{T}) where {T <: Complex}
     lanes = profile.vector_bytes ÷ sizeof(real(T))
+    return [shape for shape in kernel_shapes(T, FMAddSubMethod()) if shape[3] == lanes]
+end
+
+function _small_m_shape(candidates::Vector{NTuple{3, Int}}, Qm::Int)
     best = nothing
-    for shape in kernel_shapes(T, FMAddSubMethod())
-        MR, NR, W = shape
-        W == lanes || continue
+    for shape in candidates
+        MR, NR, _ = shape
         key = (-(cld(Qm, MR) * MR), MR * NR)
         if best === nothing || key > best[1]
             best = (key, shape)
@@ -394,6 +424,9 @@ function _small_m_shape(::Val{:avx512}, profile::TargetProfile, ::Type{T}, Qm::I
     end
     return best === nothing ? nothing : best[2]
 end
+
+_small_m_shape(key::Val, profile::TargetProfile, ::Type{T}, Qm::Int) where {T} =
+    _small_m_shape(_small_m_candidates(key, profile, T), Qm)
 
 # Run-length-aware demotion, applied to whichever operand the M/N swap decision
 # chose to feed M. The vectorized store needs EVERY register sliver unit-stride

@@ -258,28 +258,29 @@ end
 
 @testset "label order: _order_free_labels sorts by |C-stride|, stably" begin
     # C strides (12, 1, 60, 3) at indC positions carrying labels 10,20,30,40.
+    # Label lists are statically sized tuples (src/planning/labels.jl), so the
+    # sort returns a tuple of the same length, compared with `===`.
     Cv = _lo_view((5, 3, 2, 4), (12, 1, 60, 3))
     indC = (10, 20, 30, 40)
-    labels = [10, 20, 30, 40]
-    @test _lo_order(labels, indC, Cv) == [20, 40, 10, 30]
-    @test labels == [10, 20, 30, 40]                 # input untouched
-    @test _lo_order([40, 10], indC, Cv) == [40, 10]  # a subset: only its own members
-    @test _lo_order([30, 20], indC, Cv) == [20, 30]
+    labels = (10, 20, 30, 40)
+    @test _lo_order(labels, indC, Cv) === (20, 40, 10, 30)
+    @test _lo_order((40, 10), indC, Cv) === (40, 10)  # a subset: only its own members
+    @test _lo_order((30, 20), indC, Cv) === (20, 30)
 
     # Ties keep input order, whichever way the input is given.
     Ct = _lo_view((2, 3, 4), (1, 1, 1))
-    @test _lo_order([7, 8, 9], (7, 8, 9), Ct) == [7, 8, 9]
-    @test _lo_order([9, 7, 8], (7, 8, 9), Ct) == [9, 7, 8]
+    @test _lo_order((7, 8, 9), (7, 8, 9), Ct) === (7, 8, 9)
+    @test _lo_order((9, 7, 8), (7, 8, 9), Ct) === (9, 7, 8)
 
     # Negative strides sort by magnitude.
     Cn = _lo_view((3, 4), (-1, 4))
-    @test _lo_order([20, 10], (10, 20), Cn) == [10, 20]
+    @test _lo_order((20, 10), (10, 20), Cn) === (10, 20)
     Cn2 = _lo_view((3, 4), (4, -1))
-    @test _lo_order([10, 20], (10, 20), Cn2) == [20, 10]
+    @test _lo_order((10, 20), (10, 20), Cn2) === (20, 10)
 
     # Degenerate lengths.
-    @test _lo_order(Int[], indC, Cv) == Int[]
-    @test _lo_order([30], indC, Cv) == [30]
+    @test _lo_order((), indC, Cv) === ()
+    @test _lo_order((30,), indC, Cv) === (30,)
 end
 
 @testset "label order: _leading_unit_run / _prefer_swap" begin
@@ -288,38 +289,38 @@ end
     indC = (1, 2, 3, 4, 5, 6)                            # a,b,c,i,j,k
     a, b, c, i, j, k = indC
 
-    @test _lo_run([a, i, j], indC, C6) == d          # ccsd_t_1's sorted M: run stops at i
-    @test _lo_run([a, b, k], indC, C6) == d^2        # ccsd_t_3's sorted N: b is C-adjacent to a
-    @test _lo_run([a, b, c, i, j, k], indC, C6) == d^6
-    @test _lo_run([b, i, j], indC, C6) == 1          # no unit-stride head
-    @test _lo_run([a, c, b], indC, C6) == d          # sorted order is the caller's job
-    @test _lo_run(Int[], indC, C6) == 1
+    @test _lo_run((a, i, j), indC, C6) == d          # ccsd_t_1's sorted M: run stops at i
+    @test _lo_run((a, b, k), indC, C6) == d^2        # ccsd_t_3's sorted N: b is C-adjacent to a
+    @test _lo_run((a, b, c, i, j, k), indC, C6) == d^6
+    @test _lo_run((b, i, j), indC, C6) == 1          # no unit-stride head
+    @test _lo_run((a, c, b), indC, C6) == d          # sorted order is the caller's job
+    @test _lo_run((), indC, C6) == 1
 
     # A descending contiguous axis is NOT a unit-stride run (`_unit_stride_rows`
     # is `stride == 1`).
-    @test _lo_run([10, 20], (10, 20), _lo_view((3, 4), (-1, 3))) == 1
+    @test _lo_run((10, 20), (10, 20), _lo_view((3, 4), (-1, 3))) == 1
     # Singleton axes are skipped whatever their stride; an empty axis ends it.
-    @test _lo_run([10, 20], (10, 20), _lo_view((1, 6), (5, 1))) == 6
-    @test _lo_run([10, 20], (10, 20), _lo_view((6, 1), (1, 17))) == 6
-    @test _lo_run([10, 20], (10, 20), _lo_view((0, 6), (1, 1))) == 0
+    @test _lo_run((10, 20), (10, 20), _lo_view((1, 6), (5, 1))) == 6
+    @test _lo_run((10, 20), (10, 20), _lo_view((6, 1), (1, 17))) == 6
+    @test _lo_run((10, 20), (10, 20), _lo_view((0, 6), (1, 1))) == 0
 
     # The swap rule on the ccsd_t shapes at dim 4, with `mr` played by hand.
-    # ccsd_t_2: sorted M = [b,i,j] (run 1), sorted N = [a,c,k] (run 4).
-    @test _lo_swap([b, i, j], [a, c, k], indC, C6, 4)        # 4-wide kernel: swap
-    @test !_lo_swap([b, i, j], [a, c, k], indC, C6, 8)       # 8-wide: 4 < 8, do not swap
-    # ccsd_t_3: sorted N = [a,b,k] (run 16): the adjacent label extends it.
-    @test _lo_swap([c, i, j], [a, b, k], indC, C6, 8)
-    @test _lo_swap([c, i, j], [a, b, k], indC, C6, 16)
-    @test !_lo_swap([c, i, j], [a, b, k], indC, C6, 32)
+    # ccsd_t_2: sorted M = (b,i,j) (run 1), sorted N = (a,c,k) (run 4).
+    @test _lo_swap((b, i, j), (a, c, k), indC, C6, 4)        # 4-wide kernel: swap
+    @test !_lo_swap((b, i, j), (a, c, k), indC, C6, 8)       # 8-wide: 4 < 8, do not swap
+    # ccsd_t_3: sorted N = (a,b,k) (run 16): the adjacent label extends it.
+    @test _lo_swap((c, i, j), (a, b, k), indC, C6, 8)
+    @test _lo_swap((c, i, j), (a, b, k), indC, C6, 16)
+    @test !_lo_swap((c, i, j), (a, b, k), indC, C6, 32)
     # ccsd_t_1: M already has the run; never swap, whatever mr says.
-    @test !_lo_swap([a, i, j], [b, c, k], indC, C6, 4)
-    @test !_lo_swap([a, i, j], [b, c, k], indC, C6, 8)
+    @test !_lo_swap((a, i, j), (b, c, k), indC, C6, 4)
+    @test !_lo_swap((a, i, j), (b, c, k), indC, C6, 8)
     # Two-mr form: each orientation is judged against the kernel it would run.
-    @test _lo_swap([b, i, j], [a, c, k], indC, C6, 8, 4)
-    @test !_lo_swap([b, i, j], [a, c, k], indC, C6, 8, 8)
-    @test !_lo_swap([a, i, j], [b, c, k], indC, C6, 4, 4)
+    @test _lo_swap((b, i, j), (a, c, k), indC, C6, 8, 4)
+    @test !_lo_swap((b, i, j), (a, c, k), indC, C6, 8, 8)
+    @test !_lo_swap((a, i, j), (b, c, k), indC, C6, 4, 4)
     # Nothing to swap onto.
-    @test !_lo_swap([b, i, j], Int[], indC, C6, 1)
+    @test !_lo_swap((b, i, j), (), indC, C6, 1)
 end
 
 @testset "label order: the two _prefer_swap methods agree" begin
@@ -332,8 +333,8 @@ end
     indC = (1, 2, 3, 4, 5, 6)
     a, b, c, i, j, k = indC
     for (morder, norder, mr_asis, mr_swapped) in (
-            ([b, i, j], [a, c, k], 4, 4), ([b, i, j], [a, c, k], 8, 8),
-            ([c, i, j], [a, b, k], 8, 16), ([a, i, j], [b, c, k], 4, 8),
+            ((b, i, j), (a, c, k), 4, 4), ((b, i, j), (a, c, k), 8, 8),
+            ((c, i, j), (a, b, k), 8, 16), ((a, i, j), (b, c, k), 4, 8),
         )
         run_m = _lo_run(morder, indC, C6)
         run_n = _lo_run(norder, indC, C6)
@@ -378,7 +379,7 @@ end
         strides = ntuple(_ -> rand(rng, (-3, -1, 1, 2, 3, 7)), D)
         Cr = _lo_view(lens, strides)
         nlabels = rand(rng, 1:D)
-        order = Random.shuffle(rng, collect(1:D))[1:nlabels]
+        order = Tuple(Random.shuffle(rng, collect(1:D))[1:nlabels])
         Qm = prod(lens[l] for l in order)
         Qm == 1 && continue
         ntested += 1

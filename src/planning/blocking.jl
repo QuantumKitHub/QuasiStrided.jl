@@ -23,20 +23,9 @@ struct Blocking
     end
 end
 
-"""
-    default_blocking(kernel) -> Blocking
-
-Cache-blocking factors for `kernel` on this host: an analytical model of the
-detected cache geometry ([`target_profile`](@ref), `_modelled_blocking`) for
-the real row at the engine's real register shape, scaled per complex method
-by packed reals per element. With L1d or L2 undetected, fixed fallback
-constants instead. Measured grids are wide plateaus (1.7-17% best-to-worst
-over `bench_driver.jl`'s 36 points, 4-24% over 157) whose one cliff is small
-`kc`, so no row is a sharp optimum. `plan_contract` rounds `mc`/`nc` to
-`mr`/`nr` multiples and clamps all three to the contraction's extents.
-"""
-default_blocking(kernel) =
-    default_blocking(Val(target_profile().isa), scalartype(kernel), complex_method(kernel))
+# `default_blocking(kernel)`, the form `plan_contract` consumes, lives in
+# src/planning/defaults.jl: it reads the real row below through the
+# per-(profile, eltype) cache rather than re-deriving it on every plan.
 
 # Complex blocking is the real row divided by the packed reals per element of
 # each operand, so every method gets the same packed BYTE budget rather than
@@ -72,7 +61,14 @@ default_blocking(::Val, ::Type{T}) where {T} = _fallback_blocking(T)
 # Every ISA takes the model; the `Val` key is kept so a future measured row
 # can override one ISA without touching the others.
 default_blocking(::Val, ::Type{T}) where {T <: Union{Float32, Float64}} =
-    something(_modelled_blocking(target_profile(), T), _fallback_blocking(T))
+    _real_blocking_row(target_profile(), T)
+
+# The real row for `T` on `profile`: the cache model where the geometry is
+# detected, the fallback constants otherwise. The one definition behind both
+# `default_blocking(::Val, T)` above and the per-(profile, eltype) cache in
+# src/planning/defaults.jl, so the two cannot disagree.
+_real_blocking_row(profile::TargetProfile, ::Type{T}) where {T <: Union{Float32, Float64}} =
+    something(_modelled_blocking(profile, T), _fallback_blocking(T))
 
 # --- analytical real row, from the detected cache geometry -------------------
 #

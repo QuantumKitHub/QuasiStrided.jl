@@ -1,5 +1,15 @@
 # Label planning: classify every label into M/N/K, order the free labels
 # by their stride in C, and decide the M/N operand orientation.
+#
+# Every label list here is a statically sized `NTuple{D,Int}`, never a
+# `Vector{Int}`: the three composite RANKS are fixed by the label tuples'
+# lengths alone (`_group_ranks`), so the lists can be built, sorted and handed
+# to `_build_pair_group` without one heap allocation, and each `AxisGroup{D,2}`
+# comes out concretely typed. Measured (ccqlin038, Julia 1.12.7, 8x8x8 real
+# GEMM through the TensorOperations adapter): the previous `Vector`-based
+# planner allocated five vectors (~370 B) per call, and the value-dependent
+# rank made the `_plan_contract` barrier a dynamic dispatch that boxed every
+# non-isbits argument (~800 B more) -- together roughly half of a 1.1 us call.
 
 # Membership test against a statically-sized label tuple, used instead of a
 # `Set`: the label tuples have a compile-time-known LENGTH (the `NA`/`NB`/`NC`
@@ -10,8 +20,41 @@
 # of the membership question.
 @inline _label_in(lbl::Int, t::NTuple{N, Int}) where {N} = any(==(lbl), t)
 
+# The M/N/K composite ranks, from the label tuples' lengths alone. Once
+# `_classify_labels`' validation has passed, the labels of A, B and C are each
+# partitioned as A = M ∪ K, B = N ∪ K, C = M ∪ N (every label is in exactly two
+# operands), so
+#
+#     NA = |M| + |K|,  NB = |N| + |K|,  NC = |M| + |N|
+#
+# and the three counts follow by solving. Compile-time constants: `NA`/`NB`/
+# `NC` are type parameters, so the label tuples below get literal lengths and
+# every `AxisGroup` a concrete rank. On an input the validation REJECTS these
+# formulas may be meaningless (even negative); they are only ever evaluated
+# after validation has passed, and `_classify_labels` still asserts them
+# against the counts it actually found.
+@inline _group_ranks(NA::Int, NB::Int, NC::Int) =
+    ((NA + NC - NB) ÷ 2, (NB + NC - NA) ÷ 2, (NA + NB - NC) ÷ 2)
+
+@noinline _throw_rank_mismatch(which::Symbol, found::Int, derived::Int) = throw(
+    ArgumentError(
+        "internal error: $which label count $found does not match the rank $derived " *
+            "derived from the label tuple lengths"
+    )
+)
+
+# Append `x` as element `n` of the statically sized `out` (1-based), leaving
+# it unchanged when `n` is past the end: `_classify_labels` fills the lists as
+# it validates, and the length guard keeps an input that is about to be
+# rejected from indexing past a literal-length tuple before the rejection
+# fires.
+@inline function _push_label(out::NTuple{D, Int}, n::Int, x::Int) where {D}
+    return n <= D ? _tupleset(out, n, x) : out
+end
+
 # Classify every label in indA ∪ indB ∪ indC into M/N/K. Returns
-# (mlabels, nlabels, klabels) in indA/indB appearance order. Per (inA,inB,inC):
+# (mlabels, nlabels, klabels) as `NTuple`s in indA/indB appearance order, with
+# lengths fixed by `_group_ranks`. Per (inA,inB,inC):
 #   (T,F,T)->M  (F,T,T)->N  (T,T,F)->K  everything else -> ArgumentError
 # (labeled in C only, present in all three, or dangling in just A or B).
 function _classify_labels(
@@ -25,10 +68,10 @@ function _classify_labels(
     allunique(indC) ||
         throw(ArgumentError("indC has a repeated label (diagonal), not supported: $indC"))
 
-    # Sized once to their worst case and trimmed at the end, rather than grown
-    # by `push!`: `NA`/`NB` are compile-time bounds on the M+K and N counts.
-    mlabels = Vector{Int}(undef, NA)
-    klabels = Vector{Int}(undef, NA)
+    DM, DN, DK = _group_ranks(NA, NB, NC)
+    mlabels = ntuple(_ -> 0, Val(max(DM, 0)))
+    nlabels = ntuple(_ -> 0, Val(max(DN, 0)))
+    klabels = ntuple(_ -> 0, Val(max(DK, 0)))
     nm = 0
     nk = 0
     for lbl in indA
@@ -43,10 +86,10 @@ function _classify_labels(
             )
         elseif inB && !inC
             nk += 1
-            @inbounds klabels[nk] = lbl
+            klabels = _push_label(klabels, nk, lbl)
         elseif !inB && inC
             nm += 1
-            @inbounds mlabels[nm] = lbl
+            mlabels = _push_label(mlabels, nm, lbl)
         else
             throw(
                 ArgumentError(
@@ -57,7 +100,6 @@ function _classify_labels(
         end
     end
 
-    nlabels = Vector{Int}(undef, NB)
     nn = 0
     for lbl in indB
         inA = _label_in(lbl, indA)
@@ -68,7 +110,7 @@ function _classify_labels(
             continue  # already classified as K, above.
         elseif !inA && inC
             nn += 1
-            @inbounds nlabels[nn] = lbl
+            nlabels = _push_label(nlabels, nn, lbl)
         else
             throw(
                 ArgumentError(
@@ -86,9 +128,11 @@ function _classify_labels(
             throw(ArgumentError("label $lbl appears in indC but not in indA or indB"))
     end
 
-    resize!(mlabels, nm)
-    resize!(nlabels, nn)
-    resize!(klabels, nk)
+    # Unreachable once the three loops above have passed (see `_group_ranks`);
+    # kept so a wrong rank can never silently truncate a label list.
+    nm == DM || _throw_rank_mismatch(:M, nm, DM)
+    nn == DN || _throw_rank_mismatch(:N, nn, DN)
+    nk == DK || _throw_rank_mismatch(:K, nk, DK)
     return mlabels, nlabels, klabels
 end
 
@@ -109,27 +153,26 @@ end
 # comes back unchanged. Every label must occur in `indC` (the M/N lists from
 # `_classify_labels` do by construction; K labels never come here).
 # Insertion sort rather than `sortperm` + permuted copy: the latter allocates
-# the key vector, the permutation and the result (three `Vector`s where one is
-# needed), and these lists have at most `ndims(C)` entries, so an O(n^2) sort
-# with n <= 6 is not a cost. Strict `>` in the shift test keeps it STABLE,
-# which is the contract (ties keep input order). A fresh vector is returned:
-# sorting `labels` in place would mutate `_classify_labels`'s output, which
-# callers (and test/planning/test_plan_contract.jl's label-order pinning) read afterwards.
+# the key vector, the permutation and the result, and these lists have at most
+# `ndims(C)` entries, so an O(n^2) sort with n <= 6 is not a cost. Strict `>`
+# in the shift test keeps it STABLE, which is the contract (ties keep input
+# order). Works on the tuple by value through `_tupleset`, so the caller's
+# `labels` is untouched and nothing is allocated.
 function _order_free_labels(
-        labels::Vector{Int}, indC::NTuple{NC, Int}, C::StridedView
-    ) where {NC}
+        labels::NTuple{D, Int}, indC::NTuple{NC, Int}, C::StridedView
+    ) where {D, NC}
     st = Base.strides(C)
     key(l::Int) = abs(st[findfirst(==(l), indC)::Int])
-    out = copy(labels)
-    @inbounds for i in 2:length(out)
+    out = labels
+    @inbounds for i in 2:D
         x = out[i]
         kx = key(x)
         j = i - 1
         while j >= 1 && key(out[j]) > kx
-            out[j + 1] = out[j]
+            out = _tupleset(out, j + 1, out[j])
             j -= 1
         end
-        out[j + 1] = x
+        out = _tupleset(out, j + 1, x)
     end
     return out
 end
@@ -142,8 +185,8 @@ end
 # skipped (their coordinate never advances, whatever their stride says).
 # Returns 1 when no run starts, 0 if an empty axis is met first.
 function _leading_unit_run(
-        labels::Vector{Int}, indC::NTuple{NC, Int}, C::StridedView
-    ) where {NC}
+        labels::NTuple{D, Int}, indC::NTuple{NC, Int}, C::StridedView
+    ) where {D, NC}
     st = Base.strides(C)
     run = 1
     for l in labels
@@ -186,9 +229,9 @@ end
 # Label-list form, for callers that have `morder`/`norder` but not their run
 # lengths; derives the same two run lengths `plan_contract` computes once.
 function _prefer_swap(
-        morder::Vector{Int}, norder::Vector{Int}, indC::NTuple{NC, Int}, C::StridedView,
-        mr_asis::Int, mr_swapped::Int = mr_asis
-    ) where {NC}
+        morder::NTuple{DM, Int}, norder::NTuple{DN, Int}, indC::NTuple{NC, Int},
+        C::StridedView, mr_asis::Int, mr_swapped::Int = mr_asis
+    ) where {DM, DN, NC}
     return _prefer_swap(
         _leading_unit_run(morder, indC, C), _leading_unit_run(norder, indC, C),
         mr_asis, mr_swapped

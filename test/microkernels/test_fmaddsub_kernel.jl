@@ -375,17 +375,23 @@ const _QSF = QuasiStrided
                     v, j = (idx - 1) % MV, (idx - 1) ÷ MV
                     Vec{W, R}(ntuple(l -> R(1000 * j + v * W + l - 1), W))
                 end
+                # Scattered rows (same physical layout as unit stride): the
+                # gate of the vectorized fast path excludes them, so this is
+                # the scalar READER under test, as the testset name says. The
+                # fast path has its own file,
+                # test/microkernels/test_fmaddsub_store_fastpath.jl.
+                rows_scattered = ScatterAxis(collect(0:(MR - 1)), MR)
                 for (alpha, beta) in ((one(T), zero(T)), (T(2, -1), T(0.5, 0.25)))
                     s1 = [T(i, -i) for i in 1:(MR * NR)]
                     s2 = copy(s1)
-                    d1 = DestinationTile(s1, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
-                    d2 = DestinationTile(s2, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
+                    d1 = DestinationTile(s1, 0, rows_scattered, AffineAxis(0, MR, NR))
+                    d2 = DestinationTile(s2, 0, rows_scattered, AffineAxis(0, MR, NR))
                     store_tile!(d1, acc, alpha, beta, kf)
                     store_tile!(d2, acc, alpha, beta, km)
                     @test isequal(s1, s2)
                 end
                 storage = zeros(T, MR * NR)
-                dst = DestinationTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
+                dst = DestinationTile(storage, 0, rows_scattered, AffineAxis(0, MR, NR))
                 store_tile!(dst, acc, one(T), zero(T), kf)
                 for j in 0:(NR - 1), i in 0:(MR - 1)
                     @test storage[i + j * MR + 1] ==
