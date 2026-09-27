@@ -148,12 +148,18 @@ end
 # per the guardrail at the top of src/execution/macrokernel.jl), so each view
 # is concretely typed and the micro-tile calls specialize on it.
 #
+# `@noinline`: one call per (jc, pc, ic) block, and inlined it grows
+# `_execute_nest!` for EVERY plan, including the packed ones -- measured
+# 2026-09-27 (ccqlin038) as ~+4% on the packed-B TCCG case ccsd_2 dim16
+# Float64 (7.2 -> 7.5 us), gone out of line, with no measurable cost to the
+# unpacked 16^3/32^3 matmuls.
+#
 # Bounds: the addresses a view can read are `Bbase + colbase[j] + koffset(p)`
 # for the sliver's own columns (padding aliases a valid one) and this panel's
 # K offsets -- a subset of the `(rng_kB, rng_nB)` rectangle the caller has
 # already passed through `checked_span_bounds` (check 1 of 3), which is why
 # the element loads are `@inbounds`. C is covered by the caller's check 3.
-@inline function _micro_tiles_unpacked_b!(
+@noinline function _micro_tiles_unpacked_b!(
         kernel::K, plan::ContractPlan, ws, rowsB_k::KA, m_slivers::Int, n_slivers::Int,
         MRk::Int, NRk::Int, MRp::Int, kblock::Int, alphaT, beta_eff
     ) where {K, KA <: Axis}
