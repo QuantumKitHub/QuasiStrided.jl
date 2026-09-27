@@ -58,6 +58,7 @@ include("execution/oracle.jl")
 include("execution/direct.jl")
 include("execution/halfpack.jl")
 include("execution/unpackedb.jl")
+include("execution/dot.jl")
 
 # --- Integrations ---
 include("integrations/tensoroperations.jl")
