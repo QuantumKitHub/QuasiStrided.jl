@@ -79,10 +79,13 @@ function execute!(plan::ContractPlan{T}, alpha::Number, beta::Number) where {T}
 
     # Degenerate extents take a dedicated path instead of the nest when their
     # layout allows: a K-contiguous matrix operand with `M == 1` or `N == 1`
-    # goes to the K-vectorized dot path (src/execution/dot.jl). It declines
-    # (returns `false`) on an ineligible plan, and the nest below runs.
+    # goes to the K-vectorized dot path (src/execution/dot.jl); a real
+    # `K == 1` outer product with unit-stride M goes to the streaming
+    # outer-product path (src/execution/outer.jl). Each declines (returns
+    # `false`) on an ineligible plan, and the nest below runs.
     (Qm == 1 || Qn == 1) && _try_execute_dot!(plan, alphaT, betaT, Qm, Qn, Qk) &&
         return plan.Cstorage
+    Qk == 1 && _try_execute_outer!(plan, alphaT, betaT, Qm, Qn) && return plan.Cstorage
 
     mc_eff = plan.blocking.mc
     kc_eff = plan.blocking.kc
