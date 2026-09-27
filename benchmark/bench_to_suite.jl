@@ -1,48 +1,66 @@
 # Head-to-head timing of StridedBLAS() and QuasiStridedBackend() on the
-# upstream TensorOperations.jl benchmark suite's :pairwise/:tccg/:mps/:ctmrg/
-# :trg cases.
+# upstream TensorOperations.jl benchmark suite (TensorOperationsBenchmarks,
+# QuantumKitHub/TensorOperations.jl#303) -- its :contract and :network
+# categories.
 #
 # StridedNative() is not in BACKENDS: plot_bench_to_suite.jl does not plot it
-# (see that file's header), and on :ctmrg/:trg it has a severe, size-growing
-# slowdown (see the --trg-chis note in submit_evidence_gate.sh) that puts a
-# ComplexF64 run at risk of exceeding the job's walltime.
+# (see that file's header), and on :network's trg topic it has a severe,
+# size-growing slowdown (42x StridedBLAS at chi=32, >100 s per call at 48) that
+# puts a ComplexF64 run at risk of exceeding the job's walltime. Upstream's
+# :permute/:trace categories are not run either: QuasiStridedBackend forwards
+# tensoradd!/tensortrace! to StridedNative (src/integrations/tensoroperations.jl),
+# so they would time the same code twice.
 #
 #   julia --project=benchmark benchmark/bench_to_suite.jl [options]
 #
 # Options (all optional):
-#   --categories pairwise,tccg,mps,ctmrg,trg
+#   --categories contract,network
+#   --sources synthetic,tccg,batched   # :contract subsets (upstream's params.source tag)
+#   --topics mps,ctmrg,trg             # :network subsets (upstream's params.topic tag)
 #   --dtypes Float64,Float32
-#   --pairwise-sizes 15,63,128
-#   --tccg-sizes 8,16
-#   --mps-bonddims 32,64,128     # MPS/MPO effective-Hamiltonian bond dim D
-#   --ctmrg-chis 16,32,64        # CTMRG environment bond dim chi
-#   --trg-chis 16,32,48          # TRG plaquette bond dim chi
-#   --reps 21
-#   --max-bytes 2147483648      # per-case skip ceiling
+#   --synthetic-sizes 4,8,16,32,63     # leg dim of the synthetic contract shapes
+#   --tccg-sizes 8,16                  # leg dim applied to every TCCG index
+#   --batched-sizes 4,8,16,32,64       # matrix dim of each batched slice
+#   --mps-bonddims 32,64,128           # MPS/MPO effective-Hamiltonian bond dim D
+#   --ctmrg-chis 16,32,64              # CTMRG environment bond dim chi
+#   --trg-chis 16,32,48                # TRG plaquette bond dim chi
+#   --reps 21                          # upper bound on timed reps per backend
+#   --time-budget 10                   # seconds per (case, backend); reps shrink
+#                                      #   (to no fewer than 5) to fit it
+#   --max-bytes 2147483648             # per-case skip ceiling
+#   --max-flops 200000000000           # per-case skip ceiling
+#   --outdir <path>                    # default benchmark/results/<host>-<date>
 #
-# :mps/:ctmrg/:trg are multi-tensor `NetworkSpec` cases (run via `ncon`, not
-# `tensorcontract!` directly), unlike :pairwise/:tccg's two-tensor
-# `ContractSpec` cases -- see build_case/run_case! dispatch below. `ncon` has
-# no in-place variant, so timing for these three categories includes output
-# allocation (this matches upstream's own accepted discipline, see
-# TensorOperationsBenchmarks/src/lowering.jl).
+# Upstream's generators share one `sizes` sweep across a category's sources
+# (:contract) or topics (:network); this driver calls each source/topic's own
+# generator with its own sweep instead, since a leg dim that is sensible for a
+# rank-4 synthetic shape is far too large for a rank-6 CCSD(T) equation, and
+# likewise for trg's chi^6 vs mps's D^3 cost. Each case keeps upstream's
+# category/id/params unchanged.
+#
+# :network cases are multi-tensor `NetworkSpec`s run via `ncon` (no in-place
+# variant, so their timing includes output allocation -- upstream's own
+# accepted discipline, see TensorOperationsBenchmarks/src/lowering.jl).
+# `BatchedContractSpec` (source=batched) times `batch` separate
+# tensorcontract! calls, which is the point of that case (per-call overhead).
 #
 # Writes bench_to_suite.csv / canary_to_suite.csv / summary_to_suite.txt /
-# mismatches_to_suite.txt / PROVENANCE_to_suite.txt to
-# benchmark/results/<hostname>-<date>/.
+# mismatches_to_suite.txt / PROVENANCE_to_suite.txt to the output directory.
 #
-# bench_to_suite.csv's `gflops` column is the median-time-based rate
-# (unchanged); `min_gflops`/`std_gflops` are the min and standard deviation
-# of the REPS per-rep GFLOP/s samples (not derived from min/max *time*
-# converted to a rate -- computed directly on the per-rep throughput array so
-# they describe the throughput distribution plot_bench_to_suite.jl's violin
-# plots are built from).
+# bench_to_suite.csv's `gflops` column is the median-time-based rate;
+# `min_gflops`/`std_gflops` are the min and standard deviation of the per-rep
+# GFLOP/s samples (computed directly on the per-rep throughput array so they
+# describe the distribution plot_bench_to_suite.jl's violin plots are built
+# from). `group` is the case's source (contract) or topic (network), `layout`
+# the synthetic label-order layout (empty otherwise), `blas` upstream's
+# `isblasequivalent`, `intensity` FLOP/byte at the run's dtype, and `expr` a
+# compact einsum-style expression (single letters, `A B>C`).
 
 using TensorOperations
 using TensorOperations: StridedBLAS
 using TensorOperationsBenchmarks
-using TensorOperationsBenchmarks: BenchmarkCase, ContractSpec, NetworkSpec, flops, bytes,
-    ArrayProvider, randtensor
+using TensorOperationsBenchmarks: BenchmarkCase, ContractSpec, BatchedContractSpec,
+    NetworkSpec, flops, isblasequivalent, ArrayProvider, randtensor
 using QuasiStrided
 using QuasiStrided: QuasiStridedBackend
 using Statistics: std
@@ -53,44 +71,78 @@ include(joinpath(@__DIR__, "harness.jl"))
 const TOB = TensorOperationsBenchmarks
 
 const REPS = argopt("reps", 21)
+const MIN_REPS = 5
+const TIME_BUDGET = parse(Float64, argopt("time-budget", "10"))
 const DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32"))
-const CATEGORIES = Symbol.(split(argopt("categories", "pairwise,tccg"), ','))
-const PAIRWISE_SIZES = parse_ints(argopt("pairwise-sizes", "15,63,128"))
+const CATEGORIES = Symbol.(split(argopt("categories", "contract"), ','))
+const SOURCES = Symbol.(split(argopt("sources", "synthetic,tccg,batched"), ','))
+const TOPICS = Symbol.(split(argopt("topics", "mps,ctmrg,trg"), ','))
+const SYNTHETIC_SIZES = parse_ints(argopt("synthetic-sizes", "4,8,16,32,63"))
 const TCCG_SIZES = parse_ints(argopt("tccg-sizes", "8,16"))
+const BATCHED_SIZES = parse_ints(argopt("batched-sizes", "4,8,16,32,64"))
 const MPS_BONDDIMS = parse_ints(argopt("mps-bonddims", "32,64,128"))
 const CTMRG_CHIS = parse_ints(argopt("ctmrg-chis", "16,32,64"))
 const TRG_CHIS = parse_ints(argopt("trg-chis", "16,32,48"))
 const MAX_CASE_BYTES = argopt("max-bytes", 2 * 2^30)
+const MAX_CASE_FLOPS = parse(Float64, argopt("max-flops", "2e11"))
 
 const BACKENDS = (
     StridedBLAS = StridedBLAS(),
     QuasiStrided = QuasiStridedBackend(),
 )
 
-# `REGISTRY[:pairwise]`/`[:tccg]`/`[:mps]`/`[:ctmrg]`/`[:trg]` are called
-# directly, bypassing `build_suite`/BenchmarkTools, for this project's own
-# timing discipline.
-@assert TOB.REGISTRY[:pairwise] === TOB._pairwise_cases
-@assert TOB.REGISTRY[:tccg] === TOB._tccg_cases
-@assert TOB.REGISTRY[:mps] === TOB._mps_cases
-@assert TOB.REGISTRY[:ctmrg] === TOB._ctmrg_cases
-@assert TOB.REGISTRY[:trg] === TOB._trg_cases
+# The per-source/per-topic generators are called directly, bypassing
+# `build_suite`/BenchmarkTools, for this project's own timing discipline.
+# These asserts pin the assumption that the registered categories are exactly
+# the union of those generators, so an upstream reshuffle fails loudly here.
+@assert TOB.REGISTRY[:contract] === TOB._contract_cases
+@assert TOB.REGISTRY[:network] === TOB._network_cases
+let probe = (8,)
+    @assert length(TOB._contract_cases(probe)) == length(TOB._synthetic_contract_cases(probe)) +
+        length(TOB._tccg_cases(probe)) + length(TOB._batched_contract_cases(probe))
+    @assert length(TOB._network_cases(probe)) == length(TOB._mps_cases(probe)) +
+        length(TOB._ctmrg_cases(probe)) + length(TOB._trg_cases(probe))
+end
 
-const CASES = vcat(
-    :pairwise in CATEGORIES ? TOB._pairwise_cases(PAIRWISE_SIZES) : BenchmarkCase[],
-    :tccg in CATEGORIES ? TOB._tccg_cases(TCCG_SIZES) : BenchmarkCase[],
-    :mps in CATEGORIES ? TOB._mps_cases(MPS_BONDDIMS) : BenchmarkCase[],
-    :ctmrg in CATEGORIES ? TOB._ctmrg_cases(CTMRG_CHIS) : BenchmarkCase[],
-    :trg in CATEGORIES ? TOB._trg_cases(TRG_CHIS) : BenchmarkCase[],
+const CONTRACT_GENERATORS = (
+    synthetic = (TOB._synthetic_contract_cases, SYNTHETIC_SIZES),
+    tccg = (TOB._tccg_cases, TCCG_SIZES),
+    batched = (TOB._batched_contract_cases, BATCHED_SIZES),
+)
+const NETWORK_GENERATORS = (
+    mps = (TOB._mps_cases, MPS_BONDDIMS),
+    ctmrg = (TOB._ctmrg_cases, CTMRG_CHIS),
+    trg = (TOB._trg_cases, TRG_CHIS),
 )
 
-_nelem(spec::ContractSpec, I) = prod((spec.dims[l] for l in I); init = 1)
+function _generate(generators, selected, category)
+    cases = BenchmarkCase[]
+    for (name, (gen, sizes)) in pairs(generators)
+        name in selected || continue
+        for case in gen(sizes)
+            @assert case.category === category
+            push!(cases, case)
+        end
+    end
+    return cases
+end
+
+const CASES = vcat(
+    :contract in CATEGORIES ? _generate(CONTRACT_GENERATORS, SOURCES, :contract) : BenchmarkCase[],
+    :network in CATEGORIES ? _generate(NETWORK_GENERATORS, TOPICS, :network) : BenchmarkCase[],
+)
+
+_nelem(spec::Union{ContractSpec, BatchedContractSpec}, I) = prod((spec.dims[l] for l in I); init = 1)
 _nelem_network(spec::NetworkSpec, il) = prod((spec.dims[abs(l)] for l in il); init = 1)
 
-# `bytes(spec)` assumes Float64 elements; this is dtype-generic.
+# Upstream's `bytes(spec)` assumes Float64 elements; this is dtype-generic.
 function case_bytes(spec::ContractSpec, ::Type{T}) where {T}
     n = _nelem(spec, spec.IA) + _nelem(spec, spec.IB) + _nelem(spec, spec.IC)
     return n * sizeof(T)
+end
+function case_bytes(spec::BatchedContractSpec, ::Type{T}) where {T}
+    n = _nelem(spec, spec.IA) + _nelem(spec, spec.IB) + _nelem(spec, spec.IC)
+    return spec.batch * n * sizeof(T)
 end
 
 # All input tensors plus the (fresh, `ncon`-allocated) output.
@@ -103,16 +155,45 @@ end
 params_string(params::NamedTuple) =
     join(("$k=$(getfield(params, k))" for k in keys(params)), ";")
 
-# :pairwise/:tccg cases sweep a leg dimension `dim`; :mps sweeps bond dim `D`;
-# :ctmrg/:trg sweep environment/plaquette bond dim `chi`. This picks whichever
-# is present so the CSV/summary can report a single generic sweep-parameter
-# column across all categories without renaming pairwise/tccg's own `dim`.
+# :contract cases sweep a leg dimension `dim`; :network's mps sweeps bond dim
+# `D`, ctmrg/trg sweep `chi`. This picks whichever is present so the CSV can
+# report a single generic sweep-parameter column across all cases.
 function case_sweepparam(case::BenchmarkCase)
     p = case.params
     hasproperty(p, :dim) && return p.dim
     hasproperty(p, :D) && return p.D
     hasproperty(p, :chi) && return p.chi
     error("case $(case.category)/$(case.id) has no known sweep-parameter field (dim/D/chi)")
+end
+
+# Upstream tags :contract cases by `source` and :network cases by `topic`.
+case_group(case::BenchmarkCase) =
+    hasproperty(case.params, :source) ? case.params.source :
+    hasproperty(case.params, :topic) ? case.params.topic : :none
+case_layout(case::BenchmarkCase) =
+    hasproperty(case.params, :layout) ? case.params.layout : Symbol("")
+
+# Compact einsum-style label: every distinct label gets one letter in order of
+# first appearance, e.g. synthetic `[a1,c1,a2,c2]*[c1,c2,b1]` -> "acbd cde>abe".
+# Space/`>` separators keep the CSV comma-free.
+function _compact(labelsets)
+    letters = Dict{Any, Char}()
+    next = Ref('a')
+    tochar(l) = get!(letters, l) do
+        c = next[]
+        next[] = c == 'z' ? 'A' : c + 1
+        c
+    end
+    return map(ls -> join(tochar.(ls)), labelsets)
+end
+function case_expr(spec::Union{ContractSpec, BatchedContractSpec})
+    a, b, c = _compact((spec.IA, spec.IB, spec.IC))
+    prefix = spec isa BatchedContractSpec ? "$(spec.batch)x " : ""
+    return "$prefix$a $b>$c"
+end
+function case_expr(spec::NetworkSpec)
+    parts = _compact((abs.(il) for il in (spec.indexlists..., spec.output)))
+    return join(parts[1:(end - 1)], " ") * ">" * parts[end]
 end
 
 function build_case(spec::ContractSpec, provider, ::Type{T}) where {T}
@@ -125,6 +206,16 @@ function build_case(spec::ContractSpec, provider, ::Type{T}) where {T}
     return (; A, B, pA, pB, pAB, dimsC)
 end
 
+function build_case(spec::BatchedContractSpec, provider, ::Type{T}) where {T}
+    dimsA = ntuple(i -> spec.dims[spec.IA[i]], length(spec.IA))
+    dimsB = ntuple(i -> spec.dims[spec.IB[i]], length(spec.IB))
+    dimsC = ntuple(i -> spec.dims[spec.IC[i]], length(spec.IC))
+    As = [randtensor(provider, spec.IA, dimsA, T) for _ in 1:spec.batch]
+    Bs = [randtensor(provider, spec.IB, dimsB, T) for _ in 1:spec.batch]
+    pA, pB, pAB = TensorOperations.contract_indices(spec.IA, spec.IB, spec.IC)
+    return (; As, Bs, pA, pB, pAB, dimsC)
+end
+
 function build_case(spec::NetworkSpec, provider, ::Type{T}) where {T}
     tensors = map(spec.indexlists) do il
         dims = ntuple(i -> spec.dims[abs(il[i])], length(il))
@@ -134,6 +225,8 @@ function build_case(spec::NetworkSpec, provider, ::Type{T}) where {T}
 end
 
 alloc_output(spec::ContractSpec, ctx, ::Type{T}) where {T} = zeros(T, ctx.dimsC)
+alloc_output(spec::BatchedContractSpec, ctx, ::Type{T}) where {T} =
+    [zeros(T, ctx.dimsC) for _ in 1:spec.batch]
 # `ncon` has no in-place variant -- it allocates its own output every call;
 # this placeholder is ignored by `run_case!` below.
 alloc_output(::NetworkSpec, ctx, ::Type{T}) where {T} = nothing
@@ -145,6 +238,16 @@ function run_case!(backend, spec::ContractSpec, ctx, C)
     )
 end
 
+function run_case!(backend, spec::BatchedContractSpec, ctx, Cs)
+    for b in eachindex(Cs)
+        TensorOperations.tensorcontract!(
+            Cs[b], ctx.As[b], ctx.pA, spec.conjA, ctx.Bs[b], ctx.pB, spec.conjB, ctx.pAB,
+            one(eltype(Cs[b])), zero(eltype(Cs[b])), backend
+        )
+    end
+    return Cs
+end
+
 function run_case!(backend, spec::NetworkSpec, ctx, C)
     return TensorOperations.ncon(
         ctx.tensors, spec.indexlists, spec.conjlist;
@@ -152,7 +255,12 @@ function run_case!(backend, spec::NetworkSpec, ctx, C)
     )
 end
 
-const OUTDIR = results_dir()
+# A batched case's result is a vector of per-slice outputs; compare/normalize
+# it as one flat vector.
+_flat(x::AbstractArray{<:Number}) = vec(x)
+_flat(xs::AbstractVector{<:AbstractArray}) = reduce(vcat, map(vec, xs))
+
+const OUTDIR = something(argval("outdir"), results_dir())
 mkpath(OUTDIR)
 const CSV_PATH = joinpath(OUTDIR, "bench_to_suite.csv")
 const CANARY_PATH = joinpath(OUTDIR, "canary_to_suite.csv")
@@ -163,14 +271,17 @@ const PROVENANCE_PATH = joinpath(OUTDIR, "PROVENANCE_to_suite.txt")
 csv_io = open(CSV_PATH, "w")
 println(
     csv_io,
-    "backend,dtype,category,case_id,dim,params,reps,median_seconds,gflops,gbytes,min_gflops,std_gflops"
+    "backend,dtype,category,case_id,dim,params,reps,median_seconds,gflops,gbytes,min_gflops,std_gflops,",
+    "group,layout,blas,intensity,expr"
 )
-function log_row(backend_name, T, case::BenchmarkCase, reps, t, gf, gb, min_gf, std_gf)
+function log_row(backend_name, T, case::BenchmarkCase, reps, t, gf, gb, min_gf, std_gf, intensity)
     println(
         csv_io,
         "$backend_name,$T,$(case.category),$(case.id),$(case_sweepparam(case)),",
         params_string(case.params), ",$reps,",
-        @sprintf("%.9f,%.4f,%.4f,%.4f,%.4f", t, gf, gb, min_gf, std_gf)
+        @sprintf("%.9f,%.4f,%.4f,%.4f,%.4f", t, gf, gb, min_gf, std_gf), ",",
+        case_group(case), ",", case_layout(case), ",", isblasequivalent(case.spec), ",",
+        @sprintf("%.4g", intensity), ",", case_expr(case.spec)
     )
     return flush(csv_io)
 end
@@ -178,10 +289,15 @@ end
 # Per-rep timing samples (not just the median) -- same warm-up-then-timed
 # discipline as harness.jl's `median_time_s`, but returns every sample so the
 # caller can compute min/std of the derived throughput, not just its median.
-function timed_samples_s(f!::Function; reps::Int)
+# The warm-up call's time sets the rep count: up to `reps`, cut so the timed
+# loop fits in `budget` seconds, but never below `minreps`.
+function timed_samples_s(f!::Function; reps::Int, budget::Float64 = Inf, minreps::Int = 1)
+    t0 = time_ns()
     f!()  # warm-up, discarded
-    ts = Vector{Float64}(undef, reps)
-    for r in 1:reps
+    twarm = (time_ns() - t0) / 1.0e9
+    n = clamp(floor(Int, budget / max(twarm, 1.0e-9)), min(minreps, reps), reps)
+    ts = Vector{Float64}(undef, n)
+    for r in 1:n
         t0 = time_ns()
         f!()
         t1 = time_ns()
@@ -228,14 +344,14 @@ for T in DTYPES
         global progress += 1
         spec = case.spec
         cb = case_bytes(spec, T)
-        if cb > MAX_CASE_BYTES
-            push!(skipped, (dtype = T, category = case.category, id = case.id, bytes = cb))
-            @info "skipped (over byte ceiling)" dtype = T id = case.id bytes = cb
+        fl = flops(spec)
+        if cb > MAX_CASE_BYTES || fl > MAX_CASE_FLOPS
+            push!(skipped, (dtype = T, category = case.category, id = case.id, bytes = cb, flops = fl))
+            @info "skipped (over byte/flop ceiling)" dtype = T id = case.id bytes = cb flops = fl
             continue
         end
 
         ctx = build_case(spec, provider, T)
-        fl = flops(spec)
 
         # Correctness gate before any timing: StridedBLAS is the reference,
         # QuasiStrided must match to `rtol` or its timing is skipped.
@@ -261,9 +377,9 @@ for T in DTYPES
         qs = get(results, :QuasiStrided, nothing)
         qs_ok = true
         if ref !== nothing && qs !== nothing
-            if !isapprox(qs, ref; rtol = rtol)
-                nref = norm(vec(ref))
-                disc = nref == 0 ? norm(vec(qs)) : norm(vec(qs) - vec(ref)) / nref
+            if !isapprox(_flat(qs), _flat(ref); rtol = rtol)
+                nref = norm(_flat(ref))
+                disc = nref == 0 ? norm(_flat(qs)) : norm(_flat(qs) - _flat(ref)) / nref
                 qs_ok = false
                 push!(
                     mismatches,
@@ -280,20 +396,25 @@ for T in DTYPES
             haskey(results, bname) || continue           # threw above
             bname === :QuasiStrided && !qs_ok && continue # mismatched above
             C = alloc_output(spec, ctx, T)
-            times = timed_samples_s(() -> run_case!(backend, spec, ctx, C); reps = REPS)
+            times = timed_samples_s(
+                () -> run_case!(backend, spec, ctx, C);
+                reps = REPS, budget = TIME_BUDGET, minreps = MIN_REPS
+            )
             t = median(times)
             gf = fl / t / 1.0e9
             gb = cb / t / 1.0e9
             gflops_samples = (fl ./ times) ./ 1.0e9
             min_gf = minimum(gflops_samples)
             std_gf = std(gflops_samples)
-            log_row(bname, T, case, REPS, t, gf, gb, min_gf, std_gf)
+            log_row(bname, T, case, length(times), t, gf, gb, min_gf, std_gf, fl / cb)
             push!(
                 raw,
                 (
                     backend = String(bname), dtype = T, category = case.category,
+                    group = case_group(case), layout = case_layout(case),
+                    blas = isblasequivalent(spec), expr = case_expr(spec),
                     id = case.id, dim = case_sweepparam(case), t = t, gflops = gf, gbytes = gb,
-                    min_gflops = min_gf, std_gflops = std_gf,
+                    min_gflops = min_gf, std_gflops = std_gf, reps = length(times),
                 )
             )
         end
@@ -323,10 +444,38 @@ println("canary spread (max-min)/min = ", @sprintf("%.4f", canary_spread))
 
 const NOISE_FLOOR = max(0.1, canary_spread)
 
+# QS/BLAS time ratio per (dtype, case id); > 1 = QuasiStrided slower.
+function qs_ratios(rows)
+    out = NamedTuple[]
+    for key in unique((r.dtype, r.id) for r in rows)
+        rs = filter(r -> (r.dtype, r.id) == key, rows)
+        ib = findfirst(r -> r.backend == "StridedBLAS", rs)
+        iq = findfirst(r -> r.backend == "QuasiStrided", rs)
+        (ib === nothing || iq === nothing) && continue
+        b, q = rs[ib], rs[iq]
+        push!(out, (; q.dtype, q.category, q.group, q.layout, q.blas, q.expr, q.id, q.dim,
+            ratio = q.t / b.t, t_qs = q.t, t_blas = b.t, gf_qs = q.gflops, gf_blas = b.gflops))
+    end
+    return out
+end
+
+function print_geomeans(io, label, rs)
+    isempty(rs) && return
+    rv = [r.ratio for r in rs]
+    println(
+        io, "  ", rpad(label, 34), @sprintf("geomean QS/BLAS = %6.3f", geomean(rv)),
+        @sprintf("   worst %6.3f   n=%3d   slower(>1.1)=%d", maximum(rv), length(rv), count(>(1.1), rv))
+    )
+end
+
+const RATIOS = qs_ratios(raw)
+const TOP_SLOWEST = 40
+
 open(SUMMARY_PATH, "w") do io
     println(io, "# TensorOperations upstream-suite backend benchmark summary")
     print_env_header(io, "bench_to_suite.jl")
-    println(io, "reps = ", REPS, " (median of ", REPS, ", one discarded warm-up)")
+    println(io, "reps <= ", REPS, " (median; one discarded warm-up; cut to fit ",
+        TIME_BUDGET, " s per backend, min ", MIN_REPS, ")")
     println(io, "canary median times (s): ", canary_results)
     println(io, "canary relative spread (max-min)/min: ", @sprintf("%.4f", canary_spread))
     println(
@@ -341,45 +490,43 @@ open(SUMMARY_PATH, "w") do io
         println(io, "!! ", length(failures), " BACKEND REJECTION(S)/ERROR(S) -- see mismatches_to_suite.txt")
     end
 
+    println(io, "\n===== geomean QS/BLAS time ratio (> 1 = QuasiStrided slower) =====")
     for T in DTYPES
-        for cat in CATEGORIES
-            println(io, "\n===== ", T, " / ", cat, " =====")
-            ids = unique(r.id for r in raw if r.dtype == T && r.category == cat)
-            for id in ids
-                rows = filter(r -> r.dtype == T && r.category == cat && r.id == id, raw)
-                isempty(rows) && continue
-                best = minimum(r.t for r in rows)
-                println(io, "  ", id, ":")
-                for r in sort(collect(rows); by = r -> r.t)
-                    println(
-                        io, "    ", rpad(r.backend, 14), @sprintf("%.6e s", r.t),
-                        @sprintf("  %8.2f GFLOP/s  %7.2f GB/s", r.gflops, r.gbytes),
-                        "  (", @sprintf("%.3fx", r.t / best), " of fastest)"
-                    )
-                end
-                tof(b) = (i = findfirst(r -> r.backend == b, rows); i === nothing ? nothing : rows[i].t)
-                tb, tq = tof("StridedBLAS"), tof("QuasiStrided")
-                qs_blas = (tq === nothing || tb === nothing) ? "n/a" :
-                    @sprintf("%.3f", tq / tb)
-                println(
-                    io, "    -> QS/BLAS = ", qs_blas,
-                    "   (>1 = QuasiStrided slower than BLAS)"
-                )
+        println(io, "\n", T, ":")
+        rT = filter(r -> r.dtype == T, RATIOS)
+        for cat in unique(r.category for r in rT), g in unique(r.group for r in rT if r.category == cat)
+            rg = filter(r -> r.category == cat && r.group == g, rT)
+            print_geomeans(io, "$cat/$g", rg)
+            for l in unique(r.layout for r in rg)
+                l === Symbol("") && continue
+                print_geomeans(io, "    layout=$l", filter(r -> r.layout == l, rg))
             end
+            if any(r -> r.blas, rg) && !all(r -> r.blas, rg)
+                print_geomeans(io, "    blas-equivalent", filter(r -> r.blas, rg))
+                print_geomeans(io, "    not blas-equivalent", filter(r -> !r.blas, rg))
+            end
+        end
+    end
 
-            gq = Float64[]
-            for id in ids
-                rows = filter(r -> r.dtype == T && r.category == cat && r.id == id, raw)
-                tof(b) = (i = findfirst(r -> r.backend == b, rows); i === nothing ? nothing : rows[i].t)
-                tb, tq = tof("StridedBLAS"), tof("QuasiStrided")
-                (tq !== nothing && tb !== nothing) && push!(gq, tq / tb)
-            end
-            geomean(v) = isempty(v) ? NaN : exp(sum(log, v) / length(v))
+    for T in DTYPES
+        rT = sort(filter(r -> r.dtype == T, RATIOS); by = r -> -r.ratio)
+        println(io, "\n===== ", T, ": ", min(TOP_SLOWEST, length(rT)), " slowest cases for QuasiStrided =====")
+        println(io, "  ratio   QS GF/s  BLAS GF/s   QS time     group/layout            case  [expr]")
+        for r in first(rT, TOP_SLOWEST)
+            gl = r.layout === Symbol("") ? string(r.group) : "$(r.group)/$(r.layout)"
             println(
-                io, "  [", T, "/", cat, "] geomean QS/BLAS = ",
-                @sprintf("%.3f", geomean(gq)), " over ", length(gq), " cases"
+                io, @sprintf("  %6.3f  %7.2f  %8.2f   %.3e  ", r.ratio, r.gf_qs, r.gf_blas, r.t_qs),
+                rpad(gl, 24), r.id, "  [", r.expr, "]", r.blas ? "  (blas)" : ""
             )
         end
+    end
+
+    println(io, "\n===== per-case detail =====")
+    for T in DTYPES, r in sort(filter(r -> r.dtype == T, RATIOS); by = r -> (string(r.group), r.id))
+        println(
+            io, "  ", rpad(string(T), 11), rpad("$(r.category)/$(r.id)", 52),
+            @sprintf("QS %.4e s  BLAS %.4e s  QS/BLAS %.3f", r.t_qs, r.t_blas, r.ratio)
+        )
     end
 end
 println(read(SUMMARY_PATH, String))
@@ -410,12 +557,12 @@ open(MISMATCH_PATH, "w") do io
             )
         end
     end
-    println(io, "\n## Cases skipped by --max-bytes=", MAX_CASE_BYTES)
+    println(io, "\n## Cases skipped by --max-bytes=", MAX_CASE_BYTES, " / --max-flops=", MAX_CASE_FLOPS)
     if isempty(skipped)
-        println(io, "none (upstream's own 256 MiB within_memory_budget is stricter and ran first)")
+        println(io, "none (upstream's own within_memory_budget, Sys.total_memory() ÷ 64, ran first in the generators)")
     else
         for s in skipped
-            println(io, "  SKIP ", s.category, "/", s.id, " dtype=", s.dtype, " bytes=", s.bytes)
+            println(io, "  SKIP ", s.category, "/", s.id, " dtype=", s.dtype, " bytes=", s.bytes, " flops=", s.flops)
         end
     end
 end
@@ -454,7 +601,7 @@ end
 
 open(PROVENANCE_PATH, "w") do io
     println(io, "git_commit = ", commit)
-    println(io, "command = julia --project=benchmark benchmark/bench_to_suite.jl")
+    println(io, "command = julia --project=benchmark benchmark/bench_to_suite.jl ", join(ARGS, " "))
     print_env_header(io, "bench_to_suite.jl")
     println(io, "logical_cpus = ", Sys.CPU_THREADS)
     println(io, "blas_config = ", LinearAlgebra.BLAS.get_config())
@@ -462,10 +609,13 @@ open(PROVENANCE_PATH, "w") do io
     println(io, "TensorOperationsBenchmarks = ", tob_rev)
     println(io, "backends = ", collect(keys(BACKENDS)), " (QuasiStrided = QuasiStridedBackend() directly)")
     println(io, "dtypes = ", collect(DTYPES))
-    println(io, "reps = ", REPS, " (median, one discarded warm-up)")
+    println(io, "reps <= ", REPS, " (median, one discarded warm-up, time budget ", TIME_BUDGET, " s, min ", MIN_REPS, ")")
+    println(io, "max_bytes = ", MAX_CASE_BYTES, "  max_flops = ", MAX_CASE_FLOPS)
     println(io, "categories = ", CATEGORIES)
-    println(io, "pairwise sizes = ", PAIRWISE_SIZES)
+    println(io, "sources = ", SOURCES, "  topics = ", TOPICS)
+    println(io, "synthetic sizes = ", SYNTHETIC_SIZES)
     println(io, "tccg sizes = ", TCCG_SIZES)
+    println(io, "batched sizes = ", BATCHED_SIZES)
     println(io, "mps bonddims = ", MPS_BONDDIMS)
     println(io, "ctmrg chis = ", CTMRG_CHIS)
     println(io, "trg chis = ", TRG_CHIS)

@@ -14,11 +14,11 @@ TensorOperationsBenchmarks = "d983fc97-4e87-46ba-abd9-b4864e69d4dd"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 # Pinned to PR #303 (QuantumKitHub/TensorOperations.jl#303, branch "benchmark"),
-# commit 528dd85d8bf886c734a207732a7cb591a3691dd3, because the PR is unmerged.
+# commit d1ace864bb2d5a8e5db6d1d6d9d51c14ba19369e, because the PR is unmerged.
 # Follow-up: repoint to the registered TensorOperations.jl release once merged.
 [sources]
 QuasiStrided = {path = ".."}
-TensorOperationsBenchmarks = {rev = "528dd85d8bf886c734a207732a7cb591a3691dd3", subdir = "benchmark", url = "https://github.com/QuantumKitHub/TensorOperations.jl"}
+TensorOperationsBenchmarks = {rev = "d1ace864bb2d5a8e5db6d1d6d9d51c14ba19369e", subdir = "benchmark", url = "https://github.com/QuantumKitHub/TensorOperations.jl"}
 
 [compat]
 CairoMakie = "0.15"
