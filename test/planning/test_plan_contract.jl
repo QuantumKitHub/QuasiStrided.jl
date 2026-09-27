@@ -814,3 +814,130 @@ end
         @test isapprox(C, Cref; rtol = 200 * d * eps(real(T)))
     end
 end
+
+# =====================================================================
+# Contracted-label order (`_order_contract_labels`, a cost model of the packs)
+# =====================================================================
+
+# Labels: a=1 b=2 c=3 d=4 e=5, distinct extents so a wrong order shows up as a
+# wrong stride, not a coincidentally equal one. `_KO_EXT` is small (every
+# operand fits any L2); `_KO_BIG` makes B's lines-touched-before-`d`-advances
+# footprint b*c*e*64 B = 4 MB, beyond every measured core's L2 share.
+const _KO_EXT = Dict(1 => 9, 2 => 3, 3 => 4, 4 => 5, 5 => 6)
+const _KO_BIG = Dict(1 => 9, 2 => 40, 3 => 40, 4 => 5, 5 => 40)
+_ko_array(::Type{T}, ind, ext = _KO_EXT) where {T} = randn(T, Tuple(ext[l] for l in ind)...)
+_ko_stride(v, ind, l) = Base.strides(v)[findfirst(==(l), ind)]
+
+# The K order `plan_contract` would pass on, with an explicit L2 size.
+function _ko_order(Av, indA, Bv, indB, Cv, indC; l2bytes)
+    mlabels, nlabels, klabels = QuasiStrided._classify_labels(indA, indB, indC)
+    morder = QuasiStrided._order_free_labels(mlabels, indC, Cv)
+    norder = QuasiStrided._order_free_labels(nlabels, indC, Cv)
+    ext(ls) = prod((size(Cv, findfirst(==(l), indC)) for l in ls); init = 1)
+    return QuasiStrided._order_contract_labels(
+        klabels, indA, Av, morder, indB, Bv, norder, ext(mlabels), ext(nlabels), l2bytes
+    )
+end
+
+@testset "K order: cost model picks among indA / A-sorted / B-sorted" begin
+    T = Float64
+    Av = StridedView(_ko_array(T, (1, 2, 3, 4)))   # A[a,b,c,d]: a unit-stride, 9 >= a line
+    Cv = StridedView(zeros(T, _KO_EXT[1], _KO_EXT[5]))
+
+    # contract_scrambled, B[d,c,b,e]: in indA order B's unit-stride K axis d is
+    # the slowest K coordinate, so each B line is refetched per d element
+    # (x5) once the lines in flight exceed L2 -- forced here with l2bytes = 0.
+    Bs = StridedView(_ko_array(T, (4, 3, 2, 5)))
+    @test _ko_order(Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), Cv, (1, 5); l2bytes = 0) == [4, 3, 2]
+    # ... and when they fit L2 the model is indifferent: indA order is kept.
+    @test _ko_order(Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), Cv, (1, 5); l2bytes = 1 << 20) == [2, 3, 4]
+
+    # gemm_ready B[b,c,d,e] and b_permuted B[b,e,c,d]: B-sorted == indA order.
+    for indB in ((2, 3, 4, 5), (2, 5, 3, 4))
+        Bv = StridedView(_ko_array(T, indB))
+        @test _ko_order(Av, (1, 2, 3, 4), Bv, indB, Cv, (1, 5); l2bytes = 0) == [2, 3, 4]
+    end
+
+    # TRG-shaped: B's K axis 5 is unit-stride, but sorting by B would make A's
+    # fastest K step 8^4 elements (32 KB, a page-crossing latency-bound walk)
+    # to save refetches of a 4 KB B -- indA order stays (measured: B-sorted is
+    # 1.69x slower on the chi = 24 TRG contraction). Labels: A(1,2,3,4,5),
+    # B(5,6,2), K = (2, 5), C(1,3,4,6).
+    At = StridedView(randn(T, 8, 8, 8, 8, 8))
+    Bt = StridedView(randn(T, 8, 8, 8))
+    Ct = StridedView(zeros(T, 8, 8, 8, 8))
+    for l2bytes in (0, 1 << 20)
+        @test _ko_order(At, (1, 2, 3, 4, 5), Bt, (5, 6, 2), Ct, (1, 3, 4, 6); l2bytes) == [2, 5]
+    end
+
+    # Single K label: nothing to order.
+    p = plan_contract(StridedView(zeros(T, 3, 5)), StridedView(randn(T, 3, 4)), (1, 2), StridedView(randn(T, 4, 5)), (2, 3), (1, 3))
+    @test p.kgroup.strides == ((3,), (1,))
+    # A singleton K axis never decides: it is skipped as `kfast` and as `u`.
+    A1 = StridedView(randn(T, 9, 1, 4, 5))
+    B1 = StridedView(randn(T, 1, 5, 4, 6))
+    o = _ko_order(A1, (1, 2, 3, 4), B1, (2, 4, 3, 5), Cv, (1, 5); l2bytes = 0)
+    @test sort(o) == [2, 3, 4]
+    @test filter(!=(2), o) == [4, 3]   # B-sorted among the non-singletons
+end
+
+@testset "K order: plan_contract flips contract_scrambled at an L2-exceeding size" begin
+    T = Float64
+    ext = _KO_BIG
+    Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
+    Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))   # B[d,c,b,e]
+    Cv = StridedView(zeros(T, ext[1], ext[5]))
+    plan = plan_contract(Cv, Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), (1, 5))
+    @test plan.kgroup.lengths == (5, 40, 40)
+    @test plan.kgroup.strides[2] == (1, 5, 200)
+    @test plan.kgroup.strides[1] == Tuple(_ko_stride(Av, (1, 2, 3, 4), l) for l in (4, 3, 2))
+
+    # gemm_ready at the same size: exactly the pre-rule (indA) order.
+    Bg = StridedView(_ko_array(T, (2, 3, 4, 5), ext))
+    p = plan_contract(Cv, Av, (1, 2, 3, 4), Bg, (2, 3, 4, 5), (1, 5))
+    @test p.kgroup.lengths == (40, 40, 5)
+    @test p.kgroup.strides[1] == (9, 360, 14400)
+
+    # The swapped orientation (B feeds M: C stored as (e, a), an N run of
+    # 40 >= mr) uses the same K order with the maps exchanged.
+    Ct = StridedView(zeros(T, ext[5], ext[1]))
+    kernel = SIMDKernel(Val(8), Val(6), T)
+    pt = plan_contract(Ct, Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), (5, 1); kernel = kernel)
+    @test pt.Astorage === parent(Bs)
+    @test pt.kgroup.lengths == (5, 40, 40)
+    @test pt.kgroup.strides[1] == (1, 5, 200)                     # B's map first
+    @test pt.kgroup.strides[2] == (14400, 360, 9)                 # then A's
+end
+
+@testset "K order: correctness on scrambled K (all dtypes, alpha/beta, conj, both orientations, oracle)" begin
+    Random.seed!(0x5C7A_0B1E)
+    ext = _KO_BIG
+    for T in (Float64, Float32, ComplexF64, ComplexF32)
+        rtol = 500 * eps(real(T))
+        alpha = T <: Complex ? T(1.3, -0.4) : T(1.3)
+        beta = T <: Complex ? T(0.7, 0.2) : T(0.7)
+        for (indA, indB, indC) in (
+                ((1, 2, 3, 4), (4, 3, 2, 5), (1, 5)),   # scrambled, C[a,e] (reordered K)
+                ((1, 2, 3, 4), (4, 3, 2, 5), (5, 1)),   # scrambled, C[e,a] (swap for real T)
+                ((4, 3, 2, 1), (2, 3, 4, 5), (1, 5)),   # A transposed, K inner in both
+                ((4, 3, 2, 1), (3, 2, 4, 5), (5, 1)),   # both scrambled, C transposed
+            ), (conjA, conjB) in ((false, false), (true, false), (true, true))
+            (T <: Real) && conjA && continue
+            A = _ko_array(T, indA, ext)
+            B = _ko_array(T, indB, ext)
+            Av = conjA ? StridedView(A, size(A), strides(A), 0, conj) : StridedView(A)
+            Bv = StridedView(B)
+            C = randn(T, Tuple(ext[l] for l in indC)...)
+            Cstart = copy(C)
+            Cv = StridedView(C)
+            Cref = _lo_reference(Cstart, Av, indA, Bv, indB, indC; conjA, conjB, alpha, beta)
+            plan = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
+            execute!(plan, alpha, beta)
+            @test isapprox(C, Cref; rtol = rtol)
+            copyto!(C, Cstart)
+            plan_tw = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
+            execute_tilewise!(plan_tw, alpha, beta)
+            @test isapprox(C, Cref; rtol = rtol)
+        end
+    end
+end

@@ -81,7 +81,10 @@ labels inside the M composite (A's free labels) and the N composite (B's free
 labels) are each stable-sorted by `abs(stride)` of the label's axis *in `C`*,
 ascending, ties keeping the operand's own axis order -- so each composite is
 enumerated with `C`'s fastest axis fastest, whatever A's or B's layout is. The
-K composite keeps `indA` order. Then, if the sorted M list does *not* begin
+K composite keeps `indA` order unless a cost model of the two packs (page-
+crossing K walks, cache lines refetched once the lines in flight exceed L2)
+prefers the order sorted by `abs(stride)` in `A` or in `B` (see
+`_order_contract_labels`). Then, if the sorted M list does *not* begin
 with a unit-stride run of at least `mr(kernel)` elements in `C` while the sorted
 N list does, the operand roles are swapped: `B` feeds M and `A` feeds N, and
 the K maps, the storage/base fields and the conjugation transforms move with
@@ -236,10 +239,16 @@ function _planned(
 
     mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
     ngroup = _build_pair_group(norder, indB, B, indC, C)  # maps: (B, C)
-    kgroup = _build_pair_group(klabels, indA, A, indB, B)  # maps: (A, B)
 
     Qm = axis_length(mgroup)
     Qn = axis_length(ngroup)
+
+    # The K order is decided by a cost model of the two packs
+    # (`_order_contract_labels`, src/planning/labels.jl), which needs each
+    # operand's free-label order (whole-line slivers or not) and free extent.
+    korder = _order_contract_labels(klabels, indA, A, morder, indB, B, norder, Qm, Qn)
+    kgroup = _build_pair_group(korder, indA, A, indB, B)  # maps: (A, B)
+
     Qk = axis_length(kgroup)
 
     # The register width each orientation would run at (`_candidate_mrs`):
@@ -262,7 +271,7 @@ function _planned(
         # transforms. The contraction is unchanged: `*` commutes on `T` and
         # `conj` is elementwise, so `sum_k conj?(B[n,k]) * conj?(A[m,k])` is
         # the same sum.
-        kgroup_swapped = _build_pair_group(klabels, indB, B, indA, A)  # maps: (B, A)
+        kgroup_swapped = _build_pair_group(korder, indB, B, indA, A)  # maps: (B, A)
         req_swapped = _plan_request(
             T, f, ngroup, mgroup, kgroup_swapped,
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
