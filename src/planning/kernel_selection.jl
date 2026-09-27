@@ -11,13 +11,17 @@
 #   * a kernel type (`_kernel_type`), built from a menu shape by
 #     `_kernel_from_shape`;
 #   * a shape resolved from the detected hardware (`_derived_shape`): an
-#     explicit override row, else the `MR = 2W` rule where it has been
-#     validated, else a conservative fitted shape (`_fitted_shape`);
-#   * two plan-time demotions: to the fitted shape when M cannot fill one
-#     register tile (`_default_kernel`, src/planning/defaults.jl; complex on
-#     `:avx512` goes to an FMAddSub shape instead, `_small_m_shape`), and to
-#     a menu shape that keeps every register sliver unit-stride in C
-#     (`_demote_for_run`).
+#     explicit override row, else the `MR = MV*W, NR = 6` rule where it has
+#     been validated (`MV = 4` for the real method on `:avx512`, `2`
+#     elsewhere; `_rule_mv`), else a conservative fitted shape
+#     (`_fitted_shape`);
+#   * three plan-time demotions: the real `MV = 4` shape steps down to its
+#     `MV = 2` sibling when M is short enough that the taller tile pads more
+#     (`_extent_shape`); to the fitted shape when M cannot fill one register
+#     tile (`_default_shape` / `_default_kernel`, src/planning/defaults.jl;
+#     complex on `:avx512` goes to an FMAddSub shape instead,
+#     `_small_m_shape`); and to a menu shape that keeps every register sliver
+#     unit-stride in C (`_demote_for_run`).
 #
 # Everything here is a pure function of a `TargetProfile` and `T`. The
 # engine's per-call entry points (`_default_kernel`, `default_blocking(kernel)`)
@@ -65,8 +69,13 @@ _fallback_shape(::Type{T}) where {T} = (8, NR_DEFAULT, _default_lanewidth(real(T
 # ComplexF32's best 1m shape but does not beat planar there, so it stays
 # menu-only (reachable via an explicit `kernel = OneMMethod()`, never picked
 # automatically).
-const KERNEL_SHAPES_F64 = ((8, 6, 4), (16, 6, 8))
-const KERNEL_SHAPES_F32 = ((8, 6, 8), (32, 6, 16), (16, 6, 8))
+#
+# 2026-09-26: the `MV = 4` shapes `(32, 6, 8)` / `(64, 6, 16)` are the real
+# AVX-512 rule shapes (see `_rule_mv`); the `MV = 2` shapes stay in the menus
+# as their short-M step-down (`_extent_shape`) and as `_demote_for_run`
+# targets.
+const KERNEL_SHAPES_F64 = ((8, 6, 4), (16, 6, 8), (32, 6, 8))
+const KERNEL_SHAPES_F32 = ((8, 6, 8), (32, 6, 16), (16, 6, 8), (64, 6, 16))
 const KERNEL_SHAPES_C64_PLANAR = (
     (24, 3, 8), (16, 6, 8), (8, 8, 8), (4, 5, 4), (4, 6, 2), (2, 6, 2),
 )
@@ -261,7 +270,7 @@ _shape_override(::Val{:avx2}, ::Type{ComplexF32}, ::PlanarMethod) = (8, 5, 8)
 # complex `T`, so nothing selects 1m unless the caller names it.
 _shape_override(::Val{:avx2}, ::Type{ComplexF64}, ::OneMMethod) = (4, 6, 4)
 
-# Where the `MR = 2W` rule is validated. Real: AVX-512 and AVX2 (on NEON it
+# Where the `MR = MV*W` rule is validated. Real: AVX-512 and AVX2 (on NEON it
 # would pick MR = 4 on 128-bit lanes, not obviously better than the fallback).
 # Complex: AVX-512 only -- planar holds separate real and imaginary
 # accumulator planes, so on AVX2's 16 registers even `(MV, NR) = (1, 6)`
@@ -271,9 +280,37 @@ _rule_applies(::Val{:avx512}, ::Union{PlanarMethod, OneMMethod}) = true
 _rule_applies(::Val{:avx2}, ::RealMethod) = true
 _rule_applies(::Val, ::ComplexMethod) = false
 
-# `W` is one vector register's worth of REAL lanes, `MR = 2W`, `NR = NR_DEFAULT`.
-_rule_shape(vb::Int, ::Type{T}) where {T} =
-    (2 * (vb ÷ sizeof(real(T))), NR_DEFAULT, vb ÷ sizeof(real(T)))
+# `W` is one vector register's worth of REAL lanes, `MR = MV * W` with `MV`
+# A vectors (and accumulator rows) per output column, `NR = NR_DEFAULT`. The
+# default `MV = 2` is the rule as it was validated for every method on every
+# ISA; `_derived_shape` passes `_rule_mv`.
+_rule_shape(vb::Int, ::Type{T}, mv::Int = 2) where {T} =
+    (mv * (vb ÷ sizeof(real(T))), NR_DEFAULT, vb ÷ sizeof(real(T)))
+
+# A vectors per column in the rule shape. `4` for the real method on
+# `:avx512`, `2` everywhere else.
+#
+# Why 4 on AVX-512 (measured 2026-09-26, ccqlin038 / Cascade Lake, Julia
+# 1.12.7, `perf stat`): the `MV = 2` real kernel `(16, 6, 8)` is FRONT-END
+# bound, not FMA bound. Its K step is 2 A loads + 6 `vbroadcastsd` + 12
+# register FMAs + 5 loop-overhead instructions = 25 fused-domain uops for 6
+# FMA-cycles, i.e. 4.2 uops/cycle against Skylake's 4-wide allocation; it
+# runs at 2.98 IPC and 23.8 flops/cycle (74% of the 32-flop peak) even with
+# both packed panels L1-resident. Doubling `MV` doubles the FMAs per B
+# broadcast and per loop iteration: `(32, 6, 8)` is 38 instructions per 12
+# FMA-cycles and measures 29.1 flops/cycle (91%; OpenBLAS dgemm on the same
+# core: 28.7). The register budget is what caps `MV` at 4: `MV*NR`
+# accumulators + `MV` A vectors + 2 broadcast/scratch = 30 of AVX-512's 32
+# registers, while AVX2's 16 hold exactly the `MV = 2` tile (12 + 2 + 2).
+# Float32 behaves identically (`(32, 6, 16)` 180 -> `(64, 6, 16)` 218 GF/s,
+# kernel-only). Engine, 3969^3 Float64 (same session, interleaved):
+# `(16, 6, 8)` 73.8 -> `(32, 6, 8)` 87.1 GF/s, OpenBLAS 105.7.
+#
+# Complex methods keep `MV = 2`: planar holds two accumulator planes (its
+# `(16, 6, 8)` already spills, see `planar_register_pressure`), and 1m runs a
+# real kernel of `2 MR` rows over its own menu.
+_rule_mv(::Val{:avx512}, ::RealMethod) = 4
+_rule_mv(::Val, ::ComplexMethod) = 2
 
 """
     _derived_shape(profile::TargetProfile, T, method = _default_method(T)) -> (MR, NR, W)
@@ -292,7 +329,7 @@ function _derived_shape(profile::TargetProfile, ::Type{T}, method) where {T}
     ovr === nothing || return ovr
     vb = profile.vector_bytes
     if _rule_applies(key, method) && vb > 0 && vb % sizeof(real(T)) == 0
-        shape = _rule_shape(vb, T)
+        shape = _rule_shape(vb, T, _rule_mv(key, method))
         shape in kernel_shapes(T, method) && return shape
     end
     return _fitted_shape(profile, T, method)
@@ -367,6 +404,48 @@ end
 # tests use with synthetic profiles.
 @noinline _kernel_for(profile::TargetProfile, ::Type{T}) where {T} =
     _kernel_from_shape(_derived_shape(profile, T), T, _default_method(T))
+
+"""
+    _extent_shape(profile, T, method, Qm) -> (MR, NR, W)
+
+The derived shape, or -- real method only, and only when the derived shape is
+the `MV = 4` rule shape -- its `MV = 2` sibling `(MR ÷ 2, NR, W)` when `Qm` is
+shorter than one tall tile, or shorter than two and padded to strictly fewer
+rows by the half-height tile. Always a member of `kernel_shapes(T, method)`.
+
+The step-down rule is a padding comparison, not a throughput model: with
+`MR = 32`, `Qm = 40` costs 64 padded rows against the half tile's 48 (1.33x
+the work for a tile that is only ~1.2x faster per padded row, engine
+measurement at large M), while `Qm = 56` pads to 64 either way and keeps the
+tall tile. Above `2 MR` the tall tile's worst-case padding excess is `MR/2`
+over `2 MR + 1` rows (< 1.2x) and it always wins, which is why the comparison
+stops there. It never steps below `MV = 2`: an `MV = 1` real tile has half
+the FMAs per broadcast and per loop iteration of the `MV = 2` tile and runs
+at roughly half its rate, more than any padding it could save; `Qm < 2W`
+still reaches the fitted shape through `_default_kernel`'s own demotion.
+"""
+_extent_shape(profile::TargetProfile, ::Type{T}, method, Qm::Int) where {T} =
+    _extent_shape(_derived_shape(profile, T, method), T, method, Qm)
+
+# The same rule applied to an already derived `shape`: the form the per-call
+# path uses (`_default_shape`, src/planning/defaults.jl, passes the cached
+# `ResolvedDefaults.shape`), so no `Val(profile.isa)` dispatch is repeated
+# per plan. Pure and static: `kernel_shapes(T, method)` is a constant tuple.
+@inline _extent_shape(shape::NTuple{3, Int}, ::Type{T}, method, Qm::Int) where {T} = shape
+
+@inline function _extent_shape(shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, Qm::Int) where {T}
+    MR, NR, W = shape
+    (Qm > 0 && MR == 4 * W && Qm < 2 * MR) || return shape
+    half = (2 * W, NR, W)
+    half in kernel_shapes(T, method) || return shape
+    # Below one tall tile the half tile is taken unconditionally, padding tie
+    # or not: keeping the tall shape there would hand `_default_kernel`'s
+    # `Qm < mr` demotion the FITTED shape, two steps down instead of one
+    # (measured at `Qm = 63`, Float32, K = N = 1024: fitted 58.6 GF/s against
+    # the half tile's 94.6 and the tall tile's 109.3).
+    Qm < MR && return half
+    return cld(Qm, half[1]) * half[1] < cld(Qm, MR) * MR ? half : shape
+end
 
 # Small-M demotion target for complex `T` on AVX-512: the native-width
 # (`W == lanes`) FMAddSub menu shape that pads `Qm` least (`cld(Qm, MR) * MR`),
