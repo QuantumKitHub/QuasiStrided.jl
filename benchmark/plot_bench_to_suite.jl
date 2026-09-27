@@ -143,8 +143,14 @@ function panels(rows)
             continue
         end
         chunk, dims = Int[], sort(unique(r.dim for r in sub))
-        flush_chunk() = (push!(out, ("$(dtype)_$(category)_$(group)_dim$(first(chunk))-$(last(chunk))",
-            filter(r -> r.dim in chunk, sub))); empty!(chunk))
+        flush_chunk() = (
+            push!(
+                out, (
+                    "$(dtype)_$(category)_$(group)_dim$(first(chunk))-$(last(chunk))",
+                    filter(r -> r.dim in chunk, sub),
+                )
+            ); empty!(chunk)
+        )
         for d in dims
             nd = length(unique(r.case_id for r in sub if r.dim == d))
             n = length(unique(r.case_id for r in sub if r.dim in chunk))

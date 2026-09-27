@@ -453,8 +453,12 @@ function qs_ratios(rows)
         iq = findfirst(r -> r.backend == "QuasiStrided", rs)
         (ib === nothing || iq === nothing) && continue
         b, q = rs[ib], rs[iq]
-        push!(out, (; q.dtype, q.category, q.group, q.layout, q.blas, q.expr, q.id, q.dim,
-            ratio = q.t / b.t, t_qs = q.t, t_blas = b.t, gf_qs = q.gflops, gf_blas = b.gflops))
+        push!(
+            out, (;
+                q.dtype, q.category, q.group, q.layout, q.blas, q.expr, q.id, q.dim,
+                ratio = q.t / b.t, t_qs = q.t, t_blas = b.t, gf_qs = q.gflops, gf_blas = b.gflops,
+            )
+        )
     end
     return out
 end
@@ -462,7 +466,7 @@ end
 function print_geomeans(io, label, rs)
     isempty(rs) && return
     rv = [r.ratio for r in rs]
-    println(
+    return println(
         io, "  ", rpad(label, 34), @sprintf("geomean QS/BLAS = %6.3f", geomean(rv)),
         @sprintf("   worst %6.3f   n=%3d   slower(>1.1)=%d", maximum(rv), length(rv), count(>(1.1), rv))
     )
@@ -474,8 +478,10 @@ const TOP_SLOWEST = 40
 open(SUMMARY_PATH, "w") do io
     println(io, "# TensorOperations upstream-suite backend benchmark summary")
     print_env_header(io, "bench_to_suite.jl")
-    println(io, "reps <= ", REPS, " (median; one discarded warm-up; cut to fit ",
-        TIME_BUDGET, " s per backend, min ", MIN_REPS, ")")
+    println(
+        io, "reps <= ", REPS, " (median; one discarded warm-up; cut to fit ",
+        TIME_BUDGET, " s per backend, min ", MIN_REPS, ")"
+    )
     println(io, "canary median times (s): ", canary_results)
     println(io, "canary relative spread (max-min)/min: ", @sprintf("%.4f", canary_spread))
     println(
