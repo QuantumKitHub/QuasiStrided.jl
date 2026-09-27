@@ -51,13 +51,13 @@ run!(QuasiStridedBackend()); println("max abs diff QS vs BLAS = ", maximum(abs, 
 tb = Float64[]; tq = Float64[]
 for round in 1:ROUNDS
     for _ in 1:REPS
-        t0 = time_ns(); run!(StridedBLAS()); push!(tb, (time_ns() - t0) / 1e9)
+        t0 = time_ns(); run!(StridedBLAS()); push!(tb, (time_ns() - t0) / 1.0e9)
     end
     for _ in 1:REPS
-        t0 = time_ns(); run!(QuasiStridedBackend()); push!(tq, (time_ns() - t0) / 1e9)
+        t0 = time_ns(); run!(QuasiStridedBackend()); push!(tq, (time_ns() - t0) / 1.0e9)
     end
-    @printf("round %d: BLAS %s  QS %s\n", round, join((@sprintf("%.3f", x) for x in tb[end-REPS+1:end]), ","), join((@sprintf("%.3f", x) for x in tq[end-REPS+1:end]), ","))
+    @printf("round %d: BLAS %s  QS %s\n", round, join((@sprintf("%.3f", x) for x in tb[(end - REPS + 1):end]), ","), join((@sprintf("%.3f", x) for x in tq[(end - REPS + 1):end]), ","))
 end
-@printf("StridedBLAS   median %.4f s (min %.4f, max %.4f)  %.2f GF/s\n", median(tb), minimum(tb), maximum(tb), flops / median(tb) / 1e9)
-@printf("QuasiStrided  median %.4f s (min %.4f, max %.4f)  %.2f GF/s\n", median(tq), minimum(tq), maximum(tq), flops / median(tq) / 1e9)
+@printf("StridedBLAS   median %.4f s (min %.4f, max %.4f)  %.2f GF/s\n", median(tb), minimum(tb), maximum(tb), flops / median(tb) / 1.0e9)
+@printf("QuasiStrided  median %.4f s (min %.4f, max %.4f)  %.2f GF/s\n", median(tq), minimum(tq), maximum(tq), flops / median(tq) / 1.0e9)
 @printf("QS/BLAS = %.3f\n", median(tq) / median(tb))

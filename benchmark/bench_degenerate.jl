@@ -58,8 +58,10 @@ end
 function row(name, ref, plan, blasf)
     ex = () -> execute!(plan, 1.0, 0.0)
     r = interleaved(Any[withmode(ex, ref, :never), withmode(ex, ref, :auto), blasf])
-    @printf("%-28s nest %s  new %s  blas %s  new/nest %.2f  new/blas %.2f\n",
-        name, fmt(r[1]), fmt(r[2]), fmt(r[3]), r[2][1] / r[1][1], r[2][1] / r[3][1])
+    @printf(
+        "%-28s nest %s  new %s  blas %s  new/nest %.2f  new/blas %.2f\n",
+        name, fmt(r[1]), fmt(r[2]), fmt(r[3]), r[2][1] / r[1][1], r[2][1] / r[3][1]
+    )
     return flush(stdout)
 end
 

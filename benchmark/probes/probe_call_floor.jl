@@ -50,7 +50,9 @@ for T in (Float64, ComplexF64), (name, sa, sb, sc, pA, pB, pAB) in CASES
     A, B, C = rand(T, sa), rand(T, sb), zeros(T, sc)
     for (bname, backend) in (("QS", QuasiStridedBackend()), ("BLAS", TO.StridedBLAS()))
         med, lo, hi, b = measure(C, A, pA, B, pB, pAB, backend)
-        @printf("%s\t%-10s\t%-10s\t%-4s\t%8.1f ns\t[%7.1f, %7.1f]\t%6.0f B\n",
-            label, T, name, bname, med, lo, hi, b)
+        @printf(
+            "%s\t%-10s\t%-10s\t%-4s\t%8.1f ns\t[%7.1f, %7.1f]\t%6.0f B\n",
+            label, T, name, bname, med, lo, hi, b
+        )
     end
 end

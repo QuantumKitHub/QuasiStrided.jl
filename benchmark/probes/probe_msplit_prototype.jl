@@ -118,6 +118,6 @@ for round in 1:2
         execute!(p, one(T), zero(T))
         @assert C ≈ Cref "$name wrong result"
         t = median_time_s(() -> execute!(p, one(T), zero(T)); reps = REPS)
-        @printf("round %d  %-22s  %9.4f s  %7.2f GF/s\n", round, name, t, flops / t / 1e9)
+        @printf("round %d  %-22s  %9.4f s  %7.2f GF/s\n", round, name, t, flops / t / 1.0e9)
     end
 end

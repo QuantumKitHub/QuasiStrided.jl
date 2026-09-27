@@ -79,8 +79,10 @@ Cnew = run(QuasiStridedBackend())
 decisions = unique(e -> (e.klabels, e.kA, e.kB, e.indA, e.indB, e.sizeA, e.sizeB), LOG)
 println("pairwise contractions with >1 K label: $(length(decisions)) distinct (of $(length(LOG)) planned)")
 for e in decisions
-    println("  K=", e.klabels, " lengths=", e.kL, "  A: size=", e.sizeA, " ind=", e.indA, " Kstrides=", e.kA, "  B: size=", e.sizeB, " ind=", e.indB, " Kstrides=", e.kB,
-        "  Qm=", e.Qm, " Qn=", e.Qn, "  cost(A,B) old=", e.costs[1], " new=", e.costs[2], e.changed ? "  CHANGED: new=$(e.new) simple=$(e.simple)" : "  (unchanged)")
+    println(
+        "  K=", e.klabels, " lengths=", e.kL, "  A: size=", e.sizeA, " ind=", e.indA, " Kstrides=", e.kA, "  B: size=", e.sizeB, " ind=", e.indB, " Kstrides=", e.kB,
+        "  Qm=", e.Qm, " Qn=", e.Qn, "  cost(A,B) old=", e.costs[1], " new=", e.costs[2], e.changed ? "  CHANGED: new=$(e.new) simple=$(e.simple)" : "  (unchanged)"
+    )
 end
 MODE[] = :old
 Cold = run(QuasiStridedBackend())
@@ -90,7 +92,7 @@ println("max|new-old| = ", maximum(abs, Cnew .- Cold), "  max|new-blas| = ", max
 # Whole network, interleaved.
 function tmed(f)
     f()
-    ts = [(t0 = time_ns(); f(); (time_ns() - t0) / 1e9) for _ in 1:REPS]
+    ts = [(t0 = time_ns(); f(); (time_ns() - t0) / 1.0e9) for _ in 1:REPS]
     return median(ts)
 end
 for round in 1:2
@@ -120,6 +122,8 @@ for e in decisions
     MODE[] = :simple; tsim = tmed(f); MODE[] = :simple; tsim2 = tmed(f)
     @printf("  pairwise K=%s: simple %.3e,%.3e s  simple/old %.3f\n", e.klabels, tsim, tsim2, min(tsim, tsim2) / min(told, told2))
     flops = 2.0 * prod(size(C)) * prod(e.kL)
-    @printf("  pairwise K=%s A%s B%s: old %.3e,%.3e s  new %.3e,%.3e s  new/old %.3f  (%.1f GF/s new)\n",
-        e.klabels, e.sizeA, e.sizeB, told, told2, tnew, tnew2, min(tnew, tnew2) / min(told, told2), flops / min(tnew, tnew2) / 1e9)
+    @printf(
+        "  pairwise K=%s A%s B%s: old %.3e,%.3e s  new %.3e,%.3e s  new/old %.3f  (%.1f GF/s new)\n",
+        e.klabels, e.sizeA, e.sizeB, told, told2, tnew, tnew2, min(tnew, tnew2) / min(told, told2), flops / min(tnew, tnew2) / 1.0e9
+    )
 end

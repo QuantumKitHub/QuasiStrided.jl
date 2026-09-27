@@ -47,8 +47,10 @@ Apar = randn(T, ntuple(_ -> DIM + PAD, length(la))...)
 A = view(Apar, ntuple(_ -> 1:DIM, length(la))...)
 B = randn(T, ntuple(_ -> DIM, length(lb))...)
 C = zeros(T, ntuple(_ -> DIM, length(rhs))...)
-plan = plan_contract(StridedView(C), StridedView(A), indA, StridedView(B), indB, indC;
-    oracle = false, kernel = _kernel_from_shape(SHAPE, T))
+plan = plan_contract(
+    StridedView(C), StridedView(A), indA, StridedView(B), indB, indC;
+    oracle = false, kernel = _kernel_from_shape(SHAPE, T)
+)
 pointer(plan.Astorage) == pointer(Apar) || error("swapped plan: A does not feed M")
 const Ast = plan.Astorage  # the flat storage the engine indexes (0-based offsets)
 

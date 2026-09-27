@@ -43,9 +43,11 @@ csv_io = open(CSV_PATH, "w")
 println(csv_io, "arm,dtype,case,shape,M,K,N,mc,kc,nc,round,seconds,gflops")
 function log_row(arm, T, case, shape, M, K, N, blk, round, t)
     gf = 2.0 * M * K * N / t / 1.0e9
-    println(csv_io, "$arm,$T,$case,$(shape),$M,$K,$N,$(blk === nothing ? "" : blk.mc),",
+    println(
+        csv_io, "$arm,$T,$case,$(shape),$M,$K,$N,$(blk === nothing ? "" : blk.mc),",
         "$(blk === nothing ? "" : blk.kc),$(blk === nothing ? "" : blk.nc),$round,",
-        @sprintf("%.9f", t), ",", @sprintf("%.3f", gf))
+        @sprintf("%.9f", t), ",", @sprintf("%.3f", gf)
+    )
     flush(csv_io)
     return gf
 end
@@ -62,8 +64,10 @@ end
 
 println("bench_large_gemm_peak.jl  cpu = ", Sys.CPU_NAME, "  profile = ", target_profile())
 for T in REAL_DTYPES
-    println("  ", T, ": derived shape ", _derived_shape(target_profile(), T), "  default kernel ",
-        shapestr(shape_of(_default_kernel(T))), "  blocking ", default_blocking(_default_kernel(T)))
+    println(
+        "  ", T, ": derived shape ", _derived_shape(target_profile(), T), "  default kernel ",
+        shapestr(shape_of(_default_kernel(T))), "  blocking ", default_blocking(_default_kernel(T))
+    )
 end
 
 # ---------------------------------------------------------------------------
@@ -157,7 +161,9 @@ for T in REAL_DTYPES
         push!(plans, ("default:" * shapestr(shape_of(pdef.kernel)), pdef))
         reps = max(3, round(Int, 0.2 / (2.0 * M * K * N / 30.0e9)))
         for r in 1:ROUNDS, (name, plan) in plans
-            t = @elapsed for _ in 1:reps; execute!(plan, one(T), zero(T)); end
+            t = @elapsed for _ in 1:reps
+                execute!(plan, one(T), zero(T))
+            end
             record!("stepdown", T, "M$M", name, M, K * reps, N, plan.blocking, r, t)
         end
     end
@@ -176,11 +182,13 @@ for T in REAL_DTYPES
     MR = mr(kernel)
     model = default_blocking(kernel)
     kc34 = max(1, (target_profile().l1d.bytes * 3 ÷ 4) ÷ (nr(kernel) * sizeof(T)))
-    grid = unique([
-        (model.mc, model.kc), (model.mc ÷ 2 ÷ MR * MR, model.kc), (model.mc * 2, model.kc),
-        (max(MR, model.mc * model.kc ÷ kc34 ÷ MR * MR), kc34), (model.mc, kc34),
-        (max(MR, model.mc ÷ 2 ÷ MR * MR), 2 * model.kc),
-    ])
+    grid = unique(
+        [
+            (model.mc, model.kc), (model.mc ÷ 2 ÷ MR * MR, model.kc), (model.mc * 2, model.kc),
+            (max(MR, model.mc * model.kc ÷ kc34 ÷ MR * MR), kc34), (model.mc, kc34),
+            (max(MR, model.mc ÷ 2 ÷ MR * MR), 2 * model.kc),
+        ]
+    )
     plans = []
     for (mc, kc) in grid
         (mc >= MR && kc >= 1) || continue
@@ -204,9 +212,11 @@ open(SUMMARY_PATH, "w") do io
     print_env_header(io, "bench_large_gemm_peak.jl")
     println(io, "profile = ", target_profile())
     for T in REAL_DTYPES
-        println(io, T, ": derived shape ", _derived_shape(target_profile(), T),
+        println(
+            io, T, ": derived shape ", _derived_shape(target_profile(), T),
             "  default kernel ", shapestr(shape_of(_default_kernel(T))),
-            "  blocking ", default_blocking(_default_kernel(T)))
+            "  blocking ", default_blocking(_default_kernel(T))
+        )
     end
     keys_ = unique([(r.arm, r.dtype, r.case, r.shape) for r in rows])
     lastarm = ""
@@ -217,8 +227,10 @@ open(SUMMARY_PATH, "w") do io
             lastarm = arm
         end
         v = [r.gf for r in rows if (r.arm, r.dtype, r.case, r.shape) == key]
-        println(io, "  ", rpad(string(T), 8), rpad(case, 12), rpad(shape, 22),
-            @sprintf("%7.1f", median(v)), "  (", @sprintf("%.1f", minimum(v)), "..", @sprintf("%.1f", maximum(v)), ")")
+        println(
+            io, "  ", rpad(string(T), 8), rpad(case, 12), rpad(shape, 22),
+            @sprintf("%7.1f", median(v)), "  (", @sprintf("%.1f", minimum(v)), "..", @sprintf("%.1f", maximum(v)), ")"
+        )
     end
 end
 println(read(SUMMARY_PATH, String))
