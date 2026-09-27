@@ -53,6 +53,10 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     include("execution/test_macro_blocking.jl")
     include("execution/test_direct.jl")
     include("execution/test_halfpack.jl")
+    # All three use test_halfpack.jl's `_hp_ref` reference (and `_HPDenseMat`).
+    include("execution/test_unpackedb.jl")
+    include("execution/test_dot.jl")
+    include("execution/test_outer.jl")
 
     # Last among the functional tests: it does a bare `using TensorOperations`,
     # which exports its own `scalartype` and would otherwise conflict with the

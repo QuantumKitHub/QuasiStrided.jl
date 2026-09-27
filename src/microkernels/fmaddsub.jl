@@ -310,14 +310,11 @@ end
 
     load_b = Any[]
     for j in 0:(NR - 1)
-        push!(
-            load_b,
-            :($(brv[j + 1]) = Vec{$W, $R}(panel_load(packed_b, packed_b_plane_offset(kernel, 0, $j, p))))
-        )
-        push!(
-            load_b,
-            :($(biv[j + 1]) = Vec{$W, $R}(panel_load(packed_b, packed_b_plane_offset(kernel, 1, $j, p))))
-        )
+        # `_b_step_load2` (src/microkernels/planar.jl): the planar `(re, im)`
+        # pair, from a packed panel or an `UnpackedBView`.
+        push!(load_b, :((br_s, bi_s) = _b_step_load2(packed_b, kernel, $j, p)))
+        push!(load_b, :($(brv[j + 1]) = Vec{$W, $R}(br_s)))
+        push!(load_b, :($(biv[j + 1]) = Vec{$W, $R}(bi_s)))
     end
 
     acc_exprs = Vector{Any}(undef, NA)
@@ -355,7 +352,7 @@ function Base.accumulate(
         packed_a::PA, packed_b::PB, kc::Int
     ) where {MR, NR, T, W, R, NA, PA, PB}
     kc == 0 && return acc
-    kc > 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
+    kc > 0 || _throw_negative_kc(:accumulate, kc)
     @inbounds for p in 0:(kc - 1)
         acc = _accumulate_step_fmaddsub(kernel, acc, packed_a, packed_b, p)
     end
@@ -611,6 +608,12 @@ accumulator's own interleaved layout; everything else takes the scalar
 reader `_store_tile_fmaddsub!`, which reads the interleaved accumulator
 exactly as 1m's does. The two agree bitwise at `beta == 0` and `beta == 1`;
 compare the general-`beta` case with a tolerance, as for planar.
+
+Deliberately NOT `@inline`, unlike the real and planar `store_tile!`. That was
+measured when this kernel had only the scalar store (~64 `_axpby_tile!` calls
+at `(8,8)`): inlining it cost time rather than saving it (ComplexF64 16^3,
+tiles 1210 -> 1596 ns), presumably from the code growth. It has not been
+re-measured since the vector path above landed.
 """
 function store_tile!(
         destination::QSTile, acc::NTuple{NV, Vec{W, R}},

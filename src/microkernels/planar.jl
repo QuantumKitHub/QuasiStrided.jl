@@ -124,6 +124,17 @@ function zero_accumulator(kernel::PlanarKernel{MR, NR, T, W}) where {MR, NR, T, 
     return ntuple(_ -> z, Val(2 * (MR ÷ W) * NR))
 end
 
+# The complex counterpart of `_b_step_load` (src/microkernels/simd.jl): B's
+# column `j` at K step `p` as its `(re, im)` pair of reals. The default reads
+# the two planes of a `PlanarFormat` panel; `UnpackedBView`
+# (src/execution/unpackedb.jl) reads one `Complex` element of B's own storage
+# instead. Shared by the planar and fmaddsub kernels, both of which take B as
+# planar scalars.
+@inline _b_step_load2(packed_b::PB, kernel, j::Int, p::Int) where {PB} = (
+    panel_load(packed_b, packed_b_plane_offset(kernel, 0, j, p)),
+    panel_load(packed_b, packed_b_plane_offset(kernel, 1, j, p)),
+)
+
 # Fully unrolled, closure-free K-step body, mirroring `_accumulate_step` in
 # src/microkernels/simd.jl: per logical K step, MV A vector loads per plane, NR B
 # scalar loads per plane, 4*MV*NR FMAs, literal tuple indices throughout
@@ -188,8 +199,7 @@ end
 
     load_b = Any[]
     for j in 0:(NR - 1)
-        push!(load_b, :($(brv[j + 1]) = panel_load(packed_b, packed_b_plane_offset(kernel, 0, $j, p))))
-        push!(load_b, :($(biv[j + 1]) = panel_load(packed_b, packed_b_plane_offset(kernel, 1, $j, p))))
+        push!(load_b, :(($(brv[j + 1]), $(biv[j + 1])) = _b_step_load2(packed_b, kernel, $j, p)))
     end
 
     acc_exprs = Vector{Any}(undef, NA)
@@ -239,7 +249,7 @@ function Base.accumulate(
         packed_a::PA, packed_b::PB, kc::Int
     ) where {MR, NR, T, W, R, NA, PA, PB}
     kc == 0 && return acc
-    kc > 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
+    kc > 0 || _throw_negative_kc(:accumulate, kc)
     @inbounds for p in 0:(kc - 1)
         acc = _accumulate_step_planar(kernel, acc, packed_a, packed_b, p)
     end
@@ -570,6 +580,7 @@ end
     end
 
     return quote
+        Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
         # zero-based element address at (i=0, j=0)'s row contribution; rows are
@@ -619,8 +630,13 @@ in the general-`beta` regime -- the fallback itself is not bit-reproducible
 against ITSELF across call sites there (LLVM inconsistently fuses Base's
 `muladd(::Complex,::Complex,::Complex)`; see the divergence measurement
 above). Compare the general-`beta` case with a tolerance, never `==`.
+
+`@inline`, with the vectorized store body, for the reason given at the real
+`store_tile!` (src/microkernels/simd.jl): an out-of-line store spills the
+whole two-plane accumulator to the stack on every micro-tile. The scalar
+fallback stays out of line, as the real path's does.
 """
-function store_tile!(
+@inline function store_tile!(
         destination::QSTile, acc::NTuple{NA, Vec{W, R}},
         alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NA}

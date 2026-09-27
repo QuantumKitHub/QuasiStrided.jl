@@ -51,13 +51,17 @@ include("execution/workspace.jl")
 include("planning/plan.jl")
 
 # --- Execution: the five-loop nest, the tile-by-tile oracle, the opt-in
-# unpacked direct path for small contractions, and the opt-in half-packed
-# path (B packed, one-tile A read in place) ---
+# unpacked direct path for small contractions, the opt-in half-packed
+# path (B packed, one-tile A read in place), and the automatically selected
+# unpacked-B path (A packed, B read in place) ---
 include("execution/macrokernel.jl")
 include("execution/execute.jl")
 include("execution/oracle.jl")
 include("execution/direct.jl")
 include("execution/halfpack.jl")
+include("execution/unpackedb.jl")
+include("execution/dot.jl")
+include("execution/outer.jl")
 
 # --- Integrations ---
 include("integrations/tensoroperations.jl")

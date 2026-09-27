@@ -282,7 +282,8 @@ even real rows, those two halves are always **adjacent lanes of the same
 acc[v + MV*j + 1][2u+2])` with `MV = 2MR÷W`. No shuffle, no second load.
 
 Scattered/scalar path only, delegating to the generic `_axpby_tile!`
-(src/microkernels/interface.jl).
+(src/microkernels/interface.jl). Not `@inline`, for the reason given at the
+FMAddSub `store_tile!` (src/microkernels/fmaddsub.jl): scalar-only store.
 """
 function store_tile!(
         destination::QSTile, acc::NTuple{NV, Vec{W, R}},
