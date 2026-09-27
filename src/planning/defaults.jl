@@ -25,8 +25,10 @@ resolved by [`_resolve_defaults`](@ref) and cached per (profile, eltype) by
 (`_derived_shape`), the `fitted` shape the off-AVX-512 small-M demotion falls
 to (`_fitted_shape`), the native-width FMAddSub `small_m` candidates of the
 AVX-512 complex small-M rule (`_small_m_candidates`, empty where the rule does
-not apply), and the unscaled `real_row` of the cache-blocking model for
-`real(T)` (`_real_blocking_row`). `profile` is the profile these were derived
+not apply), the unscaled `real_row` of the cache-blocking model for
+`real(T)` (`_real_blocking_row`), and the core's private L2 share `l2_core`
+that the K-order cost model reads (`_l2_core_bytes`, src/planning/labels.jl).
+`profile` is the profile these were derived
 from and is the cache key: a cached entry serves exactly while it is `===`
 the current [`target_profile`](@ref). Every field but the candidate list is
 isbits, so reads are type-stable and allocation-free.
@@ -37,6 +39,7 @@ struct ResolvedDefaults
     fitted::NTuple{3, Int}
     small_m::Vector{NTuple{3, Int}}
     real_row::Blocking
+    l2_core::Int
 end
 
 """
@@ -54,7 +57,8 @@ function _resolve_defaults(profile::TargetProfile, ::Type{T}) where {T}
     fitted = _fitted_shape(profile, T, method)
     small_m = _small_m_candidates(Val(profile.isa), profile, T)
     real_row = _real_blocking_row(profile, real(T))
-    return ResolvedDefaults(profile, shape, fitted, small_m, real_row)
+    l2_core = _l2_core_bytes(profile)
+    return ResolvedDefaults(profile, shape, fitted, small_m, real_row, l2_core)
 end
 
 # One slot per supported element type, so the lookup is a method dispatch on

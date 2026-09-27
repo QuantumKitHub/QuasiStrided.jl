@@ -43,12 +43,14 @@ function simple_rule(klabels, indA, A, indB, B, Qm, Qn)
 end
 const LOG = Vector{Any}()
 
+# Replaces the entry point without an explicit `l2bytes` (the one
+# `plan_contract` calls); the label lists are NTuples (src/planning/labels.jl).
 function QuasiStrided._order_contract_labels(
-        klabels::Vector{Int}, indA::NTuple{NA, Int}, A::StridedView, morder::Vector{Int},
-        indB::NTuple{NB, Int}, B::StridedView, norder::Vector{Int}, Qm::Int, Qn::Int,
-        l2bytes::Int = QuasiStrided._l2_core_bytes()
-    ) where {NA, NB}
-    length(klabels) <= 1 && return klabels
+        klabels::NTuple{DK, Int}, indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
+        indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int}, Qm::Int, Qn::Int
+    ) where {DK, NA, NB, DM, DN}
+    DK <= 1 && return klabels
+    l2bytes = QuasiStrided._l2_core_bytes()
     new = _choose_k_order(klabels, indA, A, morder, indB, B, norder, Qm, Qn, l2bytes)
     stA = Base.strides(A); stB = Base.strides(B)
     kA = Tuple(stA[findfirst(==(l), indA)] for l in klabels)
@@ -56,7 +58,7 @@ function QuasiStrided._order_contract_labels(
     kL = Tuple(size(A, findfirst(==(l), indA)) for l in klabels)
     costs = Tuple((_k_order_cost(o, indA, A, morder, Qm, l2bytes), _k_order_cost(o, indB, B, norder, Qn, l2bytes)) for o in (klabels, new))
     simple = simple_rule(klabels, indA, A, indB, B, Qm, Qn)
-    push!(LOG, (; klabels = copy(klabels), kL, kA, kB, sizeA = size(A), stA, indA, sizeB = size(B), stB, indB, Qm, Qn, costs, changed = new != klabels || simple != klabels, new, simple))
+    push!(LOG, (; klabels, kL, kA, kB, sizeA = size(A), stA, indA, sizeB = size(B), stB, indB, Qm, Qn, costs, changed = new != klabels || simple != klabels, new, simple))
     return MODE[] === :new ? new : MODE[] === :simple ? simple : klabels
 end
 

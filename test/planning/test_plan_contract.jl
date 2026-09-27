@@ -848,14 +848,14 @@ end
     # the slowest K coordinate, so each B line is refetched per d element
     # (x5) once the lines in flight exceed L2 -- forced here with l2bytes = 0.
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5)))
-    @test _ko_order(Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), Cv, (1, 5); l2bytes = 0) == [4, 3, 2]
+    @test _ko_order(Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), Cv, (1, 5); l2bytes = 0) == (4, 3, 2)
     # ... and when they fit L2 the model is indifferent: indA order is kept.
-    @test _ko_order(Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), Cv, (1, 5); l2bytes = 1 << 20) == [2, 3, 4]
+    @test _ko_order(Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), Cv, (1, 5); l2bytes = 1 << 20) == (2, 3, 4)
 
     # gemm_ready B[b,c,d,e] and b_permuted B[b,e,c,d]: B-sorted == indA order.
     for indB in ((2, 3, 4, 5), (2, 5, 3, 4))
         Bv = StridedView(_ko_array(T, indB))
-        @test _ko_order(Av, (1, 2, 3, 4), Bv, indB, Cv, (1, 5); l2bytes = 0) == [2, 3, 4]
+        @test _ko_order(Av, (1, 2, 3, 4), Bv, indB, Cv, (1, 5); l2bytes = 0) == (2, 3, 4)
     end
 
     # TRG-shaped: B's K axis 5 is unit-stride, but sorting by B would make A's
@@ -867,7 +867,7 @@ end
     Bt = StridedView(randn(T, 8, 8, 8))
     Ct = StridedView(zeros(T, 8, 8, 8, 8))
     for l2bytes in (0, 1 << 20)
-        @test _ko_order(At, (1, 2, 3, 4, 5), Bt, (5, 6, 2), Ct, (1, 3, 4, 6); l2bytes) == [2, 5]
+        @test _ko_order(At, (1, 2, 3, 4, 5), Bt, (5, 6, 2), Ct, (1, 3, 4, 6); l2bytes) == (2, 5)
     end
 
     # Single K label: nothing to order.
@@ -877,8 +877,110 @@ end
     A1 = StridedView(randn(T, 9, 1, 4, 5))
     B1 = StridedView(randn(T, 1, 5, 4, 6))
     o = _ko_order(A1, (1, 2, 3, 4), B1, (2, 4, 3, 5), Cv, (1, 5); l2bytes = 0)
-    @test sort(o) == [2, 3, 4]
-    @test filter(!=(2), o) == [4, 3]   # B-sorted among the non-singletons
+    @test sort(collect(o)) == [2, 3, 4]
+    @test filter(!=(2), o) == (4, 3)  # B-sorted among the non-singletons
+end
+
+@testset "K order: static-length tuple, inferred, allocation-free" begin
+    T = Float64
+    ext = _KO_BIG
+    Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
+    Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))
+    Cv = StridedView(zeros(T, ext[1], ext[5]))
+    klabels, morder, norder = (2, 3, 4), (1,), (5,)
+    f(l2) = QuasiStrided._order_contract_labels(klabels, (1, 2, 3, 4), Av, morder, (4, 3, 2, 5), Bs, norder, ext[1], ext[5], l2)
+    g() = QuasiStrided._order_contract_labels(klabels, (1, 2, 3, 4), Av, morder, (4, 3, 2, 5), Bs, norder, ext[1], ext[5])
+    @test @inferred(f(0)) === (4, 3, 2)
+    @test @inferred(g()) isa NTuple{3, Int}
+    f(0); g()
+    @test (@allocated f(0)) == 0
+    @test (@allocated g()) == 0
+    # Zero and one K label: returned as given, without the model.
+    h1() = QuasiStrided._order_contract_labels((2,), (1, 2), Av, (1,), (2, 5), Bs, (5,), 9, 40)
+    h0() = QuasiStrided._order_contract_labels((), (1,), Av, (1,), (5,), Bs, (5,), 9, 40)
+    @test @inferred(h1()) === (2,)
+    @test @inferred(h0()) === ()
+end
+
+# The cost model as first written on perf/scrambled-strides (label-keyed,
+# `Vector` lists there), kept verbatim as the reference the planner's
+# positional, tuple-based form (`_KOperand`, src/planning/labels.jl) must
+# reproduce decision for decision.
+function _ko_reference_cost(korder, ind, v, free, Qfree, l2bytes)
+    st = Base.strides(v)
+    S = sizeof(eltype(v))
+    line_elems = max(1, 64 ÷ S)
+    pos(l) = findfirst(==(l), ind)::Int
+    n = length(v)
+    kfast = 0
+    for l in korder
+        if size(v, pos(l)) > 1
+            kfast = l
+            break
+        end
+    end
+    kfast == 0 && return 0
+    walk = abs(st[pos(kfast)]) * S > 4096 ? 3 : 1
+    wholeline = false
+    for l in free
+        p = pos(l)
+        size(v, p) == 1 && continue
+        wholeline = st[p] == 1 && size(v, p) >= line_elems
+        break
+    end
+    wholeline && return n * walk
+    u = 0
+    su = typemax(Int)
+    for l in korder
+        p = pos(l)
+        size(v, p) == 1 && continue
+        if abs(st[p]) < su
+            su = abs(st[p])
+            u = l
+        end
+    end
+    share = su * S >= 64 ? 1 : min(size(v, pos(u)), 64 ÷ (su * S))
+    (share == 1 || u == kfast) && return n * walk
+    faster = 1
+    for l in korder
+        l == u && break
+        faster *= size(v, pos(l))
+    end
+    footprint = Int128(faster) * Int128(Qfree) * Int128(64)
+    return footprint <= l2bytes ? n * walk : n * walk * share
+end
+_ko_reference_sort(labels, ind, v) =
+    Tuple(sort(collect(labels); by = l -> abs(Base.strides(v)[findfirst(==(l), ind)])))  # `sort` is stable
+
+@testset "K order: tuple port reproduces the reference cost model" begin
+    Random.seed!(0x0C05_7000)
+    for trial in 1:500
+        T = rand((Float64, Float32, ComplexF64))
+        nk = rand(2:4)
+        ext = Dict(l => rand((1, 2, 3, 5, 8, 17, 40)) for l in 1:(nk + 2))
+        klabels = Tuple(2:(nk + 1))
+        # Operands stored in a random axis order, then viewed in another one,
+        # so the label order, the storage order and the stride order all differ.
+        function operand(labels)
+            store = Random.shuffle(collect(labels))
+            v = StridedView(randn(T, Tuple(ext[l] for l in store)...))
+            perm = Tuple(Random.randperm(length(store)))
+            return permutedims(v, perm), Tuple(store[collect(perm)])
+        end
+        Av, indA = operand((1, klabels...))
+        Bv, indB = operand((klabels..., nk + 2))
+        l2 = rand((0, 256, 4096, 1 << 20))
+        Qm, Qn = ext[1], ext[nk + 2]
+        cost(o) = _ko_reference_cost(o, indA, Av, (1,), Qm, l2) + _ko_reference_cost(o, indB, Bv, (nk + 2,), Qn, l2)
+        best = klabels
+        for cand in (_ko_reference_sort(klabels, indA, Av), _ko_reference_sort(klabels, indB, Bv))
+            cand != best && cost(cand) < cost(best) && (best = cand)
+        end
+        @test QuasiStrided._order_contract_labels(klabels, indA, Av, (1,), indB, Bv, (nk + 2,), Qm, Qn, l2) === best
+        for o in (klabels, reverse(klabels))
+            @test QuasiStrided._k_order_cost(o, indA, Av, (1,), Qm, l2) == _ko_reference_cost(o, indA, Av, (1,), Qm, l2)
+        end
+    end
 end
 
 @testset "K order: plan_contract flips contract_scrambled at an L2-exceeding size" begin

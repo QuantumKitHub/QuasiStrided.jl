@@ -193,26 +193,13 @@ end
 # same case.
 # ----------------------------------------------------------------------------
 
-# Stable sort of `labels` by `abs(stride)` of each label's axis in `v` (the
-# same insertion sort as `_order_free_labels`, over a different operand).
-function _sort_labels_by_stride(
-        labels::Vector{Int}, ind::NTuple{N, Int}, v::StridedView
-    ) where {N}
-    st = Base.strides(v)
-    key(l::Int) = abs(st[findfirst(==(l), ind)::Int])
-    out = copy(labels)
-    @inbounds for i in 2:length(out)
-        x = out[i]
-        kx = key(x)
-        j = i - 1
-        while j >= 1 && key(out[j]) > kx
-            out[j + 1] = out[j]
-            j -= 1
-        end
-        out[j + 1] = x
-    end
-    return out
-end
+# Stable sort of `labels` by `abs(stride)` of each label's axis in `v`: the
+# same allocation-free insertion sort as `_order_free_labels`, over a
+# different operand, so it is that function under a name that does not say
+# "free" -- the result is an `NTuple{D,Int}` of the input's static length.
+@inline _sort_labels_by_stride(
+    labels::NTuple{D, Int}, ind::NTuple{N, Int}, v::StridedView
+) where {D, N} = _order_free_labels(labels, ind, v)
 
 # The K order is chosen among three candidates -- `indA` order (the historical
 # one), sorted by A's strides, sorted by B's strides -- by a cost model of the
@@ -258,101 +245,204 @@ const _K_LINE_BYTES = 64
 
 # The core's private L2 share (see `_modelled_blocking`, src/planning/blocking.jl),
 # or 1 MB when undetected -- between the 512 KB (Zen 2) and 1.25 MB (Ice Lake)
-# of the machines measured, so an unknown host errs neither way.
-function _l2_core_bytes()
-    profile = target_profile()
+# of the machines measured, so an unknown host errs neither way. Read from the
+# detected cache profile (`target_profile()`, filled by `_init_target!` at
+# load). The planner does not call this per plan: the value is resolved once
+# per (profile, eltype) into `ResolvedDefaults.l2_core` (src/planning/
+# defaults.jl) and read from there (`_l2_core_bytes(T)`).
+function _l2_core_bytes(profile::TargetProfile)
     l2 = profile.l2
     l2.bytes > 0 || return 1 << 20
     smt = max(1, profile.l1d.sharing)
     return l2.bytes ÷ max(1, l2.sharing ÷ smt)
 end
+_l2_core_bytes() = _l2_core_bytes(target_profile())
 
-# Cost of packing one operand under K order `korder`. `free` is the operand's
-# free-label list in the order the M/N composite enumerates it (C-stride
-# order, `_order_free_labels`), whose FIRST label decides whether a register
-# sliver is whole lines. `Qfree` is the free extent.
-function _k_order_cost(
-        korder::Vector{Int}, ind::NTuple{N, Int}, v::StridedView,
-        free::Vector{Int}, Qfree::Int, l2bytes::Int
-    ) where {N}
+# Cached form for element type `T`: a field of the per-(profile, eltype)
+# defaults, so no division is redone per plan; an element type without a
+# defaults slot (no kernel menu, it fails later in planning) reads the
+# profile directly.
+@inline _l2_core_bytes(::Type{T}) where {T} =
+    _defaults_slot(T) === nothing ? _l2_core_bytes() : _resolved_defaults(T).l2_core
+
+# What the cost model reads of one operand, gathered ONCE per plan in
+# `klabels` order (`_k_operand`): each K label's extent `len[i]` and
+# |stride| `st[i]` in the operand, the element count `n`, the element size
+# `S`, and whether its register slivers are whole lines (`wholeline`: the
+# free composite's leading -- C-fastest, first non-singleton of `free` --
+# axis is unit-stride here and at least a line long). An order is then a
+# permutation `perm` of `1:DK` (`klabels[perm[j]]` is its j-th label), and
+# costing a candidate is plain tuple indexing: no `findfirst` over the
+# operand's labels per axis visited, as a label-keyed evaluation would do six
+# times over (three candidates, two operands).
+struct _KOperand{DK}
+    len::NTuple{DK, Int}
+    st::NTuple{DK, Int}
+    n::Int
+    S::Int
+    wholeline::Bool
+end
+
+@inline function _k_operand(
+        klabels::NTuple{DK, Int}, ind::NTuple{N, Int}, v::StridedView,
+        free::NTuple{DF, Int}
+    ) where {DK, N, DF}
     st = Base.strides(v)
+    sz = size(v)
     S = sizeof(eltype(v))
-    line_elems = max(1, _K_LINE_BYTES ÷ S)
     pos(l::Int) = findfirst(==(l), ind)::Int
-    n = length(v)
+    ps = map(pos, klabels)
+    len = map(p -> sz[p], ps)
+    kst = map(p -> abs(st[p]), ps)
+    line_elems = max(1, _K_LINE_BYTES ÷ S)
+    wholeline = false
+    for l in free
+        p = pos(l)
+        sz[p] == 1 && continue
+        wholeline = st[p] == 1 && sz[p] >= line_elems
+        break
+    end
+    return _KOperand{DK}(len, kst, length(v), S, wholeline)
+end
 
+# Stable insertion sort of the permutation `perm` by `key[perm[j]]`,
+# ascending: with `perm = 1:DK` this is `_sort_labels_by_stride` on
+# `klabels` expressed as positions (same comparisons, same tie rule), so
+# `map(i -> klabels[i], _sort_perm(1:DK, op.st))` is the operand-sorted order.
+@inline function _sort_perm(perm::NTuple{D, Int}, key::NTuple{D, Int}) where {D}
+    out = perm
+    @inbounds for i in 2:D
+        x = out[i]
+        kx = key[x]
+        j = i - 1
+        while j >= 1 && key[out[j]] > kx
+            out = _tupleset(out, j + 1, out[j])
+            j -= 1
+        end
+        out = _tupleset(out, j + 1, x)
+    end
+    return out
+end
+
+# Cost of packing one operand under the K order `perm` (positions into the
+# `klabels` the operand facts were gathered in; see `_KOperand`). `Qfree` is
+# the operand's free extent.
+function _k_order_cost(
+        perm::NTuple{DK, Int}, op::_KOperand{DK}, Qfree::Int, l2bytes::Int
+    ) where {DK}
+    len, st, S = op.len, op.st, op.S
     # Fastest non-singleton K axis of this order.
     kfast = 0
-    for l in korder
-        if size(v, pos(l)) > 1
-            kfast = l
+    @inbounds for i in perm
+        if len[i] > 1
+            kfast = i
             break
         end
     end
     kfast == 0 && return 0  # K is all singletons here: nothing walks.
-    walk = abs(st[pos(kfast)]) * S > _K_WALK_FAR_BYTES ? _K_WALK_FAR_PENALTY : 1
+    walk = @inbounds(st[kfast]) * S > _K_WALK_FAR_BYTES ? _K_WALK_FAR_PENALTY : 1
 
-    # Whole-line slivers: the free composite's leading (C-fastest) axis is
-    # unit-stride here and at least a line long.
-    wholeline = false
-    for l in free
-        p = pos(l)
-        size(v, p) == 1 && continue
-        wholeline = st[p] == 1 && size(v, p) >= line_elems
-        break
-    end
-    wholeline && return n * walk
+    # Whole-line slivers: every line is fetched once.
+    op.wholeline && return op.n * walk
 
-    # The operand's smallest-stride K axis `u`, and how many of its elements
-    # share a line.
+    # The operand's smallest-stride K axis `u` (first in this order among
+    # equal strides), and how many of its elements share a line.
     u = 0
     su = typemax(Int)
-    for l in korder
-        p = pos(l)
-        size(v, p) == 1 && continue
-        if abs(st[p]) < su
-            su = abs(st[p])
-            u = l
+    @inbounds for i in perm
+        len[i] == 1 && continue
+        if st[i] < su
+            su = st[i]
+            u = i
         end
     end
-    share = su * S >= _K_LINE_BYTES ? 1 : min(size(v, pos(u)), _K_LINE_BYTES ÷ (su * S))
-    (share == 1 || u == kfast) && return n * walk
+    # share = su*S >= line ? 1 : min(len[u], line ÷ (su*S)). As `u` is not a
+    # singleton (len[u] >= 2; an empty axis makes n = 0 and every return 0),
+    # share == 1 exactly when su*S > line/2, which is tested first so the
+    # runtime division is only paid on the one return that uses its value.
+    suS = su * S
+    (2 * suS > _K_LINE_BYTES || u == kfast) && return op.n * walk
 
     # Lines touched before `u` advances: one per element (scattered slivers)
     # over the faster K extents and the whole free extent.
     faster = 1
-    for l in korder
-        l == u && break
-        faster *= size(v, pos(l))
+    @inbounds for i in perm
+        i == u && break
+        faster *= len[i]
     end
     footprint = Int128(faster) * Int128(Qfree) * Int128(_K_LINE_BYTES)
-    return footprint <= l2bytes ? n * walk : n * walk * share
+    footprint <= l2bytes && return op.n * walk
+    share = min(@inbounds(len[u]), _K_LINE_BYTES ÷ suS)
+    return op.n * walk * share
+end
+
+# Label-keyed form: the cost of packing the operand `v` (labels `ind`) under
+# the K order `korder`, where `free` is the operand's free-label list in the
+# order the M/N composite enumerates it (C-stride order, `_order_free_labels`)
+# -- its FIRST non-singleton label decides whether a register sliver is whole
+# lines -- and `Qfree` the free extent. For probes and tests; the planner
+# costs its candidates through the positional form above.
+function _k_order_cost(
+        korder::NTuple{DK, Int}, ind::NTuple{N, Int}, v::StridedView,
+        free::NTuple{DF, Int}, Qfree::Int, l2bytes::Int
+    ) where {DK, N, DF}
+    return _k_order_cost(ntuple(identity, Val(DK)), _k_operand(korder, ind, v, free), Qfree, l2bytes)
 end
 
 # Entry point `plan_contract` calls; the decision itself is `_choose_k_order`
 # (kept apart so a probe can wrap the entry point and log/toggle decisions
 # without duplicating the model -- benchmark/probes/probe_network_korder.jl).
+# Without an explicit `l2bytes` the core's L2 share (`_l2_core_bytes`) is
+# used (`_choose_k_order` also takes `nothing` for it, resolved lazily).
+#
+# Tuple port (the label lists are `NTuple`s, see the top of this file): the
+# model takes `klabels`, `morder` and `norder` as statically sized tuples,
+# represents every candidate order as a permutation tuple of `1:DK`, and
+# returns an `NTuple{DK,Int}` of the input's static length, so the K group's
+# rank stays a compile-time constant and nothing allocates. Zero or one K
+# label returns at a compile-time branch, before the model or the L2 lookup,
+# so a plain GEMM pays nothing for it.
+@inline function _order_contract_labels(
+        klabels::NTuple{DK, Int},
+        indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
+        indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
+        Qm::Int, Qn::Int
+    ) where {DK, NA, NB, DM, DN}
+    DK <= 1 && return klabels
+    return _choose_k_order(klabels, indA, A, morder, indB, B, norder, Qm, Qn, nothing)
+end
 function _order_contract_labels(
-        klabels::Vector{Int},
-        indA::NTuple{NA, Int}, A::StridedView, morder::Vector{Int},
-        indB::NTuple{NB, Int}, B::StridedView, norder::Vector{Int},
-        Qm::Int, Qn::Int, l2bytes::Int = _l2_core_bytes()
-    ) where {NA, NB}
+        klabels::NTuple{DK, Int},
+        indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
+        indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
+        Qm::Int, Qn::Int, l2bytes::Int
+    ) where {DK, NA, NB, DM, DN}
     return _choose_k_order(klabels, indA, A, morder, indB, B, norder, Qm, Qn, l2bytes)
 end
 
 function _choose_k_order(
-        klabels::Vector{Int},
-        indA::NTuple{NA, Int}, A::StridedView, morder::Vector{Int},
-        indB::NTuple{NB, Int}, B::StridedView, norder::Vector{Int},
-        Qm::Int, Qn::Int, l2bytes::Int
-    ) where {NA, NB}
-    length(klabels) <= 1 && return klabels
-    cost(order) = _k_order_cost(order, indA, A, morder, Qm, l2bytes) +
-        _k_order_cost(order, indB, B, norder, Qn, l2bytes)
-    best = klabels
-    bestcost = cost(klabels)
-    for cand in (_sort_labels_by_stride(klabels, indA, A), _sort_labels_by_stride(klabels, indB, B))
+        klabels::NTuple{DK, Int},
+        indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
+        indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
+        Qm::Int, Qn::Int, l2bytes::Union{Int, Nothing}
+    ) where {DK, NA, NB, DM, DN}
+    DK <= 1 && return klabels
+    opA = _k_operand(klabels, indA, A, morder)
+    opB = _k_operand(klabels, indB, B, norder)
+    id = ntuple(identity, Val(DK))
+    permA = _sort_perm(id, opA.st)   # == _sort_labels_by_stride(klabels, indA, A)
+    permB = _sort_perm(id, opB.st)   # == _sort_labels_by_stride(klabels, indB, B)
+    # Both sorts already give indA order (every gemm_ready/a_permuted/
+    # b_permuted layout): the loop below would skip both candidates as equal
+    # to `best`, so the answer is `klabels` without evaluating a cost.
+    permA == id && permB == id && return klabels
+    # `nothing`: the core's L2 share, looked up only now that a cost is needed
+    # (a field of the cached defaults, `_l2_core_bytes(T)`).
+    l2 = l2bytes === nothing ? _l2_core_bytes(eltype(A)) : l2bytes
+    cost(perm) = _k_order_cost(perm, opA, Qm, l2) + _k_order_cost(perm, opB, Qn, l2)
+    best = id
+    bestcost = cost(id)
+    for cand in (permA, permB)
         cand == best && continue
         c = cost(cand)
         if c < bestcost
@@ -360,7 +450,7 @@ function _choose_k_order(
             bestcost = c
         end
     end
-    return best
+    return map(i -> @inbounds(klabels[i]), best)
 end
 
 # Element count of the leading unit-stride run when `labels` (already ordered
