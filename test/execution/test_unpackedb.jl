@@ -270,7 +270,10 @@ end
     plan = _mm_plan(Cmat, randn(T, 40, 50), randn(T, 50, 37); kc = 16, nc = 12)
     @test _ub_use(plan)
     _ub_mode[] = :always
-    @test _steady_allocs!(execute!, plan, Cmat) == 0 skip = (VERSION < v"1.11")
+    # Measured outside the `@test`: a skipped `@test` does not evaluate its
+    # expression, and the product check below needs the last run's result.
+    allocs = _steady_allocs!(execute!, plan, Cmat)
+    @test allocs == 0 skip = (VERSION < v"1.11")
     _ub_mode[] = :auto
     @test Cmat ≈ reshape(plan.Astorage, 40, 50) * reshape(plan.Bstorage, 50, 37)
 end

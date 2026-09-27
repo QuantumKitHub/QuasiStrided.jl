@@ -412,8 +412,9 @@ end
 
         # Expected: each composite ascending in |C-stride|; the same set of
         # labels as `_classify_labels` produced.
-        msorted = sort(mlab; by = cstride)
-        nsorted = sort(nlab; by = cstride)
+        # (`sort` of a Tuple needs Julia 1.11; the default sort is stable.)
+        msorted = Tuple(sort(collect(mlab); by = cstride))
+        nsorted = Tuple(sort(collect(nlab); by = cstride))
         @test _lo_order(mlab, indC, Cv) == msorted
         @test _lo_order(nlab, indC, Cv) == nsorted
         mrun = _lo_run(msorted, indC, Cv)
@@ -893,8 +894,10 @@ end
     @test @inferred(f(0)) === (4, 3, 2)
     @test @inferred(g()) isa NTuple{3, Int}
     f(0); g()
-    @test (@allocated f(0)) == 0
-    @test (@allocated g()) == 0
+    # Julia 1.10 allocates here (32 B per call, measured); skipped below 1.11
+    # like the suite's other allocation assertions.
+    @test (@allocated f(0)) == 0 skip = (VERSION < v"1.11")
+    @test (@allocated g()) == 0 skip = (VERSION < v"1.11")
     # Zero and one K label: returned as given, without the model.
     h1() = QuasiStrided._order_contract_labels((2,), (1, 2), Av, (1,), (2, 5), Bs, (5,), 9, 40)
     h0() = QuasiStrided._order_contract_labels((), (1,), Av, (1,), (5,), Bs, (5,), 9, 40)
@@ -1019,11 +1022,11 @@ end
         alpha = T <: Complex ? T(1.3, -0.4) : T(1.3)
         beta = T <: Complex ? T(0.7, 0.2) : T(0.7)
         for (indA, indB, indC) in (
-                ((1, 2, 3, 4), (4, 3, 2, 5), (1, 5)),   # scrambled, C[a,e] (reordered K)
-                ((1, 2, 3, 4), (4, 3, 2, 5), (5, 1)),   # scrambled, C[e,a] (swap for real T)
-                ((4, 3, 2, 1), (2, 3, 4, 5), (1, 5)),   # A transposed, K inner in both
-                ((4, 3, 2, 1), (3, 2, 4, 5), (5, 1)),   # both scrambled, C transposed
-            ), (conjA, conjB) in ((false, false), (true, false), (true, true))
+                    ((1, 2, 3, 4), (4, 3, 2, 5), (1, 5)),   # scrambled, C[a,e] (reordered K)
+                    ((1, 2, 3, 4), (4, 3, 2, 5), (5, 1)),   # scrambled, C[e,a] (swap for real T)
+                    ((4, 3, 2, 1), (2, 3, 4, 5), (1, 5)),   # A transposed, K inner in both
+                    ((4, 3, 2, 1), (3, 2, 4, 5), (5, 1)),   # both scrambled, C transposed
+                ), (conjA, conjB) in ((false, false), (true, false), (true, true))
             (T <: Real) && conjA && continue
             A = _ko_array(T, indA, ext)
             B = _ko_array(T, indB, ext)
