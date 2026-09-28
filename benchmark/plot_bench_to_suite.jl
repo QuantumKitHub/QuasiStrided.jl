@@ -1,28 +1,17 @@
-# Plots benchmark/bench_to_suite.jl's results: per (dtype, category, group)
-# -- group = upstream's `source` (contract) or `topic` (network) tag, with
-# groups of more than MAX_PER_FIG cases split by sweep dim -- a
-# GFLOP/s comparison (StridedBLAS vs QuasiStrided only), a log-scaled
-# QuasiStrided / StridedBLAS time-ratio chart (< 1 = QuasiStrided faster),
-# and a separate per-case throughput violin plot ("..._violin.png").
+# Plots bench_to_suite.jl's CSV, per (dtype, category, group) -- group =
+# upstream's source/topic tag, split by sweep dim above MAX_PER_FIG cases: a
+# GFLOP/s panel, a log-scaled QuasiStrided/StridedBLAS time ratio (< 1 =
+# QuasiStrided faster), and a per-case throughput violin plot. Float64 and
+# ComplexF64 only.
 #
 #   julia --project=benchmark benchmark/plot_bench_to_suite.jl [csv_path]
 #
-# With no `csv_path`, uses the most recently modified
-# benchmark/results/*/bench_to_suite.csv. Writes PNGs next to that CSV.
+# Without `csv_path`, uses the newest benchmark/results/*/bench_to_suite.csv.
+# Writes PNGs next to the CSV.
 #
-# Only Float64/ComplexF64 rows are plotted (Float32/ComplexF32, if present in
-# the CSV, are skipped) and StridedNative is dropped from both panels -- this
-# is a two-backend comparison (StridedBLAS vs QuasiStrided) by design.
-#
-# The violin plot is NOT built from raw per-rep samples -- bench_to_suite.jl
-# only logs min/median/std of each case's REPS-sample throughput, to keep the
-# CSV small. `synth_samples` below turns those three numbers into a plausible
-# distribution (a normal(median, std) reflected below the observed min, so
-# nothing falls under the recorded floor) purely for visual shape; it is a
-# MODELED approximation, not the empirical distribution -- treat the violin's
-# location/spread as real, its exact tail shape as illustrative only. Reading
-# an old-format CSV without min_gflops/std_gflops columns skips the violin
-# plot for that file (see `read_rows`).
+# The CSV keeps only median/min/std per case, so the violins are drawn from a
+# normal(median, std) reflected at the observed min: their location and spread
+# are real, their tail shape is illustrative.
 
 using CairoMakie
 using Printf
@@ -64,9 +53,7 @@ struct Row
     expr::String
 end
 
-# `params` is the free-form "k1=v1;k2=v2;..." field bench_to_suite.jl writes
-# from `params_string`; values are kept as strings since categories other
-# are not all integers (e.g. "layout=gemm_ready").
+# "k1=v1;k2=v2;..." as written by bench_to_suite.jl; values stay strings.
 function parse_params(s::AbstractString)
     d = Dict{String, String}()
     isempty(s) && return d
@@ -77,13 +64,9 @@ function parse_params(s::AbstractString)
     return d
 end
 
-# Only the column layout bench_to_suite.jl has written since the move to
-# upstream's :contract/:network categories (17 columns, with group/layout/
-# blas/intensity/expr) is supported; older CSVs predate that.
 function read_rows(path)
     lines = readlines(path)
-    occursin(",expr", lines[1]) ||
-        error("$path predates the :contract/:network CSV layout; re-run bench_to_suite.jl")
+    occursin(",expr", lines[1]) || error("$path is not a bench_to_suite.jl CSV (no expr column)")
     rows = Row[]
     for line in lines[2:end]
         f = split(line, ',')
@@ -101,27 +84,18 @@ end
 
 const ROWS = read_rows(CSV_PATH)
 
-# QuasiStrided / StridedBLAS time ratio: < 1 = QuasiStrided faster. Log-scaled
-# on the plot (not linear) since case-to-case values span orders of magnitude
-# (some ~150x) -- a linear axis makes everything but the most extreme case
-# collapse to an indistinguishable sliver near zero.
+# Plotted on a log axis: ratios span orders of magnitude across cases.
 function ratio_for(rows, case_id, num, den)
     t_num = only(r.t for r in rows if r.case_id == case_id && r.backend == num)
     t_den = only(r.t for r in rows if r.case_id == case_id && r.backend == den)
     return t_num / t_den
 end
 
-# Per-case axis label: the compact einsum expression bench_to_suite.jl wrote
-# (single letters, "A B>C"), the sweep dim and the arithmetic intensity at the
-# run's dtype. A leading "*" marks upstream's `isblasequivalent` cases (a
-# single BLAS gemm after reshapes alone, no permutation anywhere).
+# A leading "*" marks upstream's `isblasequivalent` cases.
 case_label(r::Row) = @sprintf("%s%s  %s  dim=%d  %.3g FLOP/B", r.blas ? "*" : "", r.expr, r.case_id, r.dim, r.intensity)
 
-# See the file header for why this is a modeled approximation, not real
-# per-rep data: normal(median, std), reflected below `min_v` (mirrored back
-# up rather than clipped, so the reflected mass still contributes density
-# instead of piling up at the boundary). `seed` is deterministic in the
-# inputs so replotting the same CSV always draws the same shape.
+# Modeled samples (see the header), reflected rather than clipped at `min_v` so
+# no mass piles up at the boundary; seeded from the inputs, so replots match.
 function synth_samples(median_v::Float64, min_v::Float64, std_v::Float64; n::Int = 300)
     std_v <= 0 && return fill(median_v, n)
     rng = Random.Xoshiro(hash((median_v, min_v, std_v)))
