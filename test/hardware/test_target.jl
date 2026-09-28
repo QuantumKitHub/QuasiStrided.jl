@@ -14,6 +14,8 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
 @testset "target detection" begin
     @testset "runs on this host without throwing" begin
         p = target_profile()
+        # Logged, so a host-dependent CI failure can be read off the log.
+        @info "target profile" p Sys.CPU_NAME QuasiStrided._isa_from_cpuid() VERSION
         @test p isa TargetProfile
         @test p.isa in VALID_ISAS
         @test p.arch === Sys.ARCH
@@ -42,8 +44,23 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
             # AVX2-only live probe) -- `_detect_isa` itself now defers to the
             # narrower of the two (src/hardware/target.jl), so only a probe
             # reporting something WIDER than the table is a real table bug.
-            (table === :miss || probe === :unknown) ||
+            #
+            # Except where the NAME is stale: a Julia whose CPU detector
+            # predates a microarchitecture reports it under an older name.
+            # Julia 1.10 (LLVM 15) has no `znver4`, and names AMD Zen 4 and
+            # Zen 5 (AVX-512) "znver3" (AVX2) -- a GitHub ubuntu runner on
+            # Zen 4 then probes AVX-512 against an AVX2 entry. That entry is
+            # right for real Zen 3, so it is not a table bug; the name just
+            # cannot tell the two apart. There only the reconciliation itself
+            # is checked (below, for every name).
+            stale = VERSION < v"1.11" ? ("znver3",) : ()
+            (table === :miss || probe === :unknown || Sys.CPU_NAME in stale) ||
                 @test QuasiStrided._isa_rank(probe) <= QuasiStrided._isa_rank(table)
+            # `_detect_isa` is the narrower of a listed name and a live probe.
+            if table !== :miss && probe !== :unknown
+                @test _detect_isa() ===
+                    (QuasiStrided._isa_rank(probe) < QuasiStrided._isa_rank(table) ? probe : table)
+            end
             # Base's CPUID submodule is undocumented: if these names move,
             # `_isa_from_cpuid` silently returns :unknown and every unlisted
             # x86 CPU quietly loses the derived shape. Fail loudly instead.
