@@ -46,7 +46,7 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     include("execution/test_macro_blocking.jl")
     include("execution/test_direct.jl")
     include("execution/test_halfpack.jl")
-    # All three use test_halfpack.jl's `_hp_ref` reference (and `_HPDenseMat`).
+    # These use test_execute.jl's shared helpers and brute-force reference.
     include("execution/test_unpackedb.jl")
     include("execution/test_dot.jl")
     include("execution/test_outer.jl")

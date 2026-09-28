@@ -8,7 +8,6 @@ const plan_contract = QuasiStrided.plan_contract
 const execute! = QuasiStrided.execute!
 const ContractPlan = QuasiStrided.ContractPlan
 const execute_tilewise! = QuasiStrided.execute_tilewise!
-const execute_direct! = QuasiStrided.execute_direct!
 
 import TensorOperations as TO
 
