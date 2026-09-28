@@ -1,828 +1,212 @@
-# pack_a!/pack_b! for real kernels against direct tensor indexing.
+# pack_a!/pack_b! for real kernels against direct storage indexing. The
+# reference layouts and fixtures here are shared with the two complex packing
+# files included after this one.
 
-using Test
-using QuasiStrided
-using QuasiStrided: AxisGroup, BlockDescriptor, describe_block, KernelDescriptor,
-    mr, nr, scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
-    axis_from_descriptor, axis_length, axis_offset, checked_axis_offset,
-    QSTile, nrows, ncols, tile_offset, checked_tile_offset,
-    tile_load, tile_store!, checked_tile_load, checked_tile_store!
+using QuasiStrided: RealFormat, PlanarFormat, OneEFormat, InterleavedFormat, PackedPanel,
+    packed_panel, PtrScatterAxis, ComplexKernelDescriptor, _copies_unchanged,
+    _pack_a_contiguous_eligible
 
-
-# =====================================================================
-# pack_a! / pack_b!: direct-indexing oracle helpers
-# =====================================================================
-
-# Build a SourceTile over a dense Vector `storage`, given per-axis affine or
-# scatter descriptions as plain (base,stride) or explicit offset vectors, and
-# an independent "reference" matrix computed straight from `storage` and the
-# offsets, without going through tile_load, for the value-comparison tests.
-
-# A[i,p] reference (0-based i,p), reading storage directly at
-# base + rowoff(i) + coloff(p) + 1.
-function _ref_matrix(storage::Vector{T}, base::Int, rowoffs::Vector{Int}, coloffs::Vector{Int}) where {T}
-    m = length(rowoffs)
-    k = length(coloffs)
-    M = Matrix{T}(undef, m, k)
-    for i in 1:m, p in 1:k
-        M[i, p] = storage[base + rowoffs[i] + coloffs[p] + 1]
+# Packed layouts written from the format definitions, not from the offset
+# helpers. `g(t, p)` is the source element at lane `t`, K step `p`; lanes
+# `>= valid` are padding and stay literal `+0.0`.
+_ref_emit!(o, ::RealFormat, vr, p, t, z) = (o[vr * p + t + 1] = z)
+function _ref_emit!(o, ::PlanarFormat, vr, p, t, z)
+    o[2vr * p + t + 1] = real(z)
+    return o[2vr * p + vr + t + 1] = imag(z)
+end
+function _ref_emit!(o, ::InterleavedFormat, vr, p, t, z)
+    o[2vr * p + 2t + 1] = real(z)
+    return o[2vr * p + 2t + 2] = imag(z)
+end
+function _ref_emit!(o, ::OneEFormat, vr, p, t, z)   # [[re, -im], [im, re]]
+    b = 4vr * p
+    o[b + 2t + 1], o[b + 2t + 2] = real(z), imag(z)
+    return o[b + 2vr + 2t + 1], o[b + 2vr + 2t + 2] = -imag(z), real(z)
+end
+_ref_rpe(::RealFormat) = 1
+_ref_rpe(::Union{PlanarFormat, InterleavedFormat}) = 2
+_ref_rpe(::OneEFormat) = 4
+function ref_pack(fmt, ::Type{T}, vr, kc, valid, g, f) where {T}
+    out = zeros(real(T), _ref_rpe(fmt) * vr * kc)
+    for p in 0:(kc - 1), t in 0:(valid - 1)
+        _ref_emit!(out, fmt, vr, p, t, convert(T, f(g(t, p))))
     end
-    return M
+    return out
 end
 
-_axis(base::Int, stride::Int, count::Int) = AffineAxis(base, stride, count)
-_axis(offs::Vector{Int}) = ScatterAxis(offs, length(offs))
+ref_offs(ax::AffineAxis) = [ax.base + t * ax.stride for t in 0:(ax.count - 1)]
+ref_offs(ax::ScatterAxis) = collect(ax.offsets[1:ax.count])
+ref_offs(ax::PtrScatterAxis) = [unsafe_load(ax.offsets, t + 1) for t in 0:(ax.count - 1)]
+resized(ax::AffineAxis, n) = AffineAxis(ax.base, ax.stride, n)
+resized(ax::ScatterAxis, n) = ScatterAxis(ax.offsets, n)
+resized(ax::PtrScatterAxis, n) = PtrScatterAxis(ax.offsets, n)
 
-@testset "pack_a!: identity transform against direct indexing, several stride kinds" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-
-    # Distinguishable deterministic values: storage[q] = q (1-based).
-    storage = collect(1.0:1000.0)
-
-    cases = [
-        ("unit stride, full m", 10, AffineAxis(0, 1, 4), AffineAxis(0, 4, 5)),   # m=4=MR, kc=5
-        ("nonunit stride", 3, AffineAxis(2, 7, 4), AffineAxis(1, 11, 3)),
-        ("negative stride", 500, AffineAxis(0, -1, 4), AffineAxis(0, 2, 4)),
-        ("zero stride (broadcast row)", 0, AffineAxis(20, 0, 4), AffineAxis(0, 1, 6)),
-        ("partial m (m=2 < MR)", 0, AffineAxis(0, 3, 2), AffineAxis(0, 5, 4)),
-        ("empty m (m=0)", 0, AffineAxis(0, 3, 0), AffineAxis(0, 5, 4)),
-        ("scattered rows", 10, ScatterAxis([5, -3, 100, 7], 4), AffineAxis(0, 1, 3)),
-        ("scattered cols (K)", 60, AffineAxis(0, 1, 3), ScatterAxis([2, 400, -50], 3)),
-        ("scattered rows and cols", 10, ScatterAxis([1, 2, 3], 3), ScatterAxis([10, -10], 2)),
-        ("empty kc", 0, AffineAxis(0, 1, 4), AffineAxis(0, 1, 0)),
-    ]
-
-    for (name, base, rows, cols) in cases
-        m = axis_length(rows)
-        kc = axis_length(cols)
-        m <= MR || continue
-        source = SourceTile(storage, base, rows, cols)
-        packed = fill(-999.0, packed_a_length(kernel, kc) + 8) # +8 suffix canary region
-        suffix_before = copy(packed[(packed_a_length(kernel, kc) + 1):end])
-
-        pack_a!(packed, source, kernel, identity)
-
-        for p in 0:(kc - 1), i in 0:(MR - 1)
-            off = packed_a_offset(kernel, i, p)
-            if i < m
-                rowoff = rows isa AffineAxis ? rows.base + i * rows.stride : rows.offsets[i + 1]
-                coloff = cols isa AffineAxis ? cols.base + p * cols.stride : cols.offsets[p + 1]
-                expected = storage[base + rowoff + coloff + 1]
-                @test packed[off + 1] == expected
-            else
-                @test packed[off + 1] == 0.0
-            end
-        end
-        @test packed[(packed_a_length(kernel, kc) + 1):end] == suffix_before
-    end
+# An A (`lane` = rows) or B (`lane` = cols) source over `storage`, and its
+# direct-indexing reader.
+function pack_fixture(side, storage, base, lane, step)
+    lo, so = ref_offs(lane), ref_offs(step)
+    src = side === :a ? SourceTile(storage, base, lane, step) : SourceTile(storage, base, step, lane)
+    return src, (t, p) -> storage[base + lo[t + 1] + so[p + 1] + 1]
 end
 
-@testset "pack_b!: identity transform against direct indexing, several stride kinds" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    storage = collect(1.0:1000.0)
-
-    cases = [
-        ("unit stride, full n", 10, AffineAxis(0, 4, 5), AffineAxis(0, 1, 3)),   # kc=5, n=3=NR
-        ("nonunit stride", 3, AffineAxis(1, 11, 4), AffineAxis(2, 7, 3)),
-        ("negative stride", 500, AffineAxis(0, 2, 4), AffineAxis(0, -1, 3)),
-        ("zero stride (broadcast col)", 0, AffineAxis(0, 1, 4), AffineAxis(20, 0, 2)),
-        ("partial n (n=1 < NR)", 0, AffineAxis(0, 5, 4), AffineAxis(0, 3, 1)),
-        ("empty n (n=0)", 0, AffineAxis(0, 5, 4), AffineAxis(0, 3, 0)),
-        ("scattered cols", 10, AffineAxis(0, 1, 3), ScatterAxis([5, -3, 100], 3)),
-        ("scattered rows (K)", 60, ScatterAxis([2, 400, -50], 3), AffineAxis(0, 1, 3)),
-        ("scattered rows and cols", 10, ScatterAxis([1, 2, 3], 3), ScatterAxis([10, -10], 2)),
-        ("empty kc", 0, AffineAxis(0, 1, 0), AffineAxis(0, 1, 3)),
-    ]
-
-    for (name, base, rows, cols) in cases
-        kc = axis_length(rows)
-        n = axis_length(cols)
-        n <= NR || continue
-        source = SourceTile(storage, base, rows, cols)
-        packed = fill(-999.0, packed_b_length(kernel, kc) + 8)
-        suffix_before = copy(packed[(packed_b_length(kernel, kc) + 1):end])
-
-        pack_b!(packed, source, kernel, identity)
-
-        for p in 0:(kc - 1), j in 0:(NR - 1)
-            off = packed_b_offset(kernel, j, p)
-            if j < n
-                rowoff = rows isa AffineAxis ? rows.base + p * rows.stride : rows.offsets[p + 1]
-                coloff = cols isa AffineAxis ? cols.base + j * cols.stride : cols.offsets[j + 1]
-                expected = storage[base + rowoff + coloff + 1]
-                @test packed[off + 1] == expected
-            else
-                @test packed[off + 1] == 0.0
-            end
-        end
-        @test packed[(packed_b_length(kernel, kc) + 1):end] == suffix_before
+# Packs `src` into a destination of kind `dst` (canaried unless a bare Vector)
+# and returns the packed prefix and whether the canaries survived.
+function pack_into(pack!, dst, R, len, src, kernel, f)
+    buf = fill(R(-777), len + 12)
+    if dst === :vector
+        v = buf[1:len]
+        @test pack!(v, src, kernel, f) === v
+        return v, true
     end
+    GC.@preserve buf begin
+        d = dst === :view ? view(buf, 5:(4 + len)) : packed_panel(buf, 5, len)
+        @test pack!(d, src, kernel, f) === d
+    end
+    return buf[5:(4 + len)], all(==(R(-777)), buf[1:4]) && all(==(R(-777)), buf[(5 + len):end])
 end
 
-# =====================================================================
-# A/B physical orientation, distinguishable deterministic values
-# =====================================================================
+const SCATTER_LANES = [5, 30, 1, 17, 9, 44, 2, 23, 11, 38, 7, 60, 14, 51, 3, 29]
+const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
 
-@testset "pack_a!/pack_b!: physical orientation (A vs B layouts differ)" begin
-    kernel = KernelDescriptor(Val(3), Val(2), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 4
+@testset "pack_a!/pack_b! ($T): every stride kind and tail width vs direct indexing" for
+    T in (Float64, Float32)
 
-    # A: value = 100*i + p (i = row 0..MR-1, p = K step). Distinguishable per
-    # (i,p) so a transposition or offset-formula bug would show up as a
-    # mismatch rather than an accidental match.
-    storageA = zeros(Float64, MR * kc)
-    for i in 0:(MR - 1), p in 0:(kc - 1)
-        storageA[i * kc + p + 1] = 100.0 * i + p # row-major (i,p) source layout
-    end
-    rowsA = AffineAxis(0, kc, MR) # row i at base i*kc
-    colsA = AffineAxis(0, 1, kc)  # col p at base p
-    sourceA = SourceTile(storageA, 0, rowsA, colsA)
-    packedA = zeros(Float64, packed_a_length(kernel, kc))
-    pack_a!(packedA, sourceA, kernel, identity)
-    for i in 0:(MR - 1), p in 0:(kc - 1)
-        @test packedA[packed_a_offset(kernel, i, p) + 1] == 100.0 * i + p
-    end
-    # Physical layout check: packed_a_offset(i,p) = i + MR*p, so consecutive p
-    # (fixed i) are MR apart, not 1 apart -- confirm directly.
-    @test packed_a_offset(kernel, 1, 0) + MR == packed_a_offset(kernel, 1, 1)
-    @test packed_a_offset(kernel, 0, 1) - packed_a_offset(kernel, 1, 1) == -1
-
-    # B: value = 100*p + j (p = K step, j = column 0..NR-1).
-    storageB = zeros(Float64, kc * NR)
-    for p in 0:(kc - 1), j in 0:(NR - 1)
-        storageB[p * NR + j + 1] = 100.0 * p + j
-    end
-    rowsB = AffineAxis(0, NR, kc) # row p at base p*NR
-    colsB = AffineAxis(0, 1, NR)  # col j at base j
-    sourceB = SourceTile(storageB, 0, rowsB, colsB)
-    packedB = zeros(Float64, packed_b_length(kernel, kc))
-    pack_b!(packedB, sourceB, kernel, identity)
-    for p in 0:(kc - 1), j in 0:(NR - 1)
-        @test packedB[packed_b_offset(kernel, j, p) + 1] == 100.0 * p + j
-    end
-    @test packed_b_offset(kernel, 1, 0) + NR == packed_b_offset(kernel, 1, 1)
-end
-
-# =====================================================================
-# Padding, uninitialized-buffer detection, and canaries
-# =====================================================================
-
-@testset "pack_a!/pack_b!: padding writes literal zero, bypassing transform" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 3
-    storage = fill(1.0, 100) # nonzero everywhere, so a padding bug would show a nonzero read
-
-    transform_nonzero_at_zero = x -> x + 1000.0 # transform(0) = 1000 != 0
-
-    # A: partial m so some rows are padding.
-    m = 2
-    rows = AffineAxis(0, 1, m)
-    cols = AffineAxis(0, 1, kc)
-    source = SourceTile(storage, 0, rows, cols)
-    packed = fill(-777.0, packed_a_length(kernel, kc)) # nonzero prefill to detect uninitialized padding
-    pack_a!(packed, source, kernel, transform_nonzero_at_zero)
-    for p in 0:(kc - 1), i in 0:(MR - 1)
-        off = packed_a_offset(kernel, i, p)
-        if i < m
-            @test packed[off + 1] == 1.0 + 1000.0
-        else
-            @test packed[off + 1] == 0.0 # literal zero, not transform(0) == 1000
-        end
-    end
-
-    # B: partial n so some columns are padding.
-    n = 1
-    rowsB = AffineAxis(0, 1, kc)
-    colsB = AffineAxis(0, 1, n)
-    sourceB = SourceTile(storage, 0, rowsB, colsB)
-    packedB = fill(-777.0, packed_b_length(kernel, kc))
-    pack_b!(packedB, sourceB, kernel, transform_nonzero_at_zero)
-    for p in 0:(kc - 1), j in 0:(NR - 1)
-        off = packed_b_offset(kernel, j, p)
-        if j < n
-            @test packedB[off + 1] == 1.0 + 1000.0
-        else
-            @test packedB[off + 1] == 0.0
-        end
-    end
-end
-
-@testset "pack_a!/pack_b!: transform never called on padding lanes (call-counting proof)" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 3
-    storage = fill(2.0, 50)
-
+    MR, NR, kc = 8, 6, 5
+    kernel = KernelDescriptor(Val(MR), Val(NR), T)
+    storage = T.(collect(1.0:2000.0))
     calls = Ref(0)
-    counting_transform = x -> (calls[] += 1; x)
-
-    m = 2
-    source = SourceTile(storage, 0, AffineAxis(0, 1, m), AffineAxis(0, 1, kc))
-    packed = zeros(Float64, packed_a_length(kernel, kc))
-    pack_a!(packed, source, kernel, counting_transform)
-    @test calls[] == m * kc # exactly the valid lanes, never the MR-m padding rows
-
-    calls[] = 0
-    n = 1
-    sourceB = SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, 1, n))
-    packedB = zeros(Float64, packed_b_length(kernel, kc))
-    pack_b!(packedB, sourceB, kernel, counting_transform)
-    @test calls[] == n * kc
+    counting = x -> (calls[] += 1; 3x + 1000)   # nonzero at zero: padding must bypass it
+    lanes = Any[
+        AffineAxis(0, 1, 8), AffineAxis(3, 7, 8), AffineAxis(40, -1, 8), AffineAxis(20, 0, 8),
+        ScatterAxis(SCATTER_LANES, 8),
+    ]
+    steps = Any[AffineAxis(0, 64, kc), AffineAxis(700, -97, kc), ScatterAxis(SCATTER_STEPS, kc)]
+    for (side, pack!, PD) in ((:a, pack_a!, MR), (:b, pack_b!, NR)),
+            lane in lanes, step in steps, valid in (PD, 1, 0), dst in (:vector, :view)
+        src, g = pack_fixture(side, storage, 11, resized(lane, valid), step)
+        calls[] = 0
+        got, canaries = pack_into(pack!, dst, T, PD * kc, src, kernel, counting)
+        @test got == ref_pack(RealFormat(), T, PD, kc, valid, g, x -> 3x + 1000)
+        @test calls[] == valid * kc
+        @test canaries
+    end
+    # Every tail width, at the minimal and a longer K depth.
+    negate = x -> -x
+    for (side, pack!, PD) in ((:a, pack_a!, MR), (:b, pack_b!, NR)), valid in 0:PD, kc1 in (1, 5)
+        src, g = pack_fixture(side, storage, 0, AffineAxis(2, 3, valid), AffineAxis(0, 40, kc1))
+        got, _ = pack_into(pack!, :vector, T, PD * kc1, src, kernel, negate)
+        @test got == ref_pack(RealFormat(), T, PD, kc1, valid, g, negate)
+    end
 end
 
-@testset "pack_a!/pack_b!: kc=0 reads nothing, writes nothing" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
+@testset "pack_a! contiguous fast path: fires exactly when eligible ($T, MR=$MR)" for
+    T in (Float64, Float32), MR in (4, 16)
 
-    read_flag = Ref(false)
+    kernel = KernelDescriptor(Val(MR), Val(3), T)
+    vals = T.(collect(1.0:2000.0))
+    storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals)) : (vals,)
+    koffs = [7, 900, 300, 1500]
+    contig = collect(0:(MR - 1))
+    GC.@preserve koffs contig for storage in storages
+        steps = Any[AffineAxis(0, MR, 5), AffineAxis(1800, -MR, 6), PtrScatterAxis(pointer(koffs), 4)]
+        lanes = Any[
+            (AffineAxis(0, 1, MR), true), (AffineAxis(5, 1, MR), true),
+            (AffineAxis(0, 2, MR), false), (AffineAxis(MR + 3, -1, MR), false),
+            (AffineAxis(0, 1, MR - 1), false), (PtrScatterAxis(pointer(contig), MR), false),
+        ]
+        for (lane, eligible) in lanes, step in steps, f in (identity, conj, x -> -x)
+            src, g = pack_fixture(:a, storage, 11, lane, step)
+            kc = axis_length(step)
+            pp = packed_panel(zeros(T, 1), 1, 1)
+            @test _pack_a_contiguous_eligible(pp, src, f, nrows(src), Val(MR), T) ==
+                (eligible && (f === identity || f === conj))
+            @test !_pack_a_contiguous_eligible(zeros(T, 1), src, f, nrows(src), Val(MR), T)
+            got, canaries = pack_into(pack_a!, :panel, T, MR * kc, src, kernel, f)
+            @test got == ref_pack(RealFormat(), T, MR, kc, nrows(src), g, f)
+            @test canaries
+        end
+    end
+    @test _copies_unchanged(conj, T)
+    @test !_copies_unchanged(conj, complex(T))   # conj is not the identity on complex
+end
+
+@testset "pack_a!/pack_b!: kc == 0 reads and writes nothing" begin
+    kernel = KernelDescriptor(Val(4), Val(3), Float64)
     storage = fill(3.0, 10)
-    # A tile whose storage access, if ever performed, would set read_flag via
-    # a custom getindex wrapper is overkill; instead rely on kc==0 meaning
-    # the packed buffer's declared physical length is 0, so any nonzero
-    # write would be detectable via a nonempty canary-filled buffer, and any
-    # read would require axis_length(cols) > 0 (contradiction with kc=0).
-    canary = fill(-42.0, 8)
-    packed = copy(canary)
-    source = SourceTile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 0)) # kc=0
-    result = pack_a!(packed, source, kernel, x -> (read_flag[] = true; x))
-    @test result === packed
-    @test packed == canary # untouched
-    @test read_flag[] == false
-
-    packedB = copy(canary)
-    sourceB = SourceTile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 1, 3)) # kc=0
-    resultB = pack_b!(packedB, sourceB, kernel, x -> (read_flag[] = true; x))
-    @test resultB === packedB
-    @test packedB == canary
-    @test read_flag[] == false
+    read = Ref(false)
+    spy = x -> (read[] = true; x)
+    packed = fill(-42.0, 8)
+    @test pack_a!(packed, SourceTile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 0)), kernel, spy) === packed
+    @test pack_b!(packed, SourceTile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 1, 3)), kernel, spy) === packed
+    @test packed == fill(-42.0, 8)
+    @test !read[]
 end
-
-@testset "pack_a!/pack_b!: buffer reuse detects uninitialized padding (nonzero prefill)" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 2
-    storage = fill(5.0, 20)
-
-    m = 1
-    source = SourceTile(storage, 0, AffineAxis(0, 1, m), AffineAxis(0, 1, kc))
-    packed = fill(123456.0, packed_a_length(kernel, kc)) # previously "used" nonzero buffer
-    pack_a!(packed, source, kernel, identity)
-    for p in 0:(kc - 1), i in 0:(MR - 1)
-        off = packed_a_offset(kernel, i, p)
-        @test packed[off + 1] == (i < m ? 5.0 : 0.0)
-    end
-
-    n = 1
-    sourceB = SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, 1, n))
-    packedB = fill(654321.0, packed_b_length(kernel, kc))
-    pack_b!(packedB, sourceB, kernel, identity)
-    for p in 0:(kc - 1), j in 0:(NR - 1)
-        off = packed_b_offset(kernel, j, p)
-        @test packedB[off + 1] == (j < n ? 5.0 : 0.0)
-    end
-end
-
-# =====================================================================
-# Invalid metadata: rejected before any buffer mutation
-# =====================================================================
 
 @testset "pack_a!/pack_b!: invalid metadata rejected before mutation" begin
     kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    storage = fill(9.0, 20)
-    canary = fill(-1.0, 100)
-
-    # A: m > MR
-    source_bad_m = SourceTile(storage, 0, AffineAxis(0, 1, 5), AffineAxis(0, 1, 3)) # m=5 > MR=4
-    packed = copy(canary)
-    @test_throws ArgumentError pack_a!(packed, source_bad_m, kernel, identity)
-    @test packed == canary
-
-    # A: packed buffer too small
-    source_ok = SourceTile(storage, 0, AffineAxis(0, 1, 4), AffineAxis(0, 1, 3)) # kc=3 needs 12
-    packed_small = fill(-1.0, 11)
-    @test_throws DimensionMismatch pack_a!(packed_small, source_ok, kernel, identity)
-    @test packed_small == fill(-1.0, 11)
-
-    # A: eltype mismatch
     kernel32 = KernelDescriptor(Val(4), Val(3), Float32)
-    packed64 = copy(canary)
-    @test_throws ArgumentError pack_a!(packed64, source_ok, kernel32, identity)
-    @test packed64 == canary
-
-    # B: n > NR
-    source_bad_n = SourceTile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 4)) # n=4 > NR=3
-    packedB = copy(canary)
-    @test_throws ArgumentError pack_b!(packedB, source_bad_n, kernel, identity)
-    @test packedB == canary
-
-    # B: packed buffer too small
-    source_okB = SourceTile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 3)) # kc=3 needs 9
-    packedB_small = fill(-1.0, 8)
-    @test_throws DimensionMismatch pack_b!(packedB_small, source_okB, kernel, identity)
-    @test packedB_small == fill(-1.0, 8)
-
-    # B: eltype mismatch
-    packedB64 = copy(canary)
-    @test_throws ArgumentError pack_b!(packedB64, source_okB, kernel32, identity)
-    @test packedB64 == canary
-end
-
-# =====================================================================
-# Nonzero interval starts: pack directly from a nonzero tile base
-# =====================================================================
-
-@testset "pack_a!/pack_b!: nonzero interval start (nonzero tile base)" begin
-    kernel = KernelDescriptor(Val(3), Val(2), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    storage = collect(1.0:200.0)
-    kc = 4
-
-    base = 37
-    rows = AffineAxis(0, 5, MR)
-    cols = AffineAxis(0, 1, kc)
-    source = SourceTile(storage, base, rows, cols)
-    packed = zeros(Float64, packed_a_length(kernel, kc))
-    pack_a!(packed, source, kernel, identity)
-    for p in 0:(kc - 1), i in 0:(MR - 1)
-        expected = storage[base + i * 5 + p + 1]
-        @test packed[packed_a_offset(kernel, i, p) + 1] == expected
+    storage = fill(9.0, 20)
+    tile(m, n, base = 0) = SourceTile(storage, base, AffineAxis(0, 1, m), AffineAxis(0, 1, n))
+    for (pack!, bad, ok, short) in ((pack_a!, tile(5, 3), tile(4, 3), 11), (pack_b!, tile(3, 4), tile(3, 3), 8))
+        canary = fill(-1.0, 100)
+        @test_throws ArgumentError pack!(canary, bad, kernel, identity)     # m > MR / n > NR
+        @test_throws ArgumentError pack!(canary, ok, kernel32, identity)    # eltype mismatch
+        @test_throws DimensionMismatch pack!(fill(-1.0, short), ok, kernel, identity)
+        @test_throws BoundsError pack!(canary, tile(nrows(ok), ncols(ok), 18), kernel, identity)
+        @test canary == fill(-1.0, 100)
     end
 end
 
-# =====================================================================
-# Non-identity transform (a real elementwise transform, not just identity)
-# =====================================================================
-
-@testset "pack_a!/pack_b!: nontrivial elementwise transform" begin
-    kernel = KernelDescriptor(Val(3), Val(2), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 3
-    storage = collect(1.0:100.0)
-
-    negate = x -> -x
-
-    source = SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, 1, kc))
-    packed = zeros(Float64, packed_a_length(kernel, kc))
-    pack_a!(packed, source, kernel, negate)
-    for p in 0:(kc - 1), i in 0:(MR - 1)
-        @test packed[packed_a_offset(kernel, i, p) + 1] == -storage[i + p + 1]
-    end
-
-    sourceB = SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, 1, NR))
-    packedB = zeros(Float64, packed_b_length(kernel, kc))
-    pack_b!(packedB, sourceB, kernel, negate)
-    for p in 0:(kc - 1), j in 0:(NR - 1)
-        @test packedB[packed_b_offset(kernel, j, p) + 1] == -storage[p + j + 1]
-    end
-end
-
-# =====================================================================
-# Float32 support (the other required scalar type)
-# =====================================================================
-
-@testset "pack_a!/pack_b!: Float32" begin
-    kernel = KernelDescriptor(Val(4), Val(2), Float32)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 3
-    storage = Float32.(collect(1.0:100.0))
-
-    source = SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, 1, kc))
-    packed = zeros(Float32, packed_a_length(kernel, kc))
-    pack_a!(packed, source, kernel, identity)
-    @test eltype(packed) === Float32
-    for p in 0:(kc - 1), i in 0:(MR - 1)
-        @test packed[packed_a_offset(kernel, i, p) + 1] == storage[i + p + 1]
-    end
-end
-
-# =====================================================================
-# Steady-state allocation: pack_a!/pack_b! called directly against a bare
-# KernelDescriptor must allocate zero bytes once warmed, for both affine and
-# scattered sources, kc=0, and a nontrivial (non-identity) transform. This
-# pins that every forwarded callable (`transform`, and `_pack_panel!`'s
-# `transform`/`load`/`packed_offset`) has its own free type parameter
-# (`transform::F where {F}`): a `Function`-typed argument that a method only
-# *forwards* (never calls directly) is otherwise compiled against a widened
-# type, forcing a dynamic call and a heap-allocated `load` closure.
-@testset "pack_a!/pack_b!: zero steady-state allocation (direct KernelDescriptor)" begin
-    nontrivial(x) = 2.0 * x + 1.0
-
-    function run()
-        kernel = KernelDescriptor(Val(8), Val(6), Float64)
-        packed_a = zeros(8 * 4)
-        packed_b = zeros(6 * 4)
-
-        src_affine = SourceTile(rand(1000), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 4))
-        src_b_affine = SourceTile(rand(1000), 0, AffineAxis(0, 1, 4), AffineAxis(0, 4, 6))
-
-        offs_rows = collect(0:7)
-        offs_cols = [0, 8, 16, 24]
-        src_scatter = SourceTile(rand(1000), 0, ScatterAxis(offs_rows, 8), ScatterAxis(offs_cols, 4))
-
-        offs_rows_b = collect(0:3)
-        offs_cols_b = [0, 4, 8, 12, 16, 20]
-        src_b_scatter = SourceTile(rand(1000), 0, ScatterAxis(offs_rows_b, 4), ScatterAxis(offs_cols_b, 6))
-
-        src_kc0 = SourceTile(rand(10), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 0))
-        src_b_kc0 = SourceTile(rand(10), 0, AffineAxis(0, 1, 0), AffineAxis(0, 0, 6))
-
-        bytes = Int[]
-
-        pack_a!(packed_a, src_affine, kernel, identity)
-        push!(bytes, @allocated pack_a!(packed_a, src_affine, kernel, identity))
-
-        pack_a!(packed_a, src_affine, kernel, nontrivial)
-        push!(bytes, @allocated pack_a!(packed_a, src_affine, kernel, nontrivial))
-
-        pack_b!(packed_b, src_b_affine, kernel, identity)
-        push!(bytes, @allocated pack_b!(packed_b, src_b_affine, kernel, identity))
-
-        pack_b!(packed_b, src_b_affine, kernel, nontrivial)
-        push!(bytes, @allocated pack_b!(packed_b, src_b_affine, kernel, nontrivial))
-
-        pack_a!(packed_a, src_scatter, kernel, identity)
-        push!(bytes, @allocated pack_a!(packed_a, src_scatter, kernel, identity))
-
-        pack_a!(packed_a, src_scatter, kernel, nontrivial)
-        push!(bytes, @allocated pack_a!(packed_a, src_scatter, kernel, nontrivial))
-
-        pack_b!(packed_b, src_b_scatter, kernel, identity)
-        push!(bytes, @allocated pack_b!(packed_b, src_b_scatter, kernel, identity))
-
-        pack_b!(packed_b, src_b_scatter, kernel, nontrivial)
-        push!(bytes, @allocated pack_b!(packed_b, src_b_scatter, kernel, nontrivial))
-
-        pack_a!(packed_a, src_kc0, kernel, identity)
-        push!(bytes, @allocated pack_a!(packed_a, src_kc0, kernel, identity))
-
-        pack_b!(packed_b, src_b_kc0, kernel, identity)
-        push!(bytes, @allocated pack_b!(packed_b, src_b_kc0, kernel, identity))
-
-        return bytes
-    end
-
-    @test all(iszero, run())
-end
-
-# The same missing-`where`-clause widening can occur one layer up, in
-# ScalarKernel's and SIMDKernel's own pack_a!/pack_b! forwarding methods, so
-# both forwarding paths are pinned too, not just the direct-KernelDescriptor
-# path above.
-@testset "pack_a!/pack_b!: zero steady-state allocation (ScalarKernel/SIMDKernel forwarding)" begin
-    function run_forwarding(kernel)
-        packed_a = zeros(scalartype(kernel), mr(kernel) * 4)
-        packed_b = zeros(scalartype(kernel), nr(kernel) * 4)
-        src_a = SourceTile(rand(scalartype(kernel), 1000), 0, AffineAxis(0, 1, mr(kernel)), AffineAxis(0, mr(kernel), 4))
-        src_b = SourceTile(rand(scalartype(kernel), 1000), 0, AffineAxis(0, 1, 4), AffineAxis(0, 4, nr(kernel)))
-
-        pack_a!(packed_a, src_a, kernel, identity)
-        a1 = @allocated pack_a!(packed_a, src_a, kernel, identity)
-        pack_b!(packed_b, src_b, kernel, identity)
-        b1 = @allocated pack_b!(packed_b, src_b, kernel, identity)
-        return (a1, b1)
-    end
-
-    @test run_forwarding(ScalarKernel(Val(8), Val(6), Float64)) == (0, 0)
-    @test run_forwarding(SIMDKernel(Val(8), Val(6), Float64)) == (0, 0)
-end
-
-# =====================================================================
-# pack_a!/pack_b! into an AbstractVector: packing into a panel-sliver view of
-# a larger buffer.
-# =====================================================================
-
-@testset "pack_a!/pack_b!: packing into a SubArray view matches a fresh Vector" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 5
-    storage = collect(1.0:1000.0)
-
-    sourceA = SourceTile(storage, 10, AffineAxis(0, 1, MR), AffineAxis(0, 4, kc))
-    neededA = packed_a_length(kernel, kc)
-    freshA = zeros(Float64, neededA)
-    pack_a!(freshA, sourceA, kernel, identity)
-
-    bigA = zeros(Float64, neededA + 20)
-    r = 6:(6 + neededA - 1)
-    viewA = view(bigA, r)
-    @test viewA isa SubArray
-    pack_a!(viewA, sourceA, kernel, identity)
-    @test viewA == freshA
-    @test bigA[r] == freshA
-
-    sourceB = SourceTile(storage, 20, AffineAxis(0, 1, kc), AffineAxis(0, kc, NR))
-    neededB = packed_b_length(kernel, kc)
-    freshB = zeros(Float64, neededB)
-    pack_b!(freshB, sourceB, kernel, identity)
-
-    bigB = zeros(Float64, neededB + 20)
-    rB = 4:(4 + neededB - 1)
-    viewB = view(bigB, rB)
-    @test viewB isa SubArray
-    pack_b!(viewB, sourceB, kernel, identity)
-    @test viewB == freshB
-    @test bigB[rB] == freshB
-end
-
-@testset "pack_a!/pack_b!: canary bytes outside a middle panel view untouched" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    kc = 5
-    storage = collect(1.0:1000.0)
-    sentinel = -123456.0
-
-    sourceA = SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, 4, kc))
-    neededA = packed_a_length(kernel, kc)
-
-    bigA = fill(sentinel, neededA + 30)
-    lo, hi = 9, 9 + neededA - 1
-    r = lo:hi
-    pack_a!(view(bigA, r), sourceA, kernel, identity)
-    @test all(==(sentinel), bigA[1:(lo - 1)])
-    @test all(==(sentinel), bigA[(hi + 1):end])
-    @test !any(==(sentinel), bigA[r]) # packed region actually got written
-
-    sourceB = SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, kc, NR))
-    neededB = packed_b_length(kernel, kc)
-    bigB = fill(sentinel, neededB + 30)
-    loB, hiB = 12, 12 + neededB - 1
-    rB = loB:hiB
-    pack_b!(view(bigB, rB), sourceB, kernel, identity)
-    @test all(==(sentinel), bigB[1:(loB - 1)])
-    @test all(==(sentinel), bigB[(hiB + 1):end])
-    @test !any(==(sentinel), bigB[rB])
-end
-
-@testset "pack_a!/pack_b!: zero steady-state allocation packing into a SubArray view" begin
-    function run_view(kernel_ctor)
-        kernel = kernel_ctor(Val(8), Val(6), Float64)
-        bigA = zeros(mr(kernel) * 4 + 40)
-        bigB = zeros(nr(kernel) * 4 + 40)
-        viewA = view(bigA, 5:(5 + mr(kernel) * 4 - 1))
-        viewB = view(bigB, 3:(3 + nr(kernel) * 4 - 1))
-
-        src_a_affine = SourceTile(rand(1000), 0, AffineAxis(0, 1, mr(kernel)), AffineAxis(0, mr(kernel), 4))
-        src_b_affine = SourceTile(rand(1000), 0, AffineAxis(0, 1, 4), AffineAxis(0, 4, nr(kernel)))
-
-        offs_rows = collect(0:(mr(kernel) - 1))
-        offs_cols = [0, 8, 16, 24]
-        src_a_scatter = SourceTile(rand(1000), 0, ScatterAxis(offs_rows, mr(kernel)), ScatterAxis(offs_cols, 4))
-
-        offs_rows_b = collect(0:3)
-        offs_cols_b = collect(0:(nr(kernel) - 1)) .* 4
-        src_b_scatter = SourceTile(rand(1000), 0, ScatterAxis(offs_rows_b, 4), ScatterAxis(offs_cols_b, nr(kernel)))
-
-        pack_a!(viewA, src_a_affine, kernel, identity)
-        a_affine = @allocated pack_a!(viewA, src_a_affine, kernel, identity)
-        pack_b!(viewB, src_b_affine, kernel, identity)
-        b_affine = @allocated pack_b!(viewB, src_b_affine, kernel, identity)
-
-        pack_a!(viewA, src_a_scatter, kernel, identity)
-        a_scatter = @allocated pack_a!(viewA, src_a_scatter, kernel, identity)
-        pack_b!(viewB, src_b_scatter, kernel, identity)
-        b_scatter = @allocated pack_b!(viewB, src_b_scatter, kernel, identity)
-
-        return (a_affine, b_affine, a_scatter, b_scatter)
-    end
-
-    # Direct KernelDescriptor.
-    @test run_view(KernelDescriptor) == (0, 0, 0, 0)
-
-    # Via the ScalarKernel/SIMDKernel forwarding methods.
-    @test run_view(ScalarKernel) == (0, 0, 0, 0)
-    @test run_view(SIMDKernel) == (0, 0, 0, 0)
-end
-
-# =====================================================================
-# `_pack_panel!` (full-sliver branch / valid+zero split for tails) and the
-# `pack_a!` contiguous vector fast path (PackedPanel destination, dense
-# storage, unit-stride rows filling the whole tile, identity-like transform).
-# Every expected value below comes from direct storage indexing, never from
-# tile_load or from the other packing path.
-# =====================================================================
-
-using QuasiStrided: PackedPanel, packed_panel, PtrScatterAxis, _copies_unchanged,
-    _pack_a_contiguous_eligible, _pack_a_contiguous!
-
-# expected[i + MR*p + 1] for an A panel; padding rows are literal zero.
-function _oracle_packed_a(storage, base::Int, rowoffs::Vector{Int}, coloffs::Vector{Int}, MR::Int, transform, ::Type{T}) where {T}
-    kc, m = length(coloffs), length(rowoffs)
-    out = zeros(T, MR * kc)
-    for p in 0:(kc - 1), i in 0:(MR - 1)
-        i < m || continue
-        out[i + MR * p + 1] = convert(T, transform(storage[base + rowoffs[i + 1] + coloffs[p + 1] + 1]))
-    end
-    return out
-end
-# expected[j + NR*p + 1] for a B panel (source rows = K, cols = N).
-function _oracle_packed_b(storage, base::Int, rowoffs::Vector{Int}, coloffs::Vector{Int}, NR::Int, transform, ::Type{T}) where {T}
-    kc, n = length(rowoffs), length(coloffs)
-    out = zeros(T, NR * kc)
-    for p in 0:(kc - 1), j in 0:(NR - 1)
-        j < n || continue
-        out[j + NR * p + 1] = convert(T, transform(storage[base + rowoffs[p + 1] + coloffs[j + 1] + 1]))
-    end
-    return out
-end
-_offs(ax::AffineAxis) = [ax.base + t * ax.stride for t in 0:(ax.count - 1)]
-_offs(ax::ScatterAxis) = collect(ax.offsets[1:ax.count])
-_offs(ax::PtrScatterAxis) = [unsafe_load(ax.offsets, t + 1) for t in 0:(ax.count - 1)]
-_dense_storages(v::Vector{T}) where {T} = @static isdefined(Base, :Memory) ?
-    (v, (m = Memory{T}(undef, length(v)); copyto!(m, v); m)) : (v,)
-
-@testset "pack_a! fast-path gate predicates" begin
-    @test _copies_unchanged(identity, Float64)
-    @test _copies_unchanged(identity, ComplexF64)
-    @test _copies_unchanged(conj, Float64)
-    @test _copies_unchanged(conj, Float32)
-    @test !_copies_unchanged(conj, ComplexF64)   # conj is NOT the identity on complex
-    @test !_copies_unchanged(x -> -x, Float64)
-end
-
-@testset "pack_a!: PackedPanel destination vs direct indexing, eligible and ineligible gates" begin
-    for T in (Float64, Float32), MR in (4, 16)
-        kernel = KernelDescriptor(Val(MR), Val(3), T)
-        vals = T.(collect(1.0:2000.0))
-        for storage in _dense_storages(vals)
-            coloffs_scatter = [7, 900, 300, 1500]
-            colcases = Any[
-                AffineAxis(0, MR, 5), AffineAxis(0, 1, 3), AffineAxis(1800, -MR, 6),   # +, unit, negative stride
-                AffineAxis(40, 0, 4),                                                    # zero stride (broadcast K)
-                ScatterAxis(coloffs_scatter, 4),
-                PtrScatterAxis(pointer(coloffs_scatter), 4),
-            ]
-            rowoffs_contig = collect(0:(MR - 1))
-            rowcases = Any[
-                (AffineAxis(0, 1, MR), true), (AffineAxis(5, 1, MR), true),              # eligible: unit stride, full
-                (AffineAxis(0, 2, MR), false), (AffineAxis(MR + 3, -1, MR), false),      # stride != 1
-                (AffineAxis(0, 1, MR - 1), false), (AffineAxis(0, 1, 0), false),         # tail / empty
-                (ScatterAxis(rowoffs_contig, MR), false),                                 # contiguous but scattered type
-                (PtrScatterAxis(pointer(rowoffs_contig), MR), false),                     # the driver's scattered row axis
-            ]
-            transforms = Any[identity, conj, x -> -x]
-            for (rows, row_eligible) in rowcases, cols in colcases, transform in transforms, base in (0, 11)
-                kc = axis_length(cols)
-                src = SourceTile(storage, base, rows, cols)
-                expected = _oracle_packed_a(storage, base, _offs(rows), _offs(cols), MR, transform, T)
-                canary = T(-999)
-                buf = fill(canary, MR * kc + 8)
-                # The fast path must fire exactly when the row axis is eligible
-                # AND the transform is a straight copy on T -- and never for a
-                # Vector destination.
-                GC.@preserve buf coloffs_scatter rowoffs_contig begin
-                    panel = packed_panel(buf, 1, MR * kc)
-                    @test _pack_a_contiguous_eligible(panel, src, transform, nrows(src), Val(MR), T) ==
-                        (row_eligible && (transform === identity || transform === conj))
-                    @test !_pack_a_contiguous_eligible(buf, src, transform, nrows(src), Val(MR), T)
-                    pack_a!(panel, src, kernel, transform)
-                end
-                @test buf[1:(MR * kc)] == expected
-                @test all(==(canary), buf[(MR * kc + 1):end])
-                # The Vector destination (generic path) must agree with the panel.
-                vecdst = fill(canary, MR * kc)
-                GC.@preserve coloffs_scatter pack_a!(vecdst, src, kernel, transform)
-                @test vecdst == expected
-            end
-        end
-    end
-end
-
-@testset "_pack_a_contiguous! directly against the direct-indexing oracle" begin
-    # The fast path on its own (no gate in between): every column-axis kind,
-    # nonzero row base folded into `rowbase`, both dtypes, into a canaried
-    # panel that is a middle sliver of a larger buffer.
-    for T in (Float64, Float32), MR in (4, 16)
-        vals = T.(collect(1.0:2000.0))
-        koffs = [7, 900, 300, 1500]
-        for storage in _dense_storages(vals), base in (0, 11), rowbase in (0, 5)
-            rows = AffineAxis(rowbase, 1, MR)
-            for cols in Any[
-                    AffineAxis(0, MR, 5), AffineAxis(1800, -MR, 6), AffineAxis(40, 0, 4),
-                    ScatterAxis(koffs, 4), PtrScatterAxis(pointer(koffs), 4),
-                ]
-                kc = axis_length(cols)
-                expected = _oracle_packed_a(storage, base, _offs(rows), _offs(cols), MR, identity, T)
-                canary = T(-999)
-                buf = fill(canary, MR * kc + 16)
-                GC.@preserve buf koffs begin
-                    panel = packed_panel(buf, 9, MR * kc)
-                    _pack_a_contiguous!(panel, storage, base + rowbase, cols, Val(MR), kc)
-                end
-                @test buf[9:(8 + MR * kc)] == expected
-                @test all(==(canary), buf[1:8]) && all(==(canary), buf[(9 + MR * kc):end])
-            end
-        end
-    end
-end
-
-@testset "pack_a!/pack_b!: every tail width; values, literal-zero padding, transform never on padding" begin
-    kernel = KernelDescriptor(Val(8), Val(6), Float64)
-    MR, NR = mr(kernel), nr(kernel)
-    storage = collect(1.0:500.0)
-    calls = Ref(0)
-    counting = x -> (calls[] += 1; 3.0 * x)
-    for kc in (1, 5), dst in (:vector, :panel)
-        for m in 0:MR
-            src = SourceTile(storage, 20, AffineAxis(2, 3, m), AffineAxis(0, 40, kc))
-            expected = _oracle_packed_a(storage, 20, _offs(src.rows), _offs(src.cols), MR, x -> 3.0 * x, Float64)
-            buf = fill(-777.0, MR * kc + 4)
-            calls[] = 0
-            if dst === :vector
-                pack_a!(view(buf, 1:(MR * kc)), src, kernel, counting)
-            else
-                GC.@preserve buf pack_a!(packed_panel(buf, 1, MR * kc), src, kernel, counting)
-            end
-            @test buf[1:(MR * kc)] == expected
-            @test calls[] == m * kc
-            @test all(==(-777.0), buf[(MR * kc + 1):end])
-        end
-        for n in 0:NR
-            src = SourceTile(storage, 20, AffineAxis(0, 40, kc), AffineAxis(2, 3, n))
-            expected = _oracle_packed_b(storage, 20, _offs(src.rows), _offs(src.cols), NR, x -> 3.0 * x, Float64)
-            buf = fill(-777.0, NR * kc + 4)
-            calls[] = 0
-            if dst === :vector
-                pack_b!(view(buf, 1:(NR * kc)), src, kernel, counting)
-            else
-                GC.@preserve buf pack_b!(packed_panel(buf, 1, NR * kc), src, kernel, counting)
-            end
-            @test buf[1:(NR * kc)] == expected
-            @test calls[] == n * kc
-            @test all(==(-777.0), buf[(NR * kc + 1):end])
-        end
-    end
-end
-
-@testset "pack_a!/pack_b!: every tail width, Float32 (the fallback loop's other real dtype)" begin
-    kernel = KernelDescriptor(Val(8), Val(6), Float32)
-    MR, NR = mr(kernel), nr(kernel)
-    storage = Float32.(collect(1.0:500.0))
-    calls = Ref(0)
-    counting = x -> (calls[] += 1; Float32(3.0) * x)
-    for kc in (1, 5), dst in (:vector, :panel)
-        for m in 0:MR
-            src = SourceTile(storage, 20, AffineAxis(2, 3, m), AffineAxis(0, 40, kc))
-            expected = _oracle_packed_a(storage, 20, _offs(src.rows), _offs(src.cols), MR, x -> Float32(3.0) * x, Float32)
-            buf = fill(Float32(-777.0), MR * kc + 4)
-            calls[] = 0
-            if dst === :vector
-                pack_a!(view(buf, 1:(MR * kc)), src, kernel, counting)
-            else
-                GC.@preserve buf pack_a!(packed_panel(buf, 1, MR * kc), src, kernel, counting)
-            end
-            @test buf[1:(MR * kc)] == expected
-            @test calls[] == m * kc
-            @test all(==(Float32(-777.0)), buf[(MR * kc + 1):end])
-        end
-        for n in 0:NR
-            src = SourceTile(storage, 20, AffineAxis(0, 40, kc), AffineAxis(2, 3, n))
-            expected = _oracle_packed_b(storage, 20, _offs(src.rows), _offs(src.cols), NR, x -> Float32(3.0) * x, Float32)
-            buf = fill(Float32(-777.0), NR * kc + 4)
-            calls[] = 0
-            if dst === :vector
-                pack_b!(view(buf, 1:(NR * kc)), src, kernel, counting)
-            else
-                GC.@preserve buf pack_b!(packed_panel(buf, 1, NR * kc), src, kernel, counting)
-            end
-            @test buf[1:(NR * kc)] == expected
-            @test calls[] == n * kc
-            @test all(==(Float32(-777.0)), buf[(NR * kc + 1):end])
-        end
-    end
-end
-
-@testset "pack_a!/pack_b!: zero steady-state allocation on the driver's argument types" begin
-    # PackedPanel destination, dense storage (Memory on >= 1.11), AffineAxis /
-    # PtrScatterAxis axes, identity and conj -- the fast path and both
-    # `_pack_panel!` branches.
-    function run_driver_types(::Type{T}, MR, NR) where {T}
-        kernel = KernelDescriptor(Val(MR), Val(NR), T)
+@testset "pack_a!/pack_b!: zero steady-state allocation" begin
+    nontrivial(x) = 2x + 1
+    # Every destination kind, affine/scattered/pointer-scattered axes, tails and
+    # kc == 0; the ScalarKernel/SIMDKernel forwarding methods on a subset.
+    function run(ctor, ::Type{T}, MR, NR, full) where {T}
+        kernel = ctor(Val(MR), Val(NR), T)
         kc = 7
-        storage = _dense_storages(rand(T, 4000))[end]
-        koffs = [0, MR, 3 * MR, 2 * MR, 5 * MR, 4 * MR, 6 * MR]
-        bufa = zeros(T, MR * kc); bufb = zeros(T, NR * kc)
+        storage = rand(T, 4000)
+        koffs = [0, MR, 3MR, 2MR, 5MR, 4MR, 6MR]
+        lanes = collect(0:(max(MR, NR) - 1)) .* 3
+        bufa = zeros(T, MR * kc + 8)
+        bufb = zeros(T, NR * kc + 8)
         bytes = Int[]
         GC.@preserve bufa bufb koffs begin
-            pa = packed_panel(bufa, 1, MR * kc); pb = packed_panel(bufb, 1, NR * kc)
-            full = SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, kc))
-            fullscat = SourceTile(storage, 0, AffineAxis(0, 1, MR), PtrScatterAxis(pointer(koffs), kc))
-            tail = SourceTile(storage, 0, AffineAxis(0, 1, MR - 1), AffineAxis(0, MR, kc))
-            strided = SourceTile(storage, 0, AffineAxis(0, 2, MR), AffineAxis(0, 2 * MR, kc))
-            bfull = SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, kc, NR))
-            btail = SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, kc, NR - 1))
-            for (src, tf) in ((full, identity), (full, conj), (fullscat, identity), (tail, identity), (strided, conj))
-                push!(bytes, steady_pack_allocs(pack_a!, pa, src, kernel, tf))
+            pa = packed_panel(bufa, 1, MR * kc)
+            dsts_a = (bufa, view(bufa, 3:(2 + MR * kc)), pa)
+            dsts_b = (bufb, view(bufb, 3:(2 + NR * kc)), packed_panel(bufb, 1, NR * kc))
+            pk = PtrScatterAxis(pointer(koffs), kc)
+            srcs_a = (
+                SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, kc)),
+                SourceTile(storage, 0, AffineAxis(0, 1, MR), pk),
+                SourceTile(storage, 0, AffineAxis(0, 2, MR - 1), AffineAxis(0, 2MR, kc)),
+                SourceTile(storage, 0, ScatterAxis(lanes, MR), ScatterAxis(koffs, kc)),
+                SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
+            )
+            srcs_b = (
+                SourceTile(storage, 0, AffineAxis(0, 1, kc), AffineAxis(0, kc, NR)),
+                SourceTile(storage, 0, pk, AffineAxis(0, kc, NR - 1)),
+                SourceTile(storage, 0, ScatterAxis(koffs, kc), ScatterAxis(lanes, NR)),
+                SourceTile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, kc, NR)),
+            )
+            if !full
+                srcs_a, srcs_b, dsts_a, dsts_b = srcs_a[1:1], srcs_b[1:1], dsts_a[1:2], dsts_b[1:2]
             end
-            for (src, tf) in ((bfull, identity), (btail, conj))
-                push!(bytes, steady_pack_allocs(pack_b!, pb, src, kernel, tf))
+            for d in dsts_a
+                for s in srcs_a
+                    push!(bytes, steady_pack_allocs(pack_a!, d, s, kernel, identity))
+                end
+                push!(bytes, steady_pack_allocs(pack_a!, d, srcs_a[1], kernel, nontrivial))
             end
+            for d in dsts_b, s in srcs_b
+                push!(bytes, steady_pack_allocs(pack_b!, d, s, kernel, identity))
+            end
+            push!(bytes, steady_pack_allocs(pack_b!, dsts_b[1], srcs_b[1], kernel, nontrivial))
+            push!(bytes, steady_pack_allocs(pack_a!, pa, srcs_a[1], kernel, conj))
         end
         return bytes
     end
-    @test all(iszero, run_driver_types(Float64, 16, 6))
-    @test all(iszero, run_driver_types(Float32, 32, 6))
-    @test all(iszero, run_driver_types(Float64, 4, 3))
+    @test all(iszero, run(KernelDescriptor, Float64, 16, 6, true))
+    @test all(iszero, run(KernelDescriptor, Float32, 32, 6, true))
+    @test all(iszero, run(ScalarKernel, Float64, 8, 6, false))
+    @test all(iszero, run(SIMDKernel, Float64, 8, 6, false))
 end
