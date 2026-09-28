@@ -1,345 +1,231 @@
-# Exercises src/microkernels/interface.jl: ScalarKernel, zero_accumulator, accumulate,
-# store_tile!, scale_tile!, execute_tile! (against QSTile destinations).
+# The microkernel contract shared by every kernel (`mk_contract`), plus the
+# ScalarKernel runs. Each kernel file calls `mk_contract` on its own shapes.
+#
+# The oracles are test-local: packed panels are written out literally from each
+# format's layout and the accumulator is read back from its documented layout,
+# never through the engine's packers or offset accessors.
 
 using Random
+using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel, QSTile
+using SIMD: Vec
+using StridedViews: StridedView
 
-using QuasiStrided: ScalarKernel, scale_tile!, QSTile, AffineAxis, ScatterAxis
+# `[x0, y0, x1, y1, ...]`
+mk_ilv(x, y) = vec(permutedims(hcat(x, y)))
+mk_cols(f, M) = reduce(vcat, [f(c) for c in eachcol(M)])
 
-@testset "ScalarKernel (scalar reference)" begin
+# Packed A (MR x kc) and B (kc x NR), one K step after another.
+mk_pack_a(::Union{ScalarKernel, SIMDKernel}, A) = vec(A)
+mk_pack_a(::PlanarKernel, A) = mk_cols(c -> [real(c); imag(c)], A)
+mk_pack_a(::OneMKernel, A) =
+    mk_cols(c -> [mk_ilv(real(c), imag(c)); mk_ilv(-imag(c), real(c))], A)
+mk_pack_a(::FMAddSubKernel, A) = mk_cols(c -> mk_ilv(real(c), imag(c)), A)
+mk_pack_b(::Union{ScalarKernel, SIMDKernel}, B) = vec(permutedims(B))
+mk_pack_b(k, B) = mk_cols(c -> [real(c); imag(c)], permutedims(B))
+mk_pack(k, A, B) = (mk_pack_a(k, A), mk_pack_b(k, B))
 
-    @testset "zero_accumulator" begin
-        k = ScalarKernel(Val(4), Val(3), Float64)
-        acc = zero_accumulator(k)
-        @test size(acc) == (4, 3)
-        @test all(iszero, acc)
-        @test eltype(acc) == Float64
+# Element (i, j), zero-based, of an accumulator.
+mk_read(::ScalarKernel, acc, i, j) = acc[i + 1, j + 1]
+function mk_read(k::SIMDKernel, acc, i, j)
+    W = lanewidth(k)
+    return acc[i ÷ W + (mr(k) ÷ W) * j + 1][i % W + 1]
+end
+function mk_read(k::PlanarKernel, acc, i, j)
+    W = lanewidth(k)
+    idx = i ÷ W + (mr(k) ÷ W) * j + 1
+    return Complex(acc[idx][i % W + 1], acc[length(acc) ÷ 2 + idx][i % W + 1])
+end
+function mk_read(k::Union{OneMKernel, FMAddSubKernel}, acc, i, j)
+    W = lanewidth(k)
+    v, u = divrem(i, W ÷ 2)
+    vec = acc[v + (2 * mr(k) ÷ W) * j + 1]
+    return Complex(vec[2u + 1], vec[2u + 2])
+end
+
+mk_fill_acc(k, x) = (acc = zero_accumulator(k); acc isa AbstractMatrix ? fill(x, size(acc)) : map(v -> typeof(v)(x), acc))
+mk_nan(T) = T <: Complex ? T(NaN, NaN) : T(NaN)
+mk_inf(T) = T <: Complex ? T(Inf, Inf) : T(Inf)
+mk_tol(T) = real(T) === Float64 ? 1.0e-11 : 2.0f-4
+mk_close(got, want, T) = all(abs.(got .- want) .<= mk_tol(T) .* max.(1, abs.(want)))
+mk_alphabeta(T) = T <: Complex ?
+    ((one(T), zero(T)), (T(2.5, -1), T(-1.75, 0.5)), (one(T), one(T)), (zero(T), T(3, 1)), (T(1, 1), T(2, 0))) :
+    ((one(T), zero(T)), (T(2.5), T(-1.75)), (one(T), one(T)), (zero(T), T(3)), (T(1.5), T(2)))
+
+# The storage the driver hands `store_tile!`: `Memory{T}` on Julia >= 1.11.
+mk_dense(v::AbstractVector{T}) where {T} = copyto!(parent(StridedView(zeros(T, length(v)))), v)
+
+mk_run_acc(k, pa, pb, kc) = accumulate(k, zero_accumulator(k), pa, pb, kc)
+mk_run_exec(k, dst, pa, pb, kc, alpha, beta) = (execute_tile!(k, dst, pa, pb, kc, alpha, beta); nothing)
+
+# `full = false` checks only accumulate against the reference and allocations.
+# Separate functions, so the light check does not compile the full one.
+function mk_contract(k; full::Bool = true)
+    return @testset "$(nameof(typeof(k))){$(mr(k)),$(nr(k)),$(scalartype(k))}" begin
+        mk_contract_light(k)
+        full && mk_contract_full(k)
     end
+end
 
-    @testset "accumulate: kc=0 is a no-op, no reads" begin
-        k = ScalarKernel(Val(4), Val(3), Float64)
-        acc0 = [Float64(10i + j) for i in 1:4, j in 1:3]
-        acc = copy(acc0)
-        # Buffers deliberately too short to read from; if accumulate touched
-        # them for kc=0 this would throw a BoundsError.
-        packed_a = Float64[]
-        packed_b = Float64[]
-        result = accumulate(k, acc, packed_a, packed_b, 0)
-        @test result === acc
-        @test acc == acc0
-    end
+function mk_contract_light(k)
+    T = scalartype(k)
+    MR, NR = mr(k), nr(k)
+    rng = MersenneTwister(100MR + NR)
+    kc = 5
+    A = rand(rng, T, MR, kc)
+    B = rand(rng, T, kc, NR)
+    pa, pb = mk_pack(k, A, B)
+    @test (length(pa), length(pb)) == (packed_a_length(k, kc), packed_b_length(k, kc))
+    acc = mk_run_acc(k, pa, pb, kc)
+    @test mk_close([mk_read(k, acc, i, j) for i in 0:(MR - 1), j in 0:(NR - 1)], A * B, T)
 
-    @testset "accumulate: nonzero initial accumulator composes additively" begin
-        k = ScalarKernel(Val(2), Val(2), Float64)
-        # kc=1 panel: A column (i=0,1), B row (j=0,1)
-        packed_a = [1.0, 2.0]   # a[0,0]=1, a[1,0]=2
-        packed_b = [3.0, 4.0]   # b[0,0]=3, b[1,0]=4
-        acc_init = [100.0 200.0; 300.0 400.0]
-        acc = copy(acc_init)
-        accumulate(k, acc, packed_a, packed_b, 1)
-        expected = acc_init .+ [1.0 * 3.0 1.0 * 4.0; 2.0 * 3.0 2.0 * 4.0]
-        @test acc == expected
-
-        # Running two separate kc=1 accumulate calls must match one kc=2 call
-        # (same p order, same inputs split across the two calls).
-        packed_a2 = [1.0, 2.0, 5.0, 6.0]  # p=0: (1,2); p=1: (5,6)
-        packed_b2 = [3.0, 4.0, 7.0, 8.0]  # p=0: (3,4); p=1: (7,8)
-        acc_a = zero_accumulator(k)
-        accumulate(k, acc_a, packed_a2, packed_b2, 2)
-
-        acc_b = zero_accumulator(k)
-        accumulate(k, acc_b, view(packed_a2, 1:2), view(packed_b2, 1:2), 1)
-        accumulate(k, acc_b, view(packed_a2, 3:4), view(packed_b2, 3:4), 1)
-        @test acc_a == acc_b
-    end
-
-    # --- destination helpers for the tests below ---
-
-    # Storage with `pad` canary cells before and after the addressed region.
-    function canary_storage(len::Int; pad::Int = 3, sentinel = -999.0)
-        v = fill(sentinel, len + 2 * pad)
-        return v, pad
-    end
-
-    @testset "execute_tile!: end-to-end mapping vs direct matmul (MR=4,NR=3)" begin
-        MR, NR, kc = 4, 3, 5
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        rng = MersenneTwister(1)
-
-        Amat = rand(rng, MR, kc)   # Amat[i+1,p+1]
-        Bmat = rand(rng, kc, NR)   # Bmat[p+1,j+1]
-
-        packed_a = zeros(Float64, packed_a_length(k, kc))
-        packed_b = zeros(Float64, packed_b_length(k, kc))
-        for p in 0:(kc - 1), i in 0:(MR - 1)
-            packed_a[packed_a_offset(k, i, p) + 1] = Amat[i + 1, p + 1]
-        end
-        for p in 0:(kc - 1), j in 0:(NR - 1)
-            packed_b[packed_b_offset(k, j, p) + 1] = Bmat[p + 1, j + 1]
-        end
-
-        expected = Amat * Bmat  # (MR, NR)
-
-        storage, pad = canary_storage(MR * NR; pad = 4, sentinel = NaN)
-        base = pad
-        rows = AffineAxis(0, 1, MR)   # unit-stride rows, contiguous
-        cols = AffineAxis(0, MR, NR)  # column-major within the tile
-        dest = QSTile(storage, base, rows, cols)
-
-        execute_tile!(k, dest, packed_a, packed_b, kc, 1.0, 0.0)
-
-        for i in 0:(MR - 1), j in 0:(NR - 1)
-            addr = base + i * 1 + j * MR
-            @test storage[addr + 1] ≈ expected[i + 1, j + 1]
-        end
-        # canaries untouched
-        @test all(x -> isnan(x), storage[1:pad])
-        @test all(x -> isnan(x), storage[(end - pad + 1):end])
-    end
-
-    @testset "output addressing: affine rows/cols (unit, nonunit, negative)" begin
-        MR, NR, kc = 3, 2, 1
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        packed_a = [1.0, 2.0, 3.0]
-        packed_b = [10.0, 100.0]
-        acc = zero_accumulator(k)
-        accumulate(k, acc, packed_a, packed_b, kc)
-        # acc[i+1,j+1] = a[i]*b[j]
-        expected = [1.0 * 10 1.0 * 100; 2.0 * 10 2.0 * 100; 3.0 * 10 3.0 * 100]
-        @test acc == expected
-
-        # Case 1: unit rows, unit cols but interleaved via a nonunit column stride.
-        len = 100
-        storage = fill(NaN, len)
-        rows = AffineAxis(20, 1, MR)     # contiguous rows starting at 20
-        cols = AffineAxis(0, 7, NR)      # nonunit column stride
-        dest = QSTile(storage, 0, rows, cols)
-        execute_tile!(k, dest, packed_a, packed_b, kc, 2.0, 0.0)
-        for i in 0:(MR - 1), j in 0:(NR - 1)
-            addr = 20 + i * 1 + j * 7
-            @test storage[addr + 1] ≈ 2.0 * expected[i + 1, j + 1]
-        end
-
-        # Case 2: negative row stride (rows stored in reverse), nonunit cols.
-        storage2 = fill(NaN, len)
-        rows2 = AffineAxis(50, -3, MR)
-        cols2 = AffineAxis(0, 11, NR)
-        dest2 = QSTile(storage2, 0, rows2, cols2)
-        execute_tile!(k, dest2, packed_a, packed_b, kc, 1.0, 0.0)
-        for i in 0:(MR - 1), j in 0:(NR - 1)
-            addr = 50 - 3i + 11j
-            @test storage2[addr + 1] ≈ expected[i + 1, j + 1]
-        end
-        # Addresses for i=0..2 with stride -3 from 50 are 50,47,44 — distinct
-        # from each other and from any column-shifted address in range, so no
-        # aliasing corrupts the comparison above.
-    end
-
-    @testset "output addressing: scattered rows and columns" begin
-        MR, NR, kc = 3, 2, 1
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        packed_a = [1.0, 2.0, 3.0]
-        packed_b = [10.0, 100.0]
-        acc = zero_accumulator(k)
-        accumulate(k, acc, packed_a, packed_b, kc)
-        expected = [1.0 * 10 1.0 * 100; 2.0 * 10 2.0 * 100; 3.0 * 10 3.0 * 100]
-
-        row_offsets = [5, 40, 12]   # arbitrary, distinct, irregular
-        col_offsets = [0, 200]
-        storage = fill(NaN, 300)
-        rows = ScatterAxis(row_offsets, MR)
-        cols = ScatterAxis(col_offsets, NR)
-        dest = QSTile(storage, 0, rows, cols)
-        execute_tile!(k, dest, packed_a, packed_b, kc, 1.0, 0.0)
-        for i in 0:(MR - 1), j in 0:(NR - 1)
-            addr = row_offsets[i + 1] + col_offsets[j + 1]
-            @test storage[addr + 1] ≈ expected[i + 1, j + 1]
-        end
-
-        # Mixed: scattered rows, affine columns.
-        storage2 = fill(NaN, 300)
-        cols2 = AffineAxis(0, 100, NR)
-        dest2 = QSTile(storage2, 0, rows, cols2)
-        execute_tile!(k, dest2, packed_a, packed_b, kc, 1.0, 0.0)
-        for i in 0:(MR - 1), j in 0:(NR - 1)
-            addr = row_offsets[i + 1] + j * 100
-            @test storage2[addr + 1] ≈ expected[i + 1, j + 1]
+    # Allocation-free, including a scattered destination and a dense one
+    # with a partial row block. Julia 1.10 does not keep the tuple
+    # accumulator in registers.
+    m = max(1, MR - 1)
+    if !(k isa ScalarKernel)
+        skip = VERSION < v"1.11"
+        ab = (T(2), T(0.5))
+        scat = DestinationTile(zeros(T, MR * NR), 0, ScatterAxis(collect(0:(MR - 1)), MR), AffineAxis(0, MR, NR))
+        part = DestinationTile(mk_dense(zeros(T, m * NR)), 0, AffineAxis(0, 1, m), AffineAxis(0, m, NR))
+        mk_run_acc(k, pa, pb, kc)
+        @test (@allocated mk_run_acc(k, pa, pb, kc)) == 0 skip = skip
+        for dst in (scat, part)
+            mk_run_exec(k, dst, pa, pb, kc, ab...)
+            @test (@allocated mk_run_exec(k, dst, pa, pb, kc, ab...)) == 0 skip = skip
         end
     end
+    return nothing
+end
 
-    @testset "beta=0 never reads old C (NaN old C, finite result)" begin
-        MR, NR, kc = 4, 3, 2
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        packed_a = rand(MersenneTwister(2), packed_a_length(k, kc))
-        packed_b = rand(MersenneTwister(3), packed_b_length(k, kc))
+function mk_contract_full(k)
+    T = scalartype(k)
+    R = real(T)
+    MR, NR = mr(k), nr(k)
+    rng = MersenneTwister(100MR + NR + 1)
+    m = max(1, MR - 1)
+    kc = 5
+    A = rand(rng, T, MR, kc)
+    B = rand(rng, T, kc, NR)
+    pa, pb = mk_pack(k, A, B)
+    acc = mk_run_acc(k, pa, pb, kc)
 
-        storage = fill(NaN, MR * NR)  # old C entirely NaN
-        rows = AffineAxis(0, 1, MR)
-        cols = AffineAxis(0, MR, NR)
-        dest = QSTile(storage, 0, rows, cols)
-        execute_tile!(k, dest, packed_a, packed_b, kc, 1.5, 0.0)
-        @test all(isfinite, storage)
+    acc0 = zero_accumulator(k)
+    @test all(iszero(mk_read(k, acc0, i, j)) for i in 0:(MR - 1), j in 0:(NR - 1))
+    @test accumulate(k, acc0, R[], R[], 0) === acc0
+    @test_throws ArgumentError accumulate(k, acc0, R[], R[], -1)
+    # Splitting kc across calls composes.
+    la, lb = length(pa) ÷ kc, length(pb) ÷ kc
+    accs = zero_accumulator(k)
+    for p in 0:(kc - 1)
+        accs = accumulate(k, accs, view(pa, (p * la + 1):((p + 1) * la)), view(pb, (p * lb + 1):((p + 1) * lb)), 1)
+    end
+    @test all(mk_read(k, accs, i, j) ≈ mk_read(k, acc, i, j) for i in 0:(MR - 1), j in 0:(NR - 1))
 
-        # Textual confirmation (see src/microkernels/interface.jl): in store_tile!'s
-        # `iszero(beta)` branch, and in scale_tile!'s `iszero(beta)` branch,
-        # the only statement touching storage is an assignment, never a load.
+    # alpha*A*B + beta*C on the vector-store and scalar-store paths, every
+    # alpha/beta branch, partial tiles; old C is NaN whenever beta == 0.
+    pad, sentinel = 2, T(-77)
+    extents = unique(((MR, NR), (1, 1), (m, NR), (MR, max(1, NR - 1)), (MR ÷ 2 + 1, min(2, NR)), (0, 0)))
+    for kc in (0, 1, 5), (alpha, beta) in mk_alphabeta(T), (m, n) in extents, scattered in (false, true)
+        A = rand(rng, T, MR, kc)
+        B = rand(rng, T, kc, NR)
+        pa, pb = kc == 0 ? (R[], R[]) : mk_pack(k, A, B)
+        Cold = iszero(beta) ? fill(mk_nan(T), m * n) : rand(rng, T, m * n)
+        storage = [fill(sentinel, pad); Cold; fill(sentinel, pad)]
+        scattered || (storage = mk_dense(storage))
+        rows = scattered ? ScatterAxis(collect(0:(m - 1)), m) : AffineAxis(0, 1, m)
+        execute_tile!(k, DestinationTile(storage, pad, rows, AffineAxis(0, m, n)), pa, pb, kc, alpha, beta)
+        AB = (A * B)[1:m, 1:n]
+        want = iszero(beta) ? alpha .* vec(AB) : alpha .* vec(AB) .+ beta .* Cold
+        @test mk_close(storage[(pad + 1):(pad + m * n)], want, T)
+        @test all(==(sentinel), storage[[1:pad; (pad + m * n + 1):(2pad + m * n)]])
     end
 
-    @testset "alpha=0 skips accumulator arithmetic (no Inf/NaN from operands)" begin
-        MR, NR, kc = 2, 2, 1
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        # These packed values would produce Inf/NaN if actually multiplied
-        # and accumulated (0 * Inf = NaN).
-        packed_a = [0.0, Inf]
-        packed_b = [Inf, 0.0]
-
-        storage = [1.0, 2.0, 3.0, 4.0]
-        rows = AffineAxis(0, 1, MR)
-        cols = AffineAxis(0, MR, NR)
-        dest = QSTile(storage, 0, rows, cols)
-        old = copy(storage)
-        execute_tile!(k, dest, packed_a, packed_b, kc, 0.0, 2.0)
-        # alpha=0, beta=2: result should be exactly 2*old C, no NaN anywhere.
-        @test storage ≈ 2.0 .* old
-        @test all(isfinite, storage)
-
-        # alpha=0 && beta=0: writes zero(T), no read of C or acc.
-        storage2 = fill(NaN, 4)
-        dest2 = QSTile(storage2, 0, rows, cols)
-        execute_tile!(k, dest2, packed_a, packed_b, kc, 0.0, 0.0)
-        @test all(iszero, storage2)
-
-        # alpha=0 && beta=1: full no-op (storage unchanged, including NaNs).
-        storage3 = fill(NaN, 4)
-        dest3 = QSTile(storage3, 0, rows, cols)
-        execute_tile!(k, dest3, packed_a, packed_b, kc, 0.0, 1.0)
-        @test all(isnan, storage3)
+    # Nonfinite padding lanes (rows >= m, columns >= n) never reach C.
+    m, n = max(1, MR - 1), max(1, NR - 1)
+    A = rand(rng, T, MR, 2)
+    B = rand(rng, T, 2, NR)
+    A[(m + 1):end, :] .= mk_inf(T)
+    B[:, (n + 1):end] .= mk_inf(T)
+    pa, pb = mk_pack(k, A, B)
+    acc = mk_run_acc(k, pa, pb, 2)
+    @test any(!isfinite(mk_read(k, acc, i, j)) for i in 0:(MR - 1), j in 0:(NR - 1))
+    for (storage, rows) in ((mk_dense(fill(mk_nan(T), m * n)), AffineAxis(0, 1, m)), (fill(mk_nan(T), m * n), ScatterAxis(collect(0:(m - 1)), m)))
+        execute_tile!(k, DestinationTile(storage, 0, rows, AffineAxis(0, m, n)), pa, pb, 2, one(T), zero(T))
+        @test mk_close(storage, vec(A[1:m, :] * B[:, 1:n]), T)
     end
 
-    @testset "output canaries and only-valid-lane stores (padded lanes never propagate)" begin
-        MR, NR = 4, 4
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        m, n, kc = 2, 2, 1  # valid subrectangle smaller than the register tile
+    # alpha == 0 never reads acc or the panels; kc == 0 never reads the panels.
+    fulltile(s) = DestinationTile(s, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
+    storage = mk_dense(fill(T(2), MR * NR))
+    store_tile!(fulltile(storage), mk_fill_acc(k, R(NaN)), zero(T), T(3), k)
+    @test all(==(T(6)), storage)
+    execute_tile!(k, fulltile(storage), R[], R[], 5, zero(T), zero(T))
+    @test all(iszero, storage)
+    empty = DestinationTile(T[], 0, AffineAxis(0, 1, 0), AffineAxis(0, 0, 0))
+    @test store_tile!(empty, acc, one(T), zero(T), k) === empty
+    @test execute_tile!(k, empty, pa, pb, 2, one(T), one(T)) === empty
 
-        # Padding lanes (i>=m or j>=n) get Inf/NaN-inducing packed values;
-        # valid lanes (i<m, j<n) get benign finite values.
-        packed_a = zeros(Float64, MR)
-        packed_b = zeros(Float64, NR)
-        packed_a[1] = 2.0; packed_a[2] = 3.0   # valid rows i=0,1
-        packed_a[3] = 0.0; packed_a[4] = Inf   # padding rows i=2,3
-        packed_b[1] = 5.0; packed_b[2] = 7.0   # valid cols j=0,1
-        packed_b[3] = Inf; packed_b[4] = 0.0   # padding cols j=2,3
+    # Rejected inputs.
+    st = zeros(T, (MR + 1) * (NR + 1))
+    @test_throws ArgumentError execute_tile!(k, DestinationTile(st, 0, AffineAxis(0, 1, MR + 1), AffineAxis(0, MR + 1, NR)), pa, pb, 2, one(T), zero(T))
+    @test_throws ArgumentError execute_tile!(k, DestinationTile(st, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR + 1)), pa, pb, 2, one(T), zero(T))
+    @test_throws ArgumentError execute_tile!(k, fulltile(st), pa, pb, -1, one(T), zero(T))
+    @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa[1:(end - 1)], pb, 2, one(T), zero(T))
+    @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa, pb[1:(end - 1)], 2, one(T), zero(T))
 
-        acc = zero_accumulator(k)
-        accumulate(k, acc, packed_a, packed_b, kc)
-        # Valid corner is finite and correct.
-        @test acc[1, 1] ≈ 2.0 * 5.0
-        @test acc[1, 2] ≈ 2.0 * 7.0
-        @test acc[2, 1] ≈ 3.0 * 5.0
-        @test acc[2, 2] ≈ 3.0 * 7.0
-        # Some padded lanes are indeed nonfinite (proving the test actually
-        # stresses the hazard, not a vacuous check).
-        @test any(!isfinite, acc[3:4, :]) || any(!isfinite, acc[:, 3:4])
+    # Destination layouts: each lands on exactly its own addresses.
+    A = rand(rng, T, MR, kc)
+    B = rand(rng, T, kc, NR)
+    pa, pb = mk_pack(k, A, B)
+    AB = A * B
+    ld = m + 3
+    perm = randperm(rng, ld)[1:m] .- 1
+    cperm = ld .* (randperm(rng, n) .- 1)
+    nanbuf(len) = fill(mk_nan(T), len)
+    layouts = (
+        # (storage, base, rows, cols, zero-based address of (i, j))
+        (nanbuf(ld * n), 0, ScatterAxis(perm, m), AffineAxis(0, ld, n), (i, j) -> perm[i + 1] + ld * j),
+        (mk_dense(nanbuf(ld * n)), (m - 1) + ld * (n - 1), AffineAxis(0, -1, m), AffineAxis(0, -ld, n), (i, j) -> (m - 1 - i) + ld * (n - 1 - j)),
+        (mk_dense(nanbuf(2ld * n)), 0, AffineAxis(0, 2, m), AffineAxis(0, 2ld, n), (i, j) -> 2i + 2ld * j),
+        (mk_dense(nanbuf(ld * n)), 0, AffineAxis(0, 1, m), AffineAxis(0, ld, n), (i, j) -> i + ld * j),
+        (mk_dense(nanbuf(ld * n)), 0, AffineAxis(0, 1, m), ScatterAxis(cperm, n), (i, j) -> i + cperm[j + 1]),
+        (view(nanbuf(ld * n + 4), 3:(ld * n + 2)), 0, AffineAxis(0, 1, m), AffineAxis(0, ld, n), (i, j) -> i + ld * j),
+    )
+    for (storage, base, rows, cols, addr) in layouts
+        execute_tile!(k, DestinationTile(storage, base, rows, cols), pa, pb, kc, one(T), zero(T))
+        got = [storage[addr(i, j) + 1] for i in 0:(m - 1), j in 0:(n - 1)]
+        @test mk_close(got, AB[1:m, 1:n], T)
+        @test count(!isnan, storage) == m * n
+    end
+    return nothing
+end
 
-        pad = 5
-        storage = fill(-777.0, m * n + 2 * pad)
-        base = pad
-        rows = AffineAxis(0, 1, m)
-        cols = AffineAxis(0, m, n)
-        dest = QSTile(storage, base, rows, cols)
-        execute_tile!(k, dest, packed_a, packed_b, kc, 1.0, 0.0)
-
-        # Valid rectangle: finite and correct.
-        for i in 0:(m - 1), j in 0:(n - 1)
-            addr = base + i * 1 + j * m
-            @test isfinite(storage[addr + 1])
-            @test storage[addr + 1] ≈ acc[i + 1, j + 1]
+# A named-kernel plan end to end: several K panels, tiles straddling both ways,
+# conjugation.
+function mk_e2e(T, kernel)
+    rng = MersenneTwister(4242)
+    M, N, K = 37, 23, 41
+    A = rand(rng, T, M, K)
+    B = rand(rng, T, K, N)
+    Cinit = rand(rng, T, M, N)
+    alpha, beta = T <: Complex ? (T(1.5, -0.25), T(-0.75, 0.5)) : (T(1.5), T(-0.75))
+    conjs = T <: Complex ? ((false, false), (true, false), (false, true)) : ((false, false),)
+    return @testset "end to end $(kernel === nothing ? "default kernel" : nameof(typeof(kernel))) $T" begin
+        for (cA, cB) in conjs
+            C = copy(Cinit)
+            plan = plan_contract(
+                StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
+                kernel, kc = 16, conjA = cA, conjB = cB
+            )
+            execute!(plan, alpha, beta)
+            want = alpha .* ((cA ? conj.(A) : A) * (cB ? conj.(B) : B)) .+ beta .* Cinit
+            @test maximum(abs, C .- want) <= 64 * mk_tol(T) * maximum(abs, want)
         end
-        # Canaries before/after the addressed region: untouched.
-        @test all(==(-777.0), storage[1:pad])
-        @test all(==(-777.0), storage[(end - pad + 1):end])
     end
+end
 
-    @testset "nontrivial (non-0/1) alpha and beta, single execute_tile! call" begin
-        MR, NR, kc = 3, 3, 4
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        rng = MersenneTwister(7)
-        Amat = rand(rng, MR, kc)
-        Bmat = rand(rng, kc, NR)
-        packed_a = zeros(Float64, packed_a_length(k, kc))
-        packed_b = zeros(Float64, packed_b_length(k, kc))
-        for p in 0:(kc - 1), i in 0:(MR - 1)
-            packed_a[packed_a_offset(k, i, p) + 1] = Amat[i + 1, p + 1]
-        end
-        for p in 0:(kc - 1), j in 0:(NR - 1)
-            packed_b[packed_b_offset(k, j, p) + 1] = Bmat[p + 1, j + 1]
-        end
-
-        alpha, beta = 2.5, -1.75
-        Cold = rand(rng, MR, NR)
-        storage = vec(permutedims(Cold))  # so that row-major-style affine addressing lines up
-        # Use simple row-major-ish affine addressing: addr(i,j) = i*NR + j
-        rows = AffineAxis(0, NR, MR)
-        cols = AffineAxis(0, 1, NR)
-        dest = QSTile(copy(storage), 0, rows, cols)
-        execute_tile!(k, dest, packed_a, packed_b, kc, alpha, beta)
-
-        expected = alpha .* (Amat * Bmat) .+ beta .* Cold
-        for i in 0:(MR - 1), j in 0:(NR - 1)
-            addr = i * NR + j
-            @test dest.storage[addr + 1] ≈ expected[i + 1, j + 1] atol = 1.0e-10
-        end
+@testset "ScalarKernel" begin
+    for (MR, NR, T) in ((4, 3, Float64), (2, 2, Float32))
+        mk_contract(ScalarKernel(Val(MR), Val(NR), T))
     end
-
-    @testset "execute_tile!: kc=0 applies beta once, no input reads" begin
-        MR, NR = 2, 2
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        storage = [1.0, 2.0, 3.0, 4.0]
-        rows = AffineAxis(0, 1, MR)
-        cols = AffineAxis(0, MR, NR)
-        dest = QSTile(storage, 0, rows, cols)
-        # Deliberately empty/undersized packed buffers: if execute_tile! read
-        # from them for kc=0 this would throw a BoundsError.
-        empty_a = Float64[]
-        empty_b = Float64[]
-        execute_tile!(k, dest, empty_a, empty_b, 0, 3.0, 2.0)
-        @test storage ≈ [2.0, 4.0, 6.0, 8.0]
-    end
-
-    @testset "empty destination is a no-op" begin
-        MR, NR = 2, 2
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        storage = fill(NaN, 4)
-        rows = AffineAxis(0, 1, 0)
-        cols = AffineAxis(0, MR, 0)
-        dest = QSTile(storage, 0, rows, cols)
-        execute_tile!(k, dest, Float64[], Float64[], 0, 1.0, 1.0)
-        @test all(isnan, storage)  # untouched, still NaN
-    end
-
-    @testset "execute_tile! validates destination extent against kernel shape" begin
-        MR, NR = 2, 2
-        k = ScalarKernel(Val(MR), Val(NR), Float64)
-        storage = zeros(10)
-        rows = AffineAxis(0, 1, 3)  # m=3 > MR=2
-        cols = AffineAxis(0, MR, 2)
-        dest = QSTile(storage, 0, rows, cols)
-        @test_throws ArgumentError execute_tile!(k, dest, [1.0, 2.0], [1.0, 2.0], 1, 1.0, 0.0)
-    end
-
-    @testset "Float32 works uniformly" begin
-        MR, NR, kc = 2, 2, 2
-        k = ScalarKernel(Val(MR), Val(NR), Float32)
-        packed_a = Float32[1, 2, 3, 4]
-        packed_b = Float32[1, 1, 1, 1]
-        acc = zero_accumulator(k)
-        @test eltype(acc) == Float32
-        accumulate(k, acc, packed_a, packed_b, kc)
-        storage = zeros(Float32, 4)
-        rows = AffineAxis(0, 1, MR)
-        cols = AffineAxis(0, MR, NR)
-        dest = QSTile(storage, 0, rows, cols)
-        execute_tile!(k, dest, packed_a, packed_b, kc, Float32(1), Float32(0))
-        @test eltype(storage) == Float32
-    end
-
 end
