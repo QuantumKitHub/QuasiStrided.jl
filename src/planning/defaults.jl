@@ -127,10 +127,16 @@ _default_kernel(::Type{T}) where {T} =
 # `Val` (`_plan_with_kernel`, src/planning/plan.jl), so the choice is made
 # without ever holding a menu-wide kernel Union (ten members for ComplexF64).
 # `_default_kernel` below builds the kernel from the same pair.
-@inline function _default_shape(::Type{T}, Qm::Int, Qn::Int) where {T}
+#
+# `run` is C's leading unit-stride run along this orientation's M composite
+# (`_leading_unit_run`); the real `MV = 4` shape also steps down where it
+# would break the tall slivers' unit-stride store (`_store_shape`). The
+# default `run = Qm` (a fully unit-stride M) is "no layout known", which never
+# steps down.
+@inline function _default_shape(::Type{T}, Qm::Int, Qn::Int, run::Int = Qm) where {T}
     d = _resolved_defaults(T)
     method = _default_method(T)
-    shape = _extent_shape(d.shape, T, method, Qm)
+    shape = _store_shape(_extent_shape(d.shape, T, method, Qm), T, method, Qm, run)
     (Qm > 0 && Qm < shape[1]) || return (shape, method)
     # The FMAddSub small-M demotion is complex-only (`_small_m_candidates` is
     # empty for a real `T`); saying so statically keeps a real `T`'s method a

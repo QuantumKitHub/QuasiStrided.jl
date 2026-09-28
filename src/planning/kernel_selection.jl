@@ -442,6 +442,60 @@ _extent_shape(profile::TargetProfile, ::Type{T}, method, Qm::Int) where {T} =
     return cld(Qm, half[1]) * half[1] < cld(Qm, MR) * MR ? half : shape
 end
 
+"""
+    _store_shape(shape, T, method, Qm, run) -> (MR, NR, W)
+
+`shape`, or -- real method only, and only when `shape` is the `MV = 4` rule
+shape -- its `MV = 2` sibling `(MR ÷ 2, NR, W)` when C's leading unit-stride
+run along M (`run`, `_leading_unit_run`) does not make every tall register
+sliver unit-stride (`Qm != run` and `run % MR != 0`) but is at least one half
+tile long. Applied per orientation, BEFORE the swap decision
+(`_candidate_mrs`, src/planning/plan.jl), and again to the chosen one, so the
+swap and the run-length demotion (`_demote_for_run`) see the tile that will
+actually run. Always a member of `kernel_shapes(T, method)`.
+
+Why: a sliver that is not unit-stride in C takes the scattered store, whose
+cost per tile is fixed while the kernel's work per tile grows with `Qk`, and
+the `MV = 4` tile's 1.2x kernel rate does not pay for it at any `Qk` the
+measurement below reached. Measured 2026-09-28, ccqlin038 (Cascade Lake),
+Julia 1.12.7, `benchmark/probes/probe_mv4_store_sweep.jl` (named kernels, no
+swap, no run demotion; Qm = 1920, Qn = 480; C = [a, n, b] so `run` = extent of
+`a`), GF/s ratio `MV = 4` / `MV = 2`:
+
+    Float64 (16 vs 32 rows)   Qk:  16    32    64   128   256   512  1024
+      run = 16 (MV2 whole, MV4 broken)  0.31  0.46  0.59  0.68-0.76  0.95-0.98  0.89  0.95
+      run = 24 (both broken)            0.55  0.64  0.77  0.88  1.03
+      run = 48 (MV2 whole, MV4 half)    0.55  0.69  0.84  0.94  1.07  1.07  1.00
+      run = 32, 64, 96 (both whole)     1.10-1.13 at Qk = 16..128
+    Float32 (32 vs 64 rows)
+      run = 32                          0.19  0.29  0.43  0.61  0.80  0.98
+      run = 48 (both broken)            0.49  0.56  0.65  0.78  0.92  1.04
+      run = 96                          0.39  0.51  0.69  0.85  1.00  1.05
+      run = 64, 128 (both whole)        1.04-1.24 at every Qk
+
+Past the crossover (Qk ~ 200-500, and only where part of the tall slivers
+is whole) the tall tile gains at most ~7%, and since `kc` caps a panel's
+depth near there the ratio stops growing; below it the half tile is up to 5x
+faster. So the rule has no `Qk` term. This is the regression the `MV = 4`
+rule first shipped with: the swap decision (`_prefer_swap`) compared C's
+16-long runs of `ccsd_t_2_dim16` / `ao2mo_2_dim16` against `mr = 32`,
+declined the swap `MV = 2` had taken, and ran every tile through the
+scattered store (2.2-2.6x slower end to end).
+
+Below one half tile (`run < 2W`) the tall shape is kept: both tiles store
+scattered there, and the tall one measured 0.88-1.00x at Qk <= 32 (where the
+run demotion replaces either by the tile that divides `run`) and 1.05-1.16x
+from Qk = 64 (Float64, run = 8).
+"""
+@inline _store_shape(shape::NTuple{3, Int}, ::Type{T}, method, Qm::Int, run::Int) where {T} = shape
+
+@inline function _store_shape(shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, Qm::Int, run::Int) where {T}
+    MR, NR, W = shape
+    (MR == 4 * W && Qm != run && run % MR != 0 && run >= 2 * W) || return shape
+    half = (2 * W, NR, W)
+    return half in kernel_shapes(T, method) ? half : shape
+end
+
 # Small-M demotion target for complex `T` on AVX-512: the native-width
 # (`W == lanes`) FMAddSub menu shape that pads `Qm` least (`cld(Qm, MR) * MR`),
 # ties by the larger `MR * NR` tile; `nothing` (keep the planar fitted shape)

@@ -169,6 +169,75 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
             @test ext(p, ComplexF64, PlanarMethod(), 3) === _derived_shape(p, ComplexF64, PlanarMethod())
         end
     end
+
+    @testset "_store_shape: the MV = 4 real shape steps down where C's run breaks its slivers" begin
+        st = QuasiStrided._store_shape
+        for T in (Float64, Float32)
+            p = synthetic(:avx512, 64)
+            tall = _derived_shape(p, T)
+            MR, NR, W = tall
+            half = (2 * W, NR, W)
+            Qm = 64 * MR
+            # Every tall sliver unit-stride: whole M, or a run that MR divides.
+            for run in (Qm, MR, 2 * MR, 5 * MR)
+                @test st(tall, T, RealMethod(), Qm, run) === tall
+            end
+            @test st(tall, T, RealMethod(), 3 * W, 3 * W) === tall   # Qm == run
+            # A run of at least one half tile that MR does not divide.
+            for run in (2 * W, 3 * W, 6 * W, MR + 2 * W, Qm - 1)
+                @test st(tall, T, RealMethod(), Qm, run) === half
+            end
+            # Below one half tile (or no run at all, 1): both would scatter.
+            for run in (1, W, 2 * W - 1)
+                @test st(tall, T, RealMethod(), Qm, run) === tall
+            end
+            # Only the tall shape steps down; nothing else is touched.
+            @test st(half, T, RealMethod(), Qm, 3 * W) === half
+            fb = _fallback_shape(T)
+            @test st(fb, T, RealMethod(), Qm, 3 * W) === fb
+            cs = _derived_shape(p, ComplexF64, PlanarMethod())
+            @test st(cs, ComplexF64, PlanarMethod(), Qm, 3 * W) === cs
+            # Through the per-plan shape on the live host.
+            if _derived_shape(target_profile(), T) === tall
+                @test QuasiStrided._default_shape(T, Qm, 256, 2 * W)[1] === half
+                @test QuasiStrided._default_shape(T, Qm, 256, MR)[1] === tall
+                @test QuasiStrided._default_shape(T, Qm, 256)[1] === tall   # no run given
+            end
+        end
+    end
+
+    @testset "_store_shape feeds the swap: ccsd_t_2 / ao2mo_2 at dim 16 swap onto the 16-run" begin
+        # The regression the MV = 4 rule first shipped with: C's only unit
+        # run is 16 long (on the N side as given), and the swap decision
+        # compared it against mr = 32 and declined the swap, leaving every
+        # tile on the scattered store. With the step-down the swapped side
+        # runs the 16-row tile, which the run makes unit-stride, and swaps.
+        T = Float64
+        if _derived_shape(target_profile(), T)[1] == 32
+            d = 16
+            # ccsd_t_2: C = abcijk, A = ijmb, B = mkac
+            a, b, c, i, j, k, m = 1, 2, 3, 4, 5, 6, -1
+            Av = StridedView(randn(T, d, d, d, d))
+            Bv = StridedView(randn(T, d, d, d, d))
+            Cv = StridedView(zeros(T, d, d, d, d, d, d))
+            plan = QuasiStrided.plan_contract(
+                Cv, Av, (i, j, m, b), Bv, (m, k, a, c), (a, b, c, i, j, k); oracle = false
+            )
+            @test mr(plan.kernel) == 16
+            @test plan.Astorage === parent(Bv)                       # swapped
+            # ao2mo_2: C = abrs, A = qb, B = aqrs
+            q, r, s = -1, 3, 4
+            A2 = StridedView(randn(T, d, d))
+            B2 = StridedView(randn(T, d, d, d, d))
+            C2 = StridedView(zeros(T, d, d, d, d))
+            plan2 = QuasiStrided.plan_contract(
+                C2, A2, (q, b), B2, (a, q, r, s), (a, b, r, s); oracle = false
+            )
+            @test mr(plan2.kernel) == 16
+            @test plan2.Astorage === parent(B2)
+            @test axis_length(plan2.mgroup) == d^3
+        end
+    end
 end
 
 

@@ -257,7 +257,7 @@ function _planned(
     # decision. The kernel itself is resolved by `_plan_with_kernel`, after
     # the orientation is fixed -- and resolved as a `(shape, method)` value,
     # not a kernel object, so no menu-wide Union is ever held in this frame.
-    mr_asis, mr_swapped = _candidate_mrs(T, kernel, Qm, Qn)
+    mr_asis, mr_swapped = _candidate_mrs(T, kernel, Qm, Qn, run_m, run_n)
 
     # The swap is for real element types only. Extending it to complex
     # kernels, which now also have a vectorized store, is a deliberately
@@ -291,12 +291,15 @@ end
 # `mr` of the kernel each orientation would run: the as-is one at `(Qm, Qn)`
 # and the swapped one at `(Qn, Qm)`. A caller-named kernel runs either way;
 # an automatic one is `_default_shape`'s pick, whose two candidates differ
-# only when the small-M demotion applies to one orientation. The swapped
-# candidate is resolved for a real `T` only, the only `T` that can swap.
-@inline _candidate_mrs(::Type{T}, kernel, Qm::Int, Qn::Int) where {T} = (mr(kernel), mr(kernel))
-@inline function _candidate_mrs(::Type{T}, ::Nothing, Qm::Int, Qn::Int) where {T}
-    mr_asis = _default_shape(T, Qm, Qn)[1][1]
-    mr_swapped = T <: Real ? _default_shape(T, Qn, Qm)[1][1] : mr_asis
+# when an extent demotion applies to one orientation or when the real `MV = 4`
+# tile steps down for one orientation's C run (`_store_shape`, keyed on that
+# orientation's own `run`). The swapped candidate is resolved for a real `T`
+# only, the only `T` that can swap.
+@inline _candidate_mrs(::Type{T}, kernel, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T} =
+    (mr(kernel), mr(kernel))
+@inline function _candidate_mrs(::Type{T}, ::Nothing, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T}
+    mr_asis = _default_shape(T, Qm, Qn, run_m)[1][1]
+    mr_swapped = T <: Real ? _default_shape(T, Qn, Qm, run_n)[1][1] : mr_asis
     return mr_asis, mr_swapped
 end
 
@@ -327,7 +330,7 @@ end
     _plan_contract(kernel, atransform, btransform, req, nothing)
 @inline function _plan_with_kernel(::Nothing, atransform, btransform, req::_PlanRequest{T}) where {T}
     Qm = axis_length(req.mgroup)
-    shape, method = _default_shape(T, Qm, axis_length(req.ngroup))
+    shape, method = _default_shape(T, Qm, axis_length(req.ngroup), req.run)
     shape = _demote_shape_for_run(T, shape, method, req.run, Qm, axis_length(req.kgroup))
     # Built from the menu (throwing for a shape outside it), so the callee is
     # only ever specialised on a menu shape.
