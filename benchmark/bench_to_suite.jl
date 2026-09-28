@@ -1,22 +1,15 @@
-# Head-to-head timing of StridedBLAS() and QuasiStridedBackend() on the
-# upstream TensorOperations.jl benchmark suite (TensorOperationsBenchmarks,
-# QuantumKitHub/TensorOperations.jl#303) -- its :contract and :network
-# categories.
-#
-# StridedNative() is not in BACKENDS: plot_bench_to_suite.jl does not plot it
-# (see that file's header), and on :network's trg topic it has a severe,
-# size-growing slowdown (42x StridedBLAS at chi=32, >100 s per call at 48) that
-# puts a ComplexF64 run at risk of exceeding the job's walltime. Upstream's
-# :permute/:trace categories are not run either: QuasiStridedBackend forwards
-# tensoradd!/tensortrace! to StridedNative (src/integrations/tensoroperations.jl),
-# so they would time the same code twice.
+# StridedBLAS() vs QuasiStridedBackend() on the upstream TensorOperations.jl
+# benchmark suite (TensorOperationsBenchmarks), :contract and :network
+# categories. :permute/:trace are not run: QuasiStridedBackend forwards
+# tensoradd!/tensortrace! to StridedNative, so they would time the same code
+# twice. StridedNative itself is left out: it is very slow on :network's trg.
 #
 #   julia --project=benchmark benchmark/bench_to_suite.jl [options]
 #
 # Options (all optional):
 #   --categories contract,network
-#   --sources synthetic,tccg,batched   # :contract subsets (upstream's params.source tag)
-#   --topics mps,ctmrg,trg             # :network subsets (upstream's params.topic tag)
+#   --sources synthetic,tccg,batched   # :contract subsets (upstream's params.source)
+#   --topics mps,ctmrg,trg             # :network subsets (upstream's params.topic)
 #   --dtypes Float64,Float32
 #   --synthetic-sizes 4,8,16,32,63     # leg dim of the synthetic contract shapes
 #   --tccg-sizes 8,16                  # leg dim applied to every TCCG index
@@ -31,30 +24,16 @@
 #   --max-flops 200000000000           # per-case skip ceiling
 #   --outdir <path>                    # default benchmark/results/<host>-<date>
 #
-# Upstream's generators share one `sizes` sweep across a category's sources
-# (:contract) or topics (:network); this driver calls each source/topic's own
-# generator with its own sweep instead, since a leg dim that is sensible for a
-# rank-4 synthetic shape is far too large for a rank-6 CCSD(T) equation, and
-# likewise for trg's chi^6 vs mps's D^3 cost. Each case keeps upstream's
-# category/id/params unchanged.
+# Each source/topic generator gets its own size sweep (upstream shares one per
+# category), since a leg dim sensible for a rank-4 synthetic shape is far too
+# large for a rank-6 CCSD(T) equation, and likewise trg's chi^6 vs mps's D^3.
+# :network cases run through `ncon`, which allocates its output, so their
+# timing includes that allocation (as upstream's does). Batched cases time
+# `batch` separate tensorcontract! calls (per-call overhead is the point).
 #
-# :network cases are multi-tensor `NetworkSpec`s run via `ncon` (no in-place
-# variant, so their timing includes output allocation -- upstream's own
-# accepted discipline, see TensorOperationsBenchmarks/src/lowering.jl).
-# `BatchedContractSpec` (source=batched) times `batch` separate
-# tensorcontract! calls, which is the point of that case (per-call overhead).
-#
-# Writes bench_to_suite.csv / canary_to_suite.csv / summary_to_suite.txt /
-# mismatches_to_suite.txt / PROVENANCE_to_suite.txt to the output directory.
-#
-# bench_to_suite.csv's `gflops` column is the median-time-based rate;
-# `min_gflops`/`std_gflops` are the min and standard deviation of the per-rep
-# GFLOP/s samples (computed directly on the per-rep throughput array so they
-# describe the distribution plot_bench_to_suite.jl's violin plots are built
-# from). `group` is the case's source (contract) or topic (network), `layout`
-# the synthetic label-order layout (empty otherwise), `blas` upstream's
-# `isblasequivalent`, `intensity` FLOP/byte at the run's dtype, and `expr` a
-# compact einsum-style expression (single letters, `A B>C`).
+# Writes bench_to_suite.csv (per-rep GF/s min/std next to the median-based
+# rate, for the plot's violins), canary_to_suite.csv, summary_to_suite.txt,
+# mismatches_to_suite.txt and PROVENANCE_to_suite.txt.
 
 using TensorOperations
 using TensorOperations: StridedBLAS
@@ -73,7 +52,7 @@ const TOB = TensorOperationsBenchmarks
 const REPS = argopt("reps", 21)
 const MIN_REPS = 5
 const TIME_BUDGET = parse(Float64, argopt("time-budget", "10"))
-const DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32"))
+const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32"))
 const CATEGORIES = Symbol.(split(argopt("categories", "contract"), ','))
 const SOURCES = Symbol.(split(argopt("sources", "synthetic,tccg,batched"), ','))
 const TOPICS = Symbol.(split(argopt("topics", "mps,ctmrg,trg"), ','))
@@ -91,10 +70,9 @@ const BACKENDS = (
     QuasiStrided = QuasiStridedBackend(),
 )
 
-# The per-source/per-topic generators are called directly, bypassing
-# `build_suite`/BenchmarkTools, for this project's own timing discipline.
-# These asserts pin the assumption that the registered categories are exactly
-# the union of those generators, so an upstream reshuffle fails loudly here.
+# The per-source/per-topic generators are called directly (bypassing
+# `build_suite`/BenchmarkTools); these asserts make an upstream reshuffle of
+# the categories fail loudly.
 @assert TOB.REGISTRY[:contract] === TOB._contract_cases
 @assert TOB.REGISTRY[:network] === TOB._network_cases
 let probe = (8,)
@@ -155,9 +133,7 @@ end
 params_string(params::NamedTuple) =
     join(("$k=$(getfield(params, k))" for k in keys(params)), ";")
 
-# :contract cases sweep a leg dimension `dim`; :network's mps sweeps bond dim
-# `D`, ctmrg/trg sweep `chi`. This picks whichever is present so the CSV can
-# report a single generic sweep-parameter column across all cases.
+# The sweep parameter: `dim` (:contract), `D` (mps) or `chi` (ctmrg/trg).
 function case_sweepparam(case::BenchmarkCase)
     p = case.params
     hasproperty(p, :dim) && return p.dim
@@ -173,9 +149,8 @@ case_group(case::BenchmarkCase) =
 case_layout(case::BenchmarkCase) =
     hasproperty(case.params, :layout) ? case.params.layout : Symbol("")
 
-# Compact einsum-style label: every distinct label gets one letter in order of
-# first appearance, e.g. synthetic `[a1,c1,a2,c2]*[c1,c2,b1]` -> "acbd cde>abe".
-# Space/`>` separators keep the CSV comma-free.
+# Compact einsum-style label, one letter per distinct label in order of first
+# appearance: `[a1,c1,a2,c2]*[c1,c2,b1]` -> "acbd cde>abe" (comma-free for the CSV).
 function _compact(labelsets)
     letters = Dict{Any, Char}()
     next = Ref('a')
@@ -227,8 +202,7 @@ end
 alloc_output(spec::ContractSpec, ctx, ::Type{T}) where {T} = zeros(T, ctx.dimsC)
 alloc_output(spec::BatchedContractSpec, ctx, ::Type{T}) where {T} =
     [zeros(T, ctx.dimsC) for _ in 1:spec.batch]
-# `ncon` has no in-place variant -- it allocates its own output every call;
-# this placeholder is ignored by `run_case!` below.
+# `ncon` allocates its own output.
 alloc_output(::NetworkSpec, ctx, ::Type{T}) where {T} = nothing
 
 function run_case!(backend, spec::ContractSpec, ctx, C)
@@ -255,13 +229,11 @@ function run_case!(backend, spec::NetworkSpec, ctx, C)
     )
 end
 
-# A batched case's result is a vector of per-slice outputs; compare/normalize
-# it as one flat vector.
+# A batched case's result is a vector of per-slice outputs; compare it flat.
 _flat(x::AbstractArray{<:Number}) = vec(x)
 _flat(xs::AbstractVector{<:AbstractArray}) = reduce(vcat, map(vec, xs))
 
-const OUTDIR = something(argval("outdir"), results_dir())
-mkpath(OUTDIR)
+const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "bench_to_suite.csv")
 const CANARY_PATH = joinpath(OUTDIR, "canary_to_suite.csv")
 const SUMMARY_PATH = joinpath(OUTDIR, "summary_to_suite.txt")
@@ -286,11 +258,8 @@ function log_row(backend_name, T, case::BenchmarkCase, reps, t, gf, gb, min_gf, 
     return flush(csv_io)
 end
 
-# Per-rep timing samples (not just the median) -- same warm-up-then-timed
-# discipline as harness.jl's `median_time_s`, but returns every sample so the
-# caller can compute min/std of the derived throughput, not just its median.
-# The warm-up call's time sets the rep count: up to `reps`, cut so the timed
-# loop fits in `budget` seconds, but never below `minreps`.
+# Like `median_time_s`, but returns every sample. The warm-up call's time sets
+# the rep count: up to `reps`, cut to fit `budget` seconds, at least `minreps`.
 function timed_samples_s(f!::Function; reps::Int, budget::Float64 = Inf, minreps::Int = 1)
     t0 = time_ns()
     f!()  # warm-up, discarded
@@ -309,14 +278,13 @@ end
 print_env_header(stdout, "bench_to_suite.jl")
 println("cases = ", length(CASES), " per dtype (before per-dtype byte skips)")
 
-# Canary: StridedBLAS, 64^3 Float64 matmul-shaped @tensor, 15 reps, at
-# start/middle/end -- drift detection (thermal throttling, background load).
+# Drift canary: a 64^3 Float64 StridedBLAS @tensor at start/middle/end.
 function canary_contract!(backend, C, A, B)
     @tensor backend = backend C[i, j] = A[i, k] * B[k, j]
     return C
 end
 
-function run_canary(rng, label::String)
+function run_blas_canary(rng, label::String)
     A = randn(rng, Float64, 64, 64)
     B = randn(rng, Float64, 64, 64)
     C = zeros(Float64, 64, 64)
@@ -327,17 +295,17 @@ end
 
 canary_rng = MersenneTwister(0xB3_C4_0003)
 canary_results = Float64[]
-push!(canary_results, run_canary(canary_rng, "A (start)"))
+push!(canary_results, run_blas_canary(canary_rng, "A (start)"))
 
 raw = Vector{NamedTuple}()          # successful timings
 mismatches = Vector{NamedTuple}()   # QuasiStrided result != StridedBLAS result
 failures = Vector{NamedTuple}()     # a backend threw
-skipped = Vector{NamedTuple}()      # over --max-bytes
+skipped = Vector{NamedTuple}()      # over --max-bytes/--max-flops
 
-const MIDPOINT = cld(length(CASES) * length(DTYPES), 2)
+const MIDPOINT = cld(length(CASES) * length(RUN_DTYPES), 2)
 progress = 0
 
-for T in DTYPES
+for T in RUN_DTYPES
     provider = ArrayProvider{T}()
     rtol = T === Float64 ? 1.0e-10 : 1.0e-5
     for case in CASES
@@ -420,13 +388,13 @@ for T in DTYPES
         end
 
         if progress == MIDPOINT
-            push!(canary_results, run_canary(canary_rng, "B (middle)"))
+            push!(canary_results, run_blas_canary(canary_rng, "B (middle)"))
         end
     end
     @info "dtype done" dtype = T rows = length(raw)
 end
 
-push!(canary_results, run_canary(canary_rng, "A' (end)"))
+push!(canary_results, run_blas_canary(canary_rng, "A' (end)"))
 close(csv_io)
 
 canary_spread = relative_spread(canary_results)
@@ -497,7 +465,7 @@ open(SUMMARY_PATH, "w") do io
     end
 
     println(io, "\n===== geomean QS/BLAS time ratio (> 1 = QuasiStrided slower) =====")
-    for T in DTYPES
+    for T in RUN_DTYPES
         println(io, "\n", T, ":")
         rT = filter(r -> r.dtype == T, RATIOS)
         for cat in unique(r.category for r in rT), g in unique(r.group for r in rT if r.category == cat)
@@ -514,7 +482,7 @@ open(SUMMARY_PATH, "w") do io
         end
     end
 
-    for T in DTYPES
+    for T in RUN_DTYPES
         rT = sort(filter(r -> r.dtype == T, RATIOS); by = r -> -r.ratio)
         println(io, "\n===== ", T, ": ", min(TOP_SLOWEST, length(rT)), " slowest cases for QuasiStrided =====")
         println(io, "  ratio   QS GF/s  BLAS GF/s   QS time     group/layout            case  [expr]")
@@ -528,7 +496,7 @@ open(SUMMARY_PATH, "w") do io
     end
 
     println(io, "\n===== per-case detail =====")
-    for T in DTYPES, r in sort(filter(r -> r.dtype == T, RATIOS); by = r -> (string(r.group), r.id))
+    for T in RUN_DTYPES, r in sort(filter(r -> r.dtype == T, RATIOS); by = r -> (string(r.group), r.id))
         println(
             io, "  ", rpad(string(T), 11), rpad("$(r.category)/$(r.id)", 52),
             @sprintf("QS %.4e s  BLAS %.4e s  QS/BLAS %.3f", r.t_qs, r.t_blas, r.ratio)
@@ -574,8 +542,6 @@ open(MISMATCH_PATH, "w") do io
 end
 println(read(MISMATCH_PATH, String))
 
-commit = git_commit()
-
 to_version, tob_rev = try
     deps = Pkg.dependencies()
     tov = tobr = "unknown"
@@ -606,7 +572,6 @@ catch
 end
 
 open(PROVENANCE_PATH, "w") do io
-    println(io, "git_commit = ", commit)
     println(io, "command = julia --project=benchmark benchmark/bench_to_suite.jl ", join(ARGS, " "))
     print_env_header(io, "bench_to_suite.jl")
     println(io, "logical_cpus = ", Sys.CPU_THREADS)
@@ -614,7 +579,7 @@ open(PROVENANCE_PATH, "w") do io
     println(io, "TensorOperations = ", to_version)
     println(io, "TensorOperationsBenchmarks = ", tob_rev)
     println(io, "backends = ", collect(keys(BACKENDS)), " (QuasiStrided = QuasiStridedBackend() directly)")
-    println(io, "dtypes = ", collect(DTYPES))
+    println(io, "dtypes = ", collect(RUN_DTYPES))
     println(io, "reps <= ", REPS, " (median, one discarded warm-up, time budget ", TIME_BUDGET, " s, min ", MIN_REPS, ")")
     println(io, "max_bytes = ", MAX_CASE_BYTES, "  max_flops = ", MAX_CASE_FLOPS)
     println(io, "categories = ", CATEGORIES)

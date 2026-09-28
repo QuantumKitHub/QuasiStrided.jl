@@ -1,5 +1,5 @@
 # A/B of the three automatically selected small/degenerate-shape paths against
-# the five-loop nest on the same tree, via their mode overrides:
+# the five-loop nest, via their mode overrides:
 #
 #   outer      K = 1 outer product      C[a,b] = A[a] B[b]           _OUTER_MODE
 #   dot        M = 1 gemv               C[cde] = A[ab] B[abcde]      _DOT_MODE
@@ -7,22 +7,14 @@
 #
 # `execute!` only (planning excluded), plus OpenBLAS `mul!` on the equivalent
 # dense matrices for scale. Modes are interleaved rep by rep; each rep times a
-# batch of calls sized to ~200 us. Prints median ns per call and the
-# [25%, 75%] spread.
+# batch of calls sized to ~200 us. Prints median ns per call and [q25, q75].
 #
-#   JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 taskset -c 8 \
-#       julia --project=benchmark benchmark/bench_degenerate.jl [reps]
+#   julia --project=benchmark benchmark/bench_degenerate.jl [--reps 31]
 
-using QuasiStrided
-using QuasiStrided: plan_contract, execute!
-using StridedViews: StridedView
-using LinearAlgebra
-using Statistics: median, quantile
-using Random
-using Printf
+include(joinpath(@__DIR__, "harness.jl"))
+using Statistics: quantile
 
-LinearAlgebra.BLAS.set_num_threads(1)
-const REPS = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 31
+const REPS = argopt("reps", 31)
 
 function batchsize(f!)
     f!()
@@ -59,13 +51,13 @@ function row(name, ref, plan, blasf)
     ex = () -> execute!(plan, 1.0, 0.0)
     r = interleaved(Any[withmode(ex, ref, :never), withmode(ex, ref, :auto), blasf])
     @printf(
-        "%-28s nest %s  new %s  blas %s  new/nest %.2f  new/blas %.2f\n",
+        "%-28s nest %s  path %s  blas %s  path/nest %.2f  path/blas %.2f\n",
         name, fmt(r[1]), fmt(r[2]), fmt(r[3]), r[2][1] / r[1][1], r[2][1] / r[3][1]
     )
     return flush(stdout)
 end
 
-println("# ns per call: median [q25, q75], $REPS interleaved reps; host $(gethostname())")
+println("# ns per call: median [q25, q75], $REPS interleaved reps")
 for T in (Float64, ComplexF64)
     println("## $T")
     for d in (16, 63, 128)
