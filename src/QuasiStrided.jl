@@ -3,19 +3,13 @@ module QuasiStrided
 using LinearAlgebra
 using StridedViews: StridedView, offset
 
-# Module-import convention, not to be changed: TensorOperations names are
-# always qualified; a bare `using TensorOperations` would collide on
-# `scalartype`.
+# TensorOperations names are always qualified: a bare `using` collides on `scalartype`.
 import TensorOperations as TO
 
-# A contraction C[indC] = alpha * A[indA] * B[indB] + beta * C runs through the
-# stages below, in order. `plan_contract` resolves labels into M/N/K axis
-# groups, picks a microkernel and cache blocking, and sizes a workspace;
-# `execute!` runs a BLIS five-loop nest that packs A/B slivers into panels and
-# drives the microkernel over register tiles of C.
-#
-# Include order follows type dependencies, which mostly coincide with the
-# stage order; the exceptions are noted inline.
+# `plan_contract` resolves labels into M/N/K axis groups, picks a microkernel,
+# cache blocking and workspace; `execute!` runs a BLIS five-loop nest that packs
+# A/B into panels and drives the microkernel over register tiles of C. Files are
+# included in type-dependency order.
 
 # --- Hardware: ISA and cache detection ---
 include("hardware/target.jl")
@@ -44,18 +38,13 @@ include("planning/labels.jl")
 include("planning/conjugation.jl")
 include("planning/kernel_selection.jl")
 include("planning/blocking.jl")
-# The per-(profile, eltype) cache the two files above feed; it needs `Blocking`.
 include("planning/defaults.jl")
-# `ContractPlan` holds a `ContractWorkspace`, so the workspace comes first.
 include("execution/workspace.jl")
-# The dispatch barriers' slots and path markers, used by the plan and `execute!`.
 include("execution/barrier.jl")
 include("planning/plan.jl")
 
-# --- Execution: the five-loop nest, the tile-by-tile oracle, the opt-in
-# unpacked direct path for small contractions, the opt-in half-packed
-# path (B packed, one-tile A read in place), and the automatically selected
-# unpacked-B path (A packed, B read in place) ---
+# --- Execution: the five-loop nest, the tile-by-tile oracle and the
+# specialised paths ---
 include("execution/macrokernel.jl")
 include("execution/execute.jl")
 include("execution/oracle.jl")
@@ -68,9 +57,8 @@ include("integrations/tensoroperations.jl")
 
 export QuasiStridedBackend
 
-# Hardware detection runs once per process, never at precompile time: a .ji
-# cached on one node class of a shared depot must not carry another node's
-# feature set (src/hardware/target.jl).
+# Detect the hardware per process, not at precompile time: a cached .ji may be
+# loaded on a different CPU.
 function __init__()
     _init_target!()
     return nothing
@@ -81,14 +69,7 @@ end
         Expr(
             :public, :contract!, :plan_contract, :execute!, :ContractPlan,
             :ContractWorkspace, :Blocking, :default_blocking,
-            :ScalarKernel, :SIMDKernel,
-            # `PlanarKernel` is the default for a complex
-            # element type, and `OneMKernel` is reachable ONLY by naming it in
-            # `plan_contract(...; kernel = ...)` -- the engine never picks it,
-            # deliberately. A selection mechanism whose only handle is an
-            # internal name is not a selection mechanism, so both belong in
-            # this tier alongside `ScalarKernel`/`SIMDKernel`.
-            :PlanarKernel, :OneMKernel, :FMAddSubKernel,
+            :ScalarKernel, :SIMDKernel, :PlanarKernel, :OneMKernel, :FMAddSubKernel,
             :target_profile, :cache_topology,
             :TargetProfile, :CacheLevel
         )
