@@ -1,51 +1,11 @@
-# Integration gate: plan_contract/execute! accept SIMDKernel as a drop-in
-# swap for ScalarKernel, agreeing numerically through the real driver.
-
-using StridedViews: StridedView
-
-@testset "driver integration: ScalarKernel -> SIMDKernel swap" begin
+@testset "driver: ScalarKernel and SIMDKernel agree through execute!" begin
     rng = MersenneTwister(20260908)
-    Amat = rand(rng, 11, 13)
-    Bmat = rand(rng, 13, 9)
-    ref = Amat * Bmat
-
-    A = StridedView(Amat)
-    B = StridedView(Bmat)
-
-    Cscalar = zeros(11, 9)
-    plan_s = plan_contract(
-        StridedView(Cscalar), A, (1, 2), B, (2, 3), (1, 3);
-        kernel = ScalarKernel(Val(8), Val(6), Float64), kc = 5
-    )
-    execute!(plan_s, 1.0, 0.0)
-
-    Csimd = zeros(11, 9)
-    plan_v = plan_contract(
-        StridedView(Csimd), A, (1, 2), B, (2, 3), (1, 3);
-        kernel = SIMDKernel(Val(8), Val(6), Float64), kc = 5
-    )
-    execute!(plan_v, 1.0, 0.0)
-
-    @test isapprox(Cscalar, ref)
-    @test isapprox(Csimd, ref)
-    @test isapprox(Cscalar, Csimd; atol = 1.0e-10)
-
-    # Reused plan, nontrivial alpha/beta, second execute! call (workspace
-    # reuse across calls with a different kernel instance).
-    Cstart = rand(rng, 11, 9)
-    Cscalar2 = copy(Cstart)
-    Csimd2 = copy(Cstart)
-    plan_s2 = plan_contract(
-        StridedView(Cscalar2), A, (1, 2), B, (2, 3), (1, 3);
-        kernel = ScalarKernel(Val(4), Val(3), Float64), kc = 4
-    )
-    plan_v2 = plan_contract(
-        StridedView(Csimd2), A, (1, 2), B, (2, 3), (1, 3);
-        kernel = SIMDKernel(Val(4), Val(3), Float64), kc = 4
-    )
-    execute!(plan_s2, 2.5, 0.75)
-    execute!(plan_v2, 2.5, 0.75)
-    expected = 2.5 .* ref .+ 0.75 .* Cstart
-    @test isapprox(Cscalar2, expected)
-    @test isapprox(Csimd2, expected; atol = 1.0e-8)
+    Amat, Bmat, Cstart = rand(rng, 11, 13), rand(rng, 13, 9), rand(rng, 11, 9)
+    for (m, n, kc) in ((Val(8), Val(6), 5), (Val(4), Val(3), 4))
+        Cs, Cv = copy(Cstart), copy(Cstart)
+        execute!(_mm_plan(Cs, Amat, Bmat; kernel = ScalarKernel(m, n, Float64), kc = kc), 2.5, 0.75)
+        execute!(_mm_plan(Cv, Amat, Bmat; kernel = SIMDKernel(m, n, Float64), kc = kc), 2.5, 0.75)
+        @test Cs ≈ 2.5 .* (Amat * Bmat) .+ 0.75 .* Cstart
+        @test isapprox(Cs, Cv; atol = 1.0e-10)
+    end
 end
