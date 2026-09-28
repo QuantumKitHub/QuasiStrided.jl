@@ -57,16 +57,18 @@ end
 # outer-product path, else the nest (B packed or read in place).
 @inline _select_path(plan::ContractPlan{T}) where {T} = _select_path(
     T, _unpacked_b_kernel_eligible(plan.kernel),
-    plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan
+    plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan,
+    _is_split(plan.mpack), _is_split(plan.npack)
 )
 
 # On the plan's parts, so `plan_contract` can predict the path before the
 # plan exists (`_path_hint`). `unpack_ok`: the kernel admits unpacked B.
 # `capacity`: the plan whose workspace must hold the dot path's vector, or
-# `nothing` to assume it does.
+# `nothing` to assume it does. `split_a`/`split_b`: the plan packs A/B line by line.
 @inline function _select_path(
         ::Type{T}, unpack_ok::Bool, Astorage, Bstorage, Cstorage,
-        mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity
+        mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity,
+        split_a::Bool = false, split_b::Bool = false
     ) where {T}
     Qm = axis_length(mgroup)
     Qn = axis_length(ngroup)
@@ -78,7 +80,9 @@ end
     end
     Qk == 1 && _outer_applicable(T, Astorage, Cstorage, mgroup, Qm) &&
         return _lane_path(_OuterPath, _dot_lanewidth(T))
-    return _nest_path(unpack_ok && _unpacked_b_rule(mgroup, kgroup), mgroup, ngroup, kgroup)
+    return _nest_path(
+        unpack_ok && _unpacked_b_rule(mgroup, kgroup), mgroup, ngroup, kgroup, split_a, split_b
+    )
 end
 
 # Run `path` behind a dynamic call. The plan crosses in the workspace slot
@@ -104,12 +108,12 @@ end
 @inline _strip_storage(p::ContractPlan) = ContractPlan(
     p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
     nothing, p.Abase, nothing, p.Bbase, nothing, p.Cbase,
-    p.atransform, p.btransform, p.workspace
+    p.atransform, p.btransform, p.workspace, p.mpack, p.npack
 )
 @inline _with_storage(p::ContractPlan, Astorage, Bstorage, Cstorage) = ContractPlan(
     p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
     Astorage, p.Abase, Bstorage, p.Bbase, Cstorage, p.Cbase,
-    p.atransform, p.btransform, p.workspace
+    p.atransform, p.btransform, p.workspace, p.mpack, p.npack
 )
 
 # The continuation the TensorOperations adapter hands `_planned`: `execute!`
@@ -135,16 +139,25 @@ end
 
 # Runs the predicted path statically when it provably equals the plan's own
 # `_select_path` (always, for an automatically chosen kernel); otherwise
-# falls back to `execute!`'s barrier.
+# falls back to `execute!`'s barrier. The prediction assumes no split, so a
+# split plan crosses the barrier to its own nest path.
 @inline function _execute_hinted!(plan::ContractPlan{T}, alphaT::T, betaT::T, hint) where {T}
     _execute_short_circuit!(plan, alphaT, betaT) && return nothing
-    if _hint_holds(plan, hint)
-        _execute_path!(plan, alphaT, betaT, hint)
-    else
+    if !_hint_holds(plan, hint)
         _execute_across_barrier!(plan, alphaT, betaT, _select_path(plan))
+    elseif _splits(plan, hint)
+        _execute_across_barrier!(plan, alphaT, betaT, _split_path(plan, hint))
+    else
+        _execute_path!(plan, alphaT, betaT, hint)
     end
     return nothing
 end
+
+@inline _splits(plan::ContractPlan, hint) = false
+@inline _splits(plan::ContractPlan, ::_NestPath) = _is_split(plan.mpack) || _is_split(plan.npack)
+@inline _split_path(plan::ContractPlan, ::_NestPath{U}) where {U} = _nest_path(
+    U, plan.mgroup, plan.ngroup, plan.kgroup, _is_split(plan.mpack), _is_split(plan.npack)
+)
 
 # The prediction differs from `_select_path(plan)` in two inputs only: the
 # kernel's unpacked-B eligibility (predicted from its method; folds) and the
@@ -182,8 +195,8 @@ end
 function _execute_nest!(
         plan::ContractPlan{T}, ws, kernel::K, MRk::Int, NRk::Int,
         Qm::Int, Qn::Int, Qk::Int, mc_eff::Int, kc_eff::Int, nc_eff::Int,
-        alphaT::T, betaT::T, ::_NestPath{UNPACKED_B, AFF}
-    ) where {T, K, UNPACKED_B, AFF}
+        alphaT::T, betaT::T, ::_NestPath{UNPACKED_B, AFF, SPLIT}
+    ) where {T, K, UNPACKED_B, AFF, SPLIT}
     # GUARDRAIL: reals per sliver per K step address the packed panels;
     # `MRk`/`NRk` count register-tile rows. They differ for complex kernels.
     MRp = packed_a_per_k(kernel)
@@ -192,9 +205,16 @@ function _execute_nest!(
     atransform = plan.atransform
     btransform = plan.btransform
 
-    # Ramp composites get closed-form block descriptors, no offset buffers.
-    (m_ramp, m_step) = affine_ramp(plan.mgroup)
-    (n_ramp, n_step) = affine_ramp(plan.ngroup)
+    split_a, split_b = SPLIT
+    mgroup = split_a ? _split_group(plan.mgroup, plan.mpack) : plan.mgroup
+    ngroup = split_b ? _split_group(plan.ngroup, plan.npack) : plan.ngroup
+
+    # Ramp composites get closed-form block descriptors, no offset buffers; the
+    # block pack reads the offsets.
+    (m_ramp, m_step) = affine_ramp(mgroup)
+    (n_ramp, n_step) = affine_ramp(ngroup)
+    m_ramp &= !split_a
+    n_ramp &= !split_b
     (k_ramp, k_step) = affine_ramp(plan.kgroup)
 
     lenA = length(plan.Astorage)
@@ -214,7 +234,7 @@ function _execute_nest!(
                 nblock, NRk, n_slivers
             )
         else
-            fill_offsets!((ws.n_buf_B, ws.n_buf_C), plan.ngroup, jc, nblock)
+            fill_offsets!((ws.n_buf_B, ws.n_buf_C), ngroup, jc, nblock)
             _classify_slivers!(
                 ws.n_desc_B, ws.n_desc_C, ws.n_buf_B, ws.n_buf_C,
                 nblock, NRk, n_slivers
@@ -253,7 +273,14 @@ function _execute_nest!(
 
             beta_eff = firstpanel ? betaT : one(T)
 
-            if !UNPACKED_B
+            if split_b
+                _pack_block_transposed!(
+                    packed_b_plane_offset, b_format(kernel),
+                    packed_panel(ws.packed_b, 1, NRp * kblock * n_slivers), kernel, Val(nr(kernel)), NRp,
+                    plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, nblock, kblock,
+                    plan.npack
+                )
+            elseif !UNPACKED_B
                 for s in 0:(n_slivers - 1)
                     sfirst = s * NRk
                     colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst, aff_nB)
@@ -276,7 +303,7 @@ function _execute_nest!(
                         mblock, MRk, m_slivers
                     )
                 else
-                    fill_offsets!((ws.m_buf_A, ws.m_buf_C), plan.mgroup, ic, mblock)
+                    fill_offsets!((ws.m_buf_A, ws.m_buf_C), mgroup, ic, mblock)
                     _classify_slivers!(
                         ws.m_desc_A, ws.m_desc_C, ws.m_buf_A, ws.m_buf_C,
                         mblock, MRk, m_slivers
@@ -286,14 +313,23 @@ function _execute_nest!(
                 checked_span_bounds(plan.Abase, rng_mA, rng_kA, lenA)
                 checked_span_bounds(plan.Cbase, rng_mC, rng_nC, lenC)
 
-                for r in 0:(m_slivers - 1)
-                    rfirst = r * MRk
-                    rowsA = _axis_of(ws.m_desc_A[r + 1], ws.m_buf_A, rfirst, aff_mA)
-                    apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
-                    _pack_sliver!(
-                        unsafe_pack_a!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
-                        kernel, atransform
+                if split_a
+                    _pack_block_transposed!(
+                        packed_a_plane_offset, a_format(kernel),
+                        packed_panel(ws.packed_a, 1, MRp * kblock * m_slivers), kernel, Val(mr(kernel)), MRp,
+                        plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, mblock, kblock,
+                        plan.mpack
                     )
+                else
+                    for r in 0:(m_slivers - 1)
+                        rfirst = r * MRk
+                        rowsA = _axis_of(ws.m_desc_A[r + 1], ws.m_buf_A, rfirst, aff_mA)
+                        apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
+                        _pack_sliver!(
+                            unsafe_pack_a!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
+                            kernel, atransform
+                        )
+                    end
                 end
 
                 # --- loop 2: jr over N-slivers; loop 1: ir over M-slivers ---
