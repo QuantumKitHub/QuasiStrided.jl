@@ -38,10 +38,8 @@ function zero_accumulator(kernel::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W}
     return ntuple(_ -> z, Val((MR ÷ W) * NR))
 end
 
-# Where the K step reads A row `i` / B column `j`. Dispatch on the operand type
-# lets `UnpackedAView`/`UnpackedBView` (src/execution/) read in place, at
-# compile time; for packed panels these are the packed formulas.
-@inline _a_step_offset(::PA, kernel, i::Int, p::Int) where {PA} = packed_a_offset(kernel, i, p)
+# B column `j` at K step `p`; `UnpackedBView` (src/execution/unpackedb.jl)
+# overrides it to read B in place, resolved at compile time.
 @inline _b_step_load(packed_b::PB, kernel, j::Int, p::Int) where {PB} =
     panel_load(packed_b, packed_b_offset(kernel, j, p))
 
@@ -56,7 +54,7 @@ end
     bvars = [Symbol(:b, j) for j in 0:(NR - 1)]
 
     load_a = [
-        :($(avars[v + 1]) = panel_vload(Vec{$W, $T}, packed_a, _a_step_offset(packed_a, kernel, $(v * W), p)))
+        :($(avars[v + 1]) = panel_vload(Vec{$W, $T}, packed_a, packed_a_offset(kernel, $(v * W), p)))
             for v in 0:(NVECA - 1)
     ]
     load_b = [
