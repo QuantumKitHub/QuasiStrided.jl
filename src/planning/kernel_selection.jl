@@ -476,10 +476,10 @@ actually run. Always a member of `kernel_shapes(T, method)`.
 
 Why: a sliver that is not unit-stride in C takes the scattered store, whose
 cost per tile is fixed while the kernel's work per tile grows with `Qk`, and
-the `MV = 4` tile's 1.2x kernel rate does not pay for it at any `Qk` the
-measurement below reached. Measured 2026-09-28, ccqlin038 (Cascade Lake),
-Julia 1.12.7, `benchmark/probes/probe_mv4_store_sweep.jl` (named kernels, no
-swap, no run demotion; Qm = 1920, Qn = 480; C = [a, n, b] so `run` = extent of
+the `MV = 4` tile's 1.2x kernel rate does not pay for it below `Qk` ~ 200. The
+measurement: 2026-09-28, ccqlin038 (Cascade Lake), Julia 1.12.7,
+`benchmark/probes/probe_mv4_store_sweep.jl` (named kernels, no swap, no run
+demotion; Qm = 1920-2048, Qn = 480-512; C = [a, n, b] so `run` = extent of
 `a`), GF/s ratio `MV = 4` / `MV = 2`:
 
     Float64 (16 vs 32 rows)   Qk:  16    32    64   128   256   512  1024
