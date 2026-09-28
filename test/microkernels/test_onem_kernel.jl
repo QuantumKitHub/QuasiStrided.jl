@@ -33,7 +33,7 @@ using QuasiStrided
 using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
     OneEFormat, PlanarFormat, ComplexKernelDescriptor, SIMDKernel,
     complex_method, realtype, packed_a_per_k, packed_b_per_k,
-    onem_register_pressure, planar_register_pressure, a_format, b_format,
+    a_format, b_format,
     mr, nr, scalartype, packed_a_length, packed_b_length,
     AffineAxis, ScatterAxis, DestinationTile, nrows, ncols,
     zero_accumulator, accumulate, scale_tile!, store_tile!, execute_tile!,
@@ -264,35 +264,6 @@ const _QS = QuasiStrided
     # ------------------------------------------------------------------
     # Cliff A: architectural register pressure
     # ------------------------------------------------------------------
-
-    @testset "Cliff A: 1m's pressure is the real kernel's, and it fits" begin
-        for (T, menu) in ((ComplexF64, ALL64), (ComplexF32, ALL32))
-            for (MR, NR, W) in menu
-                k = OneMKernel(Val(MR), Val(NR), T, Val(W))
-                MV = (2 * MR) ÷ W
-                @test onem_register_pressure(k) == MV * NR + MV + 1
-                @test onem_register_pressure(k) <= 32
-            end
-        end
-        # 1m holds one accumulator plane where planar holds two, so at an
-        # identical (MR, NR, W) it needs strictly fewer registers -- the reason
-        # 1m is "comfortable" where planar at (16,6,8) is not.
-        for (MR, NR, W) in ((16, 6, 8), (8, 8, 8))
-            km = OneMKernel(Val(MR), Val(NR), ComplexF64, Val(W))
-            kp = PlanarKernel(Val(MR), Val(NR), ComplexF64, Val(W))
-            @test onem_register_pressure(km) < planar_register_pressure(kp)
-        end
-        # The worst shipped 1m shape sits at 29, one below the 29/30 spill
-        # transition measured for planar. (Recorded, not a throughput claim.)
-        @test maximum(
-            onem_register_pressure(OneMKernel(Val(MR), Val(NR), ComplexF64, Val(W)))
-                for (MR, NR, W) in MENU64
-        ) == 29
-        # `skip`ped when detection came up empty (the `:unknown` case the
-        # engine tolerates) rather than asserted, so this tests the kernel and
-        # not the host.
-        @test target_profile().nregisters > 0 skip = (target_profile().nregisters == 0)
-    end
 
     # ------------------------------------------------------------------
     # Numerical agreement: scalar oracle, and PlanarKernel

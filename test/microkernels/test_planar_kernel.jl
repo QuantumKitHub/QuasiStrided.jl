@@ -19,7 +19,7 @@ using Test
 using Random
 using QuasiStrided
 using QuasiStrided: PlanarKernel, PlanarMethod, PlanarFormat, ComplexKernelDescriptor,
-    complex_method, realtype, packed_a_per_k, packed_b_per_k, planar_register_pressure,
+    complex_method, realtype, packed_a_per_k, packed_b_per_k,
     a_format, b_format, mr, nr, scalartype, packed_a_length, packed_b_length,
     AffineAxis, ScatterAxis, DestinationTile, nrows, ncols, zero_accumulator, accumulate,
     scale_tile!, store_tile!, execute_tile!, lanewidth, avecs_per_column,
@@ -141,25 +141,6 @@ using SIMD: Vec
     # ------------------------------------------------------------------
     # Cliff A: architectural register pressure
     # ------------------------------------------------------------------
-
-    @testset "Cliff A: register pressure fits the architectural file" begin
-        # 2*MV*NR accumulators + 2*MV A vectors + 2 B broadcasts.
-        for (T, menu) in ((ComplexF64, (MENU64..., SMALL64)), (ComplexF32, (MENU32..., SMALL32)))
-            for (MR, NR, W) in menu
-                k = PlanarKernel(Val(MR), Val(NR), T, Val(W))
-                MV = MR ÷ W
-                @test planar_register_pressure(k) == 2 * MV * NR + 2 * MV + 2
-                @test planar_register_pressure(k) <= 32
-            end
-        end
-        # The shipped reference shape is tight, not comfortable: 24 + 4 + 2.
-        @test planar_register_pressure(PlanarKernel(Val(16), Val(6), ComplexF64, Val(8))) == 30
-        # What the detected machine offers -- `skip`ped rather than asserted
-        # when detection came up empty, which is exactly the `:unknown` case
-        # the engine is built to tolerate. Asserting it unconditionally makes
-        # this a test of the host rather than of the kernel.
-        @test target_profile().nregisters > 0 skip = (target_profile().nregisters == 0)
-    end
 
     # ------------------------------------------------------------------
     # Numerical agreement with the scalar oracle

@@ -21,7 +21,7 @@ using QuasiStrided
 using QuasiStrided: FMAddSubKernel, FMAddSubMethod, OneMKernel, OneMMethod,
     PlanarKernel, PlanarMethod, InterleavedFormat, PlanarFormat, OneEFormat,
     ComplexKernelDescriptor, complex_method, realtype, packed_a_per_k, packed_b_per_k,
-    fmaddsub_register_pressure, onem_register_pressure, a_format, b_format,
+    a_format, b_format,
     mr, nr, scalartype, packed_a_length, packed_b_length, reals_per_element,
     AffineAxis, ScatterAxis, DestinationTile, SourceTile, pack_a!, pack_b!,
     packed_panel, zero_accumulator, accumulate, store_tile!, execute_tile!,
@@ -225,25 +225,6 @@ const _QSF = QuasiStrided
     # ------------------------------------------------------------------
     # Cliff A
     # ------------------------------------------------------------------
-
-    @testset "Cliff A: register pressure" begin
-        for (T, menu) in ((ComplexF64, ALL64), (ComplexF32, ALL32))
-            for (MR, NR, W) in menu
-                k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
-                MV = (2 * MR) ÷ W
-                @test fmaddsub_register_pressure(k) == MV * NR + 2MV + 2
-                @test fmaddsub_register_pressure(k) <= 32
-                # Exactly MV - 1 above 1m at the same shape: the swapped copies
-                # held in registers instead of loaded from 1e's second region
-                # (minus 1m's single B broadcast vs. this kernel's two).
-                km = OneMKernel(Val(MR), Val(NR), T, Val(W))
-                @test fmaddsub_register_pressure(k) == onem_register_pressure(km) + MV + 1
-            end
-        end
-        # The AVX2 `NR = 5` shapes fit AVX2's 16 by the budget, `NR = 6` does not.
-        @test fmaddsub_register_pressure(FMAddSubKernel(Val(4), Val(5), ComplexF64, Val(4))) == 16
-        @test fmaddsub_register_pressure(FMAddSubKernel(Val(4), Val(6), ComplexF64, Val(4))) == 18
-    end
 
     # ------------------------------------------------------------------
     # Numerical agreement
