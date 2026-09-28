@@ -141,9 +141,15 @@ end
         C, _ = _run_fresh(execute!, _mm_maker(Float64, M, 4, N, 3; Cfill = NaN), 1.0, 2.0)
         @test size(C) == (M, N)
     end
-    # Singleton extents.
-    C, _ = _run_fresh(execute!, _mm_maker(Float64, 1, 1, 1, 5), 1.5, 0.5)
-    @test C ≈ _ref_of(_mm_maker(Float64, 1, 1, 1, 5), 1.5, 0.5)
+    # Singleton extents, and two K labels against a singleton free label.
+    mk2K = () -> (
+        StridedView(zeros(5, 1)), StridedView(randn(MersenneTwister(6), 5, 3, 4)), (1, 2, 3),
+        StridedView(randn(MersenneTwister(7), 4, 3, 1)), (3, 2, 4), (1, 4),
+    )
+    for mk in (_mm_maker(Float64, 1, 1, 1, 5), mk2K)
+        C, _ = _run_fresh(execute!, mk, 1.5, 0.5)
+        @test C ≈ _ref_of(mk, 1.5, 0.5)
+    end
     # Block sizes beyond the extents are clamped, not an error.
     C, _ = _run_fresh(execute!, _mm_maker(Float64, 9, 7, 6, 4), 1.0, 0.5; kernel = ScalarKernel(Val(4), Val(3), Float64), mc = 10_000, kc = 10_000, nc = 10_000)
     @test C ≈ _ref_of(_mm_maker(Float64, 9, 7, 6, 4), 1.0, 0.5)
