@@ -12,13 +12,15 @@
 #     `_kernel_from_shape`;
 #   * a shape resolved from the detected hardware (`_derived_shape`): an
 #     explicit override row, else the `MR = MV*W, NR = 6` rule where it has
-#     been validated (`MV = 4` for the real method on `:avx512`, `2`
-#     elsewhere; `_rule_mv`), else a conservative fitted shape
-#     (`_fitted_shape`);
-#   * three plan-time demotions: the real `MV = 4` shape steps down to its
+#     been validated (`MV = 4` for the real method on Intel `:avx512`, `2`
+#     elsewhere; `_rule_mv` / `_profile_mv`), else a conservative fitted
+#     shape (`_fitted_shape`);
+#   * four plan-time demotions: the real `MV = 4` shape steps down to its
 #     `MV = 2` sibling when M is short enough that the taller tile pads more
-#     (`_extent_shape`); to the fitted shape when M cannot fill one register
-#     tile (`_default_shape` / `_default_kernel`, src/planning/defaults.jl;
+#     (`_extent_shape`), and when C's unit-stride run along M would break
+#     the tall slivers' vectorized store (`_store_shape`); to the fitted
+#     shape when M cannot fill one register tile (`_default_shape` /
+#     `_default_kernel`, src/planning/defaults.jl;
 #     complex on `:avx512` goes to an FMAddSub shape instead,
 #     `_small_m_shape`); and to a menu shape that keeps every register sliver
 #     unit-stride in C (`_demote_for_run`).
@@ -307,6 +309,24 @@ _rule_shape(vb::Int, ::Type{T}, mv::Int = 2) where {T} =
 _rule_mv(::Val{:avx512}, ::RealMethod) = 4
 _rule_mv(::Val, ::ComplexMethod) = 2
 
+# `_rule_mv` for one host: `MV = 4` also needs a core where the `MV = 2` tile
+# is front-end bound, which a double-pumped AVX-512 core is not (see above),
+# so AMD's AVX-512 cores keep `MV = 2`. Measured on Genoa (znver4), PR #10
+# head (MV = 4) against main (MV = 2), bench_to_suite jobs 7124412 / 7112089,
+# QS time ratio: the large GEMMs MV = 4 exists for gain 1-3% at most
+# (dim32/dim63_2_2_2, all layouts, 0.97-0.99), while mps_*_D64 (1.69-1.73),
+# dim12/dim16_2_2_2_gemm_ready (1.24-1.33) and trg_plaquette_chi16/24
+# (1.15-1.27) regress there and improve on Ice Lake in the same comparison
+# (0.51-0.97). `znver5` (full-width 512-bit datapaths, unmeasured) keeps the
+# pre-MV = 4 shape too: nothing measured says the taller tile pays there.
+const _MV4_UNPROFITABLE_CPUS = ("znver4", "znver5")
+
+_profile_mv(profile::TargetProfile, method) = _rule_mv(Val(profile.isa), method)
+function _profile_mv(profile::TargetProfile, method::RealMethod)
+    mv = _rule_mv(Val(profile.isa), method)
+    return (mv == 4 && profile.cpu_name in _MV4_UNPROFITABLE_CPUS) ? 2 : mv
+end
+
 """
     _derived_shape(profile::TargetProfile, T, method = _default_method(T)) -> (MR, NR, W)
 
@@ -324,7 +344,7 @@ function _derived_shape(profile::TargetProfile, ::Type{T}, method) where {T}
     ovr === nothing || return ovr
     vb = profile.vector_bytes
     if _rule_applies(key, method) && vb > 0 && vb % sizeof(real(T)) == 0
-        shape = _rule_shape(vb, T, _rule_mv(key, method))
+        shape = _rule_shape(vb, T, _profile_mv(profile, method))
         shape in kernel_shapes(T, method) && return shape
     end
     return _fitted_shape(profile, T, method)
@@ -466,12 +486,12 @@ swap, no run demotion; Qm = 1920, Qn = 480; C = [a, n, b] so `run` = extent of
       run = 16 (MV2 whole, MV4 broken)  0.31  0.46  0.59  0.68-0.76  0.95-0.98  0.89  0.95
       run = 24 (both broken)            0.55  0.64  0.77  0.88  1.03
       run = 48 (MV2 whole, MV4 half)    0.55  0.69  0.84  0.94  1.07  1.07  1.00
-      run = 32, 64, 96 (both whole)     1.10-1.13 at Qk = 16..128
+      run = 32, 64, 96 (both whole)     1.06-1.17 at Qk = 16..128
     Float32 (32 vs 64 rows)
       run = 32                          0.19  0.29  0.43  0.61  0.80  0.98
       run = 48 (both broken)            0.49  0.56  0.65  0.78  0.92  1.04
       run = 96                          0.39  0.51  0.69  0.85  1.00  1.05
-      run = 64, 128 (both whole)        1.04-1.24 at every Qk
+      run = 64, 128 (both whole)        1.01-1.24 at every Qk (4..512)
 
 Past the crossover (Qk ~ 200-500, and only where part of the tall slivers
 is whole) the tall tile gains at most ~7%, and since `kc` caps a panel's

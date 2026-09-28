@@ -6,9 +6,11 @@
 #   julia -t 1 --project=benchmark benchmark/probes/probe_mv4_plans.jl --mode fix
 #
 # `--mode`: `fix` (this tree as is), `nostore` (the `_store_shape` step-down
-# disabled: the PR #10 head's selection), `mv2` (the real AVX-512 rule at
-# MV = 2: main's selection). The modes redefine package internals, so run
-# one mode per process.
+# disabled: with `mv4`, the PR #10 head's selection), `mv2` (the real AVX-512
+# rule at MV = 2: main's selection), `mv4` (the MV = 4 rule on every `:avx512`
+# host, the CPU exclusion `_profile_mv` lifted; identical to `fix` on Intel).
+# Comma-separated modes combine (`--mode mv4,nostore` is the PR #10 head on
+# any host). The modes redefine package internals, so run one per process.
 
 using TensorOperations, QuasiStrided, TensorOperationsBenchmarks, Statistics, Printf
 using QuasiStrided: ContractPlan, mr, nr, axis_length, RealMethod
@@ -17,16 +19,23 @@ TensorOperations.LinearAlgebra.BLAS.set_num_threads(1)
 include(joinpath(@__DIR__, "..", "harness.jl"))
 
 const MODE = argopt("mode", "fix")
-if MODE == "nostore"
+const FLAGS = split(MODE, ',')
+all(in(("fix", "nostore", "mv2", "mv4")), FLAGS) || error("unknown --mode $MODE")
+if "nostore" in FLAGS
     @eval QuasiStrided @inline _store_shape(
         shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, Qm::Int, run::Int
     ) where {T} = shape
-elseif MODE == "mv2"
+end
+if "mv2" in FLAGS
     @eval QuasiStrided _rule_mv(::Val{:avx512}, ::RealMethod) = 2
+end
+if "mv4" in FLAGS
+    # The CPU exclusion lifted: `_rule_mv` alone, on every host.
+    @eval QuasiStrided _profile_mv(p::TargetProfile, m::RealMethod) = _rule_mv(Val(p.isa), m)
+end
+if isdefined(QuasiStrided, :_DEFAULTS_F64)   # `fix` also runs on an older tree (main)
     QuasiStrided._DEFAULTS_F64[] = nothing
     QuasiStrided._DEFAULTS_F32[] = nothing
-elseif MODE != "fix"
-    error("unknown --mode $MODE")
 end
 
 const LOG = Ref(false)
@@ -43,15 +52,26 @@ function log_plan(plan)
     return nothing
 end
 
-@eval QuasiStrided @inline function _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T}
+isdefined(QuasiStrided, :_Execute) && @eval QuasiStrided @inline function _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T}
     $(LOG)[] && $(log_plan)(plan)
     return (_execute_hinted!(plan, e.alpha, e.beta, hint); nothing)
 end
 
 ids = split(argopt("cases", "ao2mo_2_dim16,ao2mo_2_dim24,ccsd_t_2_dim16,ccsd_t_4_dim16,ccsd_t_2_dim24,mps_1site_D64,mps_2site_D64"), ',')
 dtype = parse_dtypes(argopt("dtype", "Float64"))[1]
-cases = filter(c -> c.id in ids, vcat(TOB._tccg_cases((8, 16, 24)), TOB._mps_cases((64, 128, 256))))
-println("mode = $MODE  T = $dtype  default shape = ", QuasiStrided._resolved_defaults(dtype).shape)
+# `--cases all`: every case of those generators (bench_to_suite's
+# contract/network set without batched), for a whole-suite plan diff; add
+# `--reps 1` to skip the timing there.
+cases = filter(
+    c -> ids == ["all"] || c.id in ids,
+    vcat(
+        TOB._tccg_cases((8, 16, 24)), TOB._synthetic_contract_cases((8, 12, 16, 24, 32, 63)),
+        TOB._mps_cases((32, 64, 128, 256)), TOB._trg_cases((16, 24, 32)),
+        TOB._ctmrg_cases((32, 64))
+    )
+)
+const REPS = argopt("reps", 21)
+println("mode = $MODE  T = $dtype  default kernel = ", QuasiStrided._default_kernel(dtype))
 for c in cases
     s = c.spec
     if s isa TOB.ContractSpec
@@ -66,6 +86,6 @@ for c in cases
     println(c.id)
     f()
     LOG[] = true; empty!(SEEN); f(); LOG[] = false
-    ts_ = [(@elapsed f()) for _ in 1:21]
+    ts_ = [(@elapsed f()) for _ in 1:REPS]
     @printf("    median %.1f us  (min %.1f, max %.1f)\n", median(ts_) * 1.0e6, minimum(ts_) * 1.0e6, maximum(ts_) * 1.0e6)
 end

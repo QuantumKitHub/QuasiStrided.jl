@@ -51,6 +51,16 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, cache_topology,
             @test QuasiStrided._rule_mv(Val(:avx512), m) == 2
             @test QuasiStrided._rule_mv(Val(:avx2), m) == 2
         end
+        # AMD's AVX-512 cores keep MV = 2 (`_profile_mv`); Intel names and
+        # the synthetic profile take MV = 4. Complex shapes are unaffected.
+        for (cpu, MV) in (("znver4", 2), ("znver5", 2), ("icelake-server", 4), ("cascadelake", 4)),
+                T in (Float64, Float32)
+            p = TargetProfile(:avx512, Sys.ARCH, cpu, 64, 32, CacheLevel(), CacheLevel(), CacheLevel())
+            W = 64 ÷ sizeof(T)
+            @test _derived_shape(p, T) === (MV * W, NR_DEFAULT, W)
+            @test _derived_shape(p, T) in kernel_shapes(T)
+            @test _derived_shape(p, ComplexF64) === _derived_shape(synthetic(:avx512, 64), ComplexF64)
+        end
         # The default `mv` of `_rule_shape` is the unrefined rule.
         for T in (Float64, Float32)
             W = 64 ÷ sizeof(T)
