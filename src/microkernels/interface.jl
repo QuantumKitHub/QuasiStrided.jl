@@ -216,10 +216,10 @@ function execute_tile!(
 end
 
 # `execute_tile!` without `checked_tile_storage_bounds(destination)`: an
-# out-of-range destination is a silent out-of-bounds WRITE. The callers
-# (`_execute_nest!`, `_execute_half_packed_nest!`) check the union of a whole
-# macro block's tiles once with `checked_span_bounds`, which is equivalent
-# because the check only compares range extremes.
+# out-of-range destination is a silent out-of-bounds WRITE. `_execute_nest!`
+# checks the union of a whole macro block's tiles once with
+# `checked_span_bounds`, which is equivalent because the check only compares
+# range extremes.
 @inline function unsafe_execute_tile!(
         kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
         kc::Int, alpha, beta

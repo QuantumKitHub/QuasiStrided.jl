@@ -22,7 +22,8 @@ using SIMD: Vec, shufflevector
 
 Interleaved-accumulator complex microkernel using x86 `vfmaddsub`, over
 `SIMD.Vec{W,real(T)}` lanes with `InterleavedFormat` A and `PlanarFormat` B.
-`2MR` must be a multiple of `W`, and `W` must be even.
+`2MR` must be a multiple of `W`, and `W` must be even. The default for small-M
+complex contractions on AVX-512.
 """
 struct FMAddSubKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
     descriptor::ComplexKernelDescriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
