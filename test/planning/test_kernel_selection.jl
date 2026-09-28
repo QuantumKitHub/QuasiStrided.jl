@@ -35,7 +35,7 @@ using QuasiStrided: TargetProfile, CacheLevel, target_profile, unknown_target,
         for m in (PlanarMethod(), OneMMethod(), FMAddSubMethod()), key in (:avx512, :avx2)
             @test QuasiStrided._rule_mv(Val(key), m) == 2
         end
-        for (cpu, MV) in (("znver4", 2), ("znver5", 2), ("icelake-server", 4), ("cascadelake", 4)),
+        for (cpu, MV) in (("znver4", 4), ("icelake-server", 4), ("cascadelake", 4)),
                 T in (Float64, Float32)
             p = TargetProfile(:avx512, Sys.ARCH, cpu, 64, 32, CacheLevel(), CacheLevel(), CacheLevel())
             W = 64 ÷ sizeof(T)

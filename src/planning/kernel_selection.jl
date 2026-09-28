@@ -135,15 +135,6 @@ _rule_shape(vb::Int, ::Type{T}, mv::Int) where {T} =
 _rule_mv(::Val{:avx512}, ::RealMethod) = 4
 _rule_mv(::Val, ::ComplexMethod) = 2
 
-# AMD's AVX-512 cores keep MV = 2: their MV = 2 tile is not front-end bound.
-const _MV4_UNPROFITABLE_CPUS = ("znver4", "znver5")
-
-_profile_mv(profile::TargetProfile, method) = _rule_mv(Val(profile.isa), method)
-function _profile_mv(profile::TargetProfile, method::RealMethod)
-    mv = _rule_mv(Val(profile.isa), method)
-    return (mv == 4 && profile.cpu_name in _MV4_UNPROFITABLE_CPUS) ? 2 : mv
-end
-
 # The register shape for `T` under `method` on `profile`: an override row, else
 # the rule where it applies (and lands in the menu), else `_fitted_shape`.
 _derived_shape(profile::TargetProfile, ::Type{T}) where {T} =
@@ -155,7 +146,7 @@ function _derived_shape(profile::TargetProfile, ::Type{T}, method) where {T}
     ovr === nothing || return ovr
     vb = profile.vector_bytes
     if _rule_applies(key, method) && vb > 0 && vb % sizeof(real(T)) == 0
-        shape = _rule_shape(vb, T, _profile_mv(profile, method))
+        shape = _rule_shape(vb, T, _rule_mv(key, method))
         shape in kernel_shapes(T, method) && return shape
     end
     return _fitted_shape(profile, T, method)
