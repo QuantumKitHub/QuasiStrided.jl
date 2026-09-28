@@ -1,80 +1,56 @@
-# The buffers a plan executes into, kept separate from `ContractPlan` so they
-# can be reused across contractions. Typing discipline: `VT` is a `where`-bound
-# parameter resolved at construction (never a `Union`- or
-# `AbstractVector`-typed field), and the offset buffers stay concretely
-# `Vector{Int}` -- acquired as non-temporaries, so only the packed panels
-# route through the allocator.
+# Typed payload slots for the dispatch barriers (src/execution/barrier.jl):
+# one `Base.RefValue{P}` per payload type, plus the last one used. They live
+# as long as the workspace, which is what lets a barrier call allocate nothing.
+mutable struct _SlotCache
+    last::Any
+    const slots::IdDict{Any, Any}
+end
+_SlotCache() = _SlotCache(nothing, IdDict{Any, Any}())
 
 """
     ContractWorkspace{T,VT<:AbstractVector}
 
-Every buffer [`execute!`](@ref) and `execute_tilewise!` need, sized once at
-construction (or grown by [`reserve!`](@ref)) and never (re)allocated during
-execution. Built by [`plan_contract`](@ref) and held by [`ContractPlan`](@ref);
-pass an existing one back as `plan_contract(...; workspace = ws)` to reuse its
-buffers across contractions of different shapes.
-
-`T` is the **storage** element type (`eltype(C)`), which is what the backend's
-workspace pool is keyed by; `VT` is the vector type of the two packed macro
-panels, whose element type is `real(T)` -- the same type on the real path,
-`Float64`/`Float32` for a complex contraction, since every packed buffer below
-the kernel boundary holds reals. The bound on `VT` is therefore only
-`AbstractVector`, with the `eltype(VT) === real(T)` invariant enforced by the
-inner constructor; `VT` is still a `where`-bound parameter resolved to a
-concrete vector type at construction.
-
-`VT` is `Vector{real(T)}` on the default, GC-owned, [`reserve!`](@ref)-able
-path; on an explicit-allocator path it is whatever that allocator returns, and
-the workspace is then scoped to that one call -- [`release!`](@ref) it and drop
-it, never pass it back as `workspace = ws`.
-
-The `tw_*` buffers belong to `execute_tilewise!`, the independent oracle, and
-are allocated only under `oracle = true`. The four register-tile-sized
-`tile_*` offset buffers are always allocated: the beta-only pass of both
-drivers uses them, and so does the oracle's tile loop.
-
-Field layout is an implementation detail, not part of the public interface.
+The buffers [`execute!`](@ref) needs. Pass one back as
+`plan_contract(...; workspace = ws)` to reuse (and grow) it across
+contractions; one from a non-default allocator is single-use and must be
+[`release!`](@ref)d. `T` is the storage element type; the packed panels (`VT`)
+hold `real(T)`. Field layout is an implementation detail.
 """
-struct ContractWorkspace{T, VT <: AbstractVector}
-    # Macro-block-sized offset buffers: one fill_offsets! per jc/pc/ic block,
-    # reused by every sliver inside it.
-    m_buf_A::Vector{Int}
-    m_buf_C::Vector{Int}
-    n_buf_B::Vector{Int}
-    n_buf_C::Vector{Int}
-    k_buf_A::Vector{Int}
-    k_buf_B::Vector{Int}
+# A `mutable struct` with `const` fields so a plan and a barrier slot hold one
+# pointer to it instead of copying twenty-one GC-tracked fields.
+mutable struct ContractWorkspace{T, VT <: AbstractVector}
+    # Macro-block offset buffers and their per-sliver descriptors.
+    const m_buf_A::Vector{Int}
+    const m_buf_C::Vector{Int}
+    const n_buf_B::Vector{Int}
+    const n_buf_C::Vector{Int}
+    const k_buf_A::Vector{Int}
+    const k_buf_B::Vector{Int}
+    const m_desc_A::Vector{BlockDescriptor}
+    const m_desc_C::Vector{BlockDescriptor}
+    const n_desc_B::Vector{BlockDescriptor}
+    const n_desc_C::Vector{BlockDescriptor}
 
-    # Per-sliver descriptors classified from the buffers above (3-arg
-    # describe_block), reused across the pc/ic loops of a given jc/ic.
-    m_desc_A::Vector{BlockDescriptor}
-    m_desc_C::Vector{BlockDescriptor}
-    n_desc_B::Vector{BlockDescriptor}
-    n_desc_C::Vector{BlockDescriptor}
+    # Packed macro panels: the only allocator-routed buffers.
+    const packed_a::VT
+    const packed_b::VT
 
-    # Packed macro-panel buffers: cld(mc,MRk)/cld(nc,NRk) slivers at kc-eff
-    # depth. The ONLY allocator-routed temporaries in this struct.
-    packed_a::VT
-    packed_b::VT
+    # One register tile's offsets: the beta-only pass and the oracle.
+    const tile_m_buf_A::Vector{Int}
+    const tile_m_buf_C::Vector{Int}
+    const tile_n_buf_B::Vector{Int}
+    const tile_n_buf_C::Vector{Int}
 
-    # One register tile's offsets (MR/NR-sized): the beta-only pass and the
-    # oracle's tile loop.
-    tile_m_buf_A::Vector{Int}
-    tile_m_buf_C::Vector{Int}
-    tile_n_buf_B::Vector{Int}
-    tile_n_buf_C::Vector{Int}
+    # `execute_tilewise!`'s own buffers, empty under `oracle = false`; not
+    # shared, so the oracle has no state in common with what it checks.
+    const tw_k_buf_A::Vector{Int}
+    const tw_k_buf_B::Vector{Int}
+    const tw_packed_a::VT
+    const tw_packed_b::VT
 
-    # execute_tilewise!'s own K-panel buffers (blocking.kc-sized). Deliberately
-    # NOT shared with the macro buffers above: the oracle must have no packed
-    # or K-offset state in common with the code it checks.
-    tw_k_buf_A::Vector{Int}
-    tw_k_buf_B::Vector{Int}
-    tw_packed_a::VT
-    tw_packed_b::VT
+    const slots::_SlotCache
 
-    # GUARDRAIL, the one invariant the loose `VT` bound needs: the packed
-    # panels hold `real(T)`, NEVER `T`. Enforced here so a mis-paired (T, VT)
-    # cannot be constructed at all, rather than failing later inside a packer.
+    # GUARDRAIL: the packed panels hold `real(T)`, never `T`.
     function ContractWorkspace{T, VT}(
             m_buf_A::Vector{Int}, m_buf_C::Vector{Int},
             n_buf_B::Vector{Int}, n_buf_C::Vector{Int},
@@ -98,21 +74,14 @@ struct ContractWorkspace{T, VT <: AbstractVector}
             m_desc_A, m_desc_C, n_desc_B, n_desc_C,
             packed_a, packed_b,
             tile_m_buf_A, tile_m_buf_C, tile_n_buf_B, tile_n_buf_C,
-            tw_k_buf_A, tw_k_buf_B, tw_packed_a, tw_packed_b,
+            tw_k_buf_A, tw_k_buf_B, tw_packed_a, tw_packed_b, _SlotCache(),
         )
     end
 end
 
-# Element counts every buffer needs for `kernel` at the *effective* `blocking`
-# (the rounded/clamped one `plan_contract` stores on the plan). Shared by the
-# constructors and by `reserve!` so the two can never disagree.
-#
-# GUARDRAIL: complex-correct as written; do not rescale either count. The
-# packed lengths come from `packed_a_length`/`packed_b_length`, which already
-# return a count of REALS at the logical `kc` once the descriptor is complex,
-# while the sliver counts use the LOGICAL register extents `mr`/`nr`, which is
-# what `mc`/`nc` are expressed in. Do not mix them: `m_slivers` counts register
-# tiles, `packed_a` counts reals.
+# Buffer lengths for `kernel` at the effective `blocking`, shared by the
+# constructors and `reserve!`. GUARDRAIL: `packed_a_length` already counts
+# reals, the sliver counts are in logical `mr`/`nr`; do not rescale either.
 @inline function _workspace_sizes(kernel, blocking::Blocking)
     MRk = mr(kernel)
     NRk = nr(kernel)
@@ -130,27 +99,19 @@ end
     )
 end
 
-# `Val(true)`: a genuine temporary, routed through `allocator` and never
-# `resize!`d afterwards.
+# A temporary, never `resize!`d.
 @inline function _alloc_temp(::Type{T}, n::Int, allocator) where {T}
     return TO.tensoralloc(Vector{T}, (n,), Val(true), allocator)
 end
 
-# `Val(false)`: a non-temporary, which every allocator serves as a plain,
-# GC-owned `Vector{Int}`, as the offset buffers require. The assertion makes a hypothetical violation fail loudly here rather than
-# silently inside `fill_offsets!`.
+# A non-temporary, which every allocator serves as a plain `Vector{Int}`.
 @inline function _alloc_offsets(n::Int, allocator)
     return TO.tensoralloc(Vector{Int}, (n,), Val(false), allocator)::Vector{Int}
 end
 
-# Descriptor arrays are not tensor buffers (`BlockDescriptor` has no
-# `scalartype`), so they never route through `tensoralloc`. `undef` is safe:
-# `_classify_slivers!` writes entry `s+1` before the same iteration reads it.
+# Not tensor buffers, so never through `tensoralloc`.
 @inline _alloc_descriptors(n::Int) = Vector{BlockDescriptor}(undef, n)
 
-# The 20-field layout, written out exactly once for both constructors below:
-# `ints` allocates a `Vector{Int}` of a given length, while the packed panels
-# arrive already allocated because their type is what fixes `VT`.
 @inline function _build_workspace(
         ::Type{T}, s, ntw::Int, ints::F,
         packed_a::VT, packed_b::VT, tw_packed_a::VT, tw_packed_b::VT
@@ -170,31 +131,18 @@ end
 end
 
 """
-    ContractWorkspace(T, kernel, blocking::Blocking, oracle::Bool, allocator)
     ContractWorkspace(T, kernel, blocking::Blocking;
                       oracle = true, allocator = TensorOperations.DefaultAllocator())
 
-Build a workspace for scalar type `T`, `kernel` and an already-effective
-`blocking`. `oracle = false` skips the `execute_tilewise!`-only buffers
-entirely (they are left empty), which is what the TensorOperations backend
-path passes.
-
-Under `DefaultAllocator` every buffer is an ordinary `Vector`, so the result is
-a `ContractWorkspace{T,Vector{R}}`, `R = realtype(kernel) === real(T)`, that
-[`reserve!`](@ref) may later grow; on the real path `R === T`. Under any other
-allocator the packed panels are acquired once via
-`TensorOperations.tensoralloc(..., Val(true), allocator)`, are never resized,
-and must be handed back with [`release!`](@ref).
-
-Buffers are `undef`-initialized, not zeroed: the packers (`src/packing/pack.jl`)
-write every slot of a panel it is given, padding included, and the offset
-buffers are fully rewritten by `fill_offsets!` before each block is read.
+A workspace for storage type `T`, `kernel` and an effective `blocking`.
+`oracle = false` leaves the `execute_tilewise!` buffers empty. Under a
+non-default `allocator` the packed panels come from `tensoralloc`, are never
+resized, and must be handed back with [`release!`](@ref).
 """
 function ContractWorkspace(
         ::Type{T}, kernel, blocking::Blocking, oracle::Bool, ::TO.DefaultAllocator
     ) where {T}
     s = _workspace_sizes(kernel, blocking)
-    # Reals, not storage elements; the inner constructor re-checks against `T`.
     R = realtype(kernel)
     return _build_workspace(
         T, s, oracle ? s.kc : 0, n -> Vector{Int}(undef, n),
@@ -210,8 +158,7 @@ function ContractWorkspace(
     s = _workspace_sizes(kernel, blocking)
     R = realtype(kernel)
 
-    # Acquisition order matters for arena allocators: `release!` frees in the
-    # exact reverse order.
+    # `release!` frees in exactly the reverse order, for arena allocators.
     packed_a = _alloc_temp(R, s.packed_a, allocator)
     packed_b = _alloc_temp(R, s.packed_b, allocator)
     tw_packed_a = _alloc_temp(R, oracle ? s.tw_packed_a : 0, allocator)
@@ -230,19 +177,9 @@ function ContractWorkspace(
     return ContractWorkspace(T, kernel, blocking, oracle, allocator)
 end
 
-"""
-    reserve!(ws::ContractWorkspace{T,Vector{R}}, kernel, blocking::Blocking,
-             oracle::Bool) -> ws
-
-Grow `ws` in place so every buffer is large enough for `kernel` at the
-effective `blocking`, and return it. Grow-only: it never shrinks a buffer,
-never reallocates one that is already large enough, and never hands back a
-`view`; every consumer is length-tolerant and addresses only the live region
-of the *current* block. `oracle = false` leaves the `execute_tilewise!`-only
-buffers alone. Defined only for the default, GC-owned path -- an
-allocator-provided temporary must never be `resize!`d, so that path sizes its
-workspace exactly once at construction instead.
-"""
+# Grow `ws` in place (never shrink, never reallocate what is large enough)
+# for `kernel` at `blocking`. Only for the GC-owned path: an allocator's
+# temporaries must never be resized.
 function reserve!(
         ws::ContractWorkspace{T, Vector{R}}, kernel, blocking::Blocking, oracle::Bool
     ) where {T, R}
@@ -278,24 +215,17 @@ function reserve!(
     return ws
 end
 
-# Grow-only resize. `resize!` upward leaves the new region undefined, which is
-# the same `undef` discipline the constructors use.
 @inline function _grow!(v::Vector, n::Int)
     length(v) < n && resize!(v, n)
     return v
 end
 
 """
-    release!(ws::ContractWorkspace, allocator) -> nothing
+    release!(ws::ContractWorkspace, allocator)
 
-Hand `ws`'s allocator-routed temporaries (`packed_a`/`packed_b`, plus the
-oracle's `tw_packed_*` when present) back to `allocator` via
-`TensorOperations.tensorfree!`, in the exact reverse of acquisition order so
-LIFO arenas unwind correctly. The offset and descriptor buffers are GC-owned
-and untouched; `ws` must not be used afterwards. Calling this unconditionally
-is correct for every allocator -- it returns memory for `ManualAllocator` and
-is a no-op for the ones that unwind via `allocator_reset!`/`@no_escape`
-instead.
+Hand `ws`'s packed panels back to `allocator` (`TensorOperations.tensorfree!`)
+in reverse acquisition order; `ws` must not be used afterwards. Correct for
+every allocator.
 """
 function release!(ws::ContractWorkspace, allocator)
     TO.tensorfree!(ws.tw_packed_b, allocator)
@@ -305,17 +235,7 @@ function release!(ws::ContractWorkspace, allocator)
     return nothing
 end
 
-# Whether `ws` carries `execute_tilewise!`'s buffers. `packed_a_length(kernel,
-# kc) == mr(kernel) * kc >= 1` for every legal blocking (`kc >= 1`), so an
-# empty `tw_packed_a` means -- and only means -- the workspace was built with
-# `oracle = false`.
-@inline _has_oracle(ws::ContractWorkspace) = !isempty(ws.tw_packed_a)
-
-# Build or reuse the plan's workspace. Dispatching on the allocator type (not
-# an `isa` branch on a value) keeps both paths concretely typed and makes the
-# unreachable one disappear at compile time. Default path: a plain, GC-owned
-# workspace, reused via `reserve!` when one is handed in, which is
-# the zero-steady-state-allocation fast path.
+# Build or reuse the plan's workspace, dispatching on the allocator type.
 function _resolve_workspace(
         ::Type{T}, workspace, kernel, blocking::Blocking, oracle::Bool,
         allocator::TO.DefaultAllocator
@@ -325,8 +245,7 @@ function _resolve_workspace(
     return _reuse_workspace(T, workspace, kernel, blocking, oracle)
 end
 
-# Explicit-allocator path: sized exactly once from the effective blocking, no
-# `reserve!`, no resizing. The caller owns `release!`.
+# Explicit allocator: sized once, never reused; the caller owns `release!`.
 function _resolve_workspace(
         ::Type{T}, workspace, kernel, blocking::Blocking, oracle::Bool, allocator
     ) where {T}
@@ -340,11 +259,8 @@ function _resolve_workspace(
     return ContractWorkspace(T, kernel, blocking, oracle, allocator)
 end
 
-# `R` is the PACKED element type, `real(T)` by `ContractWorkspace`'s own
-# invariant. The extra guard stops a pooled workspace of one precision serving
-# a plan of another: the pool is keyed by `eltype(C)` alone, so `T` matching is
-# not enough once the packed type is a separate notion. Both sides are
-# compile-time constants, so this folds away entirely.
+# The pool is keyed by `eltype(C)` alone, so also check the packed type
+# (folds at compile time).
 @inline function _reuse_workspace(
         ::Type{T}, ws::ContractWorkspace{T, Vector{R}}, kernel, blocking::Blocking,
         oracle::Bool

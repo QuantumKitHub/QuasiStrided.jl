@@ -1,8 +1,6 @@
-# Apply beta once to every element of C at MR x NR granularity, without
-# reading A or B. Shared by the Qk==0/alpha==0 short-circuit of `execute!` and
-# `execute_tilewise!`; uses the MR/NR-sized `tile_*` offset buffers, since a
-# beta-only pass needs no blocking -- which is why those four, unlike the
-# oracle-only `tw_*` ones, are allocated even under `oracle = false`.
+# `C *= beta` tile by tile, never reading A or B: the `Qk == 0 || alpha == 0`
+# pass of `execute!` and `execute_tilewise!`. Uses the MR/NR-sized `tile_*`
+# buffers, which is why those exist even under `oracle = false`.
 function _scale_all_of_C!(plan, betaT::T, MRk::Int, NRk::Int, Qm::Int, Qn::Int) where {T}
     ws = plan.workspace
     m_bufs = (ws.tile_m_buf_A, ws.tile_m_buf_C)
@@ -28,103 +26,182 @@ end
 """
     execute!(plan::ContractPlan, alpha::Number, beta::Number)
 
-Execution phase of [`contract!`](@ref): a BLIS five-loop macro-blocking nest
-over `plan.blocking` (`nc`/loop 5, `kc`/loop 4, `mc`/loop 3), packing the
-whole B panel once per `(jc,pc)` and the whole A panel once per `(jc,pc,ic)`,
-then running `execute_tile!` over every micro-tile of that block (loops 2/1).
-`beta` applies exactly once per output element (on the first K block only;
-later ones accumulate with `beta = one(T)`). Empty output is a no-op; empty K
-or `alpha == 0` applies `beta` once without reading `A`/`B`. Allocation-free.
-Returns `plan.Cstorage`. See [`execute_tilewise!`](@ref) for the independent
-tile-by-tile oracle this is checked against.
-
-Storage-bounds validation is done **once per macro block**, not once per
-sliver or per micro-tile: each of the three operand regions a `(jc, pc, ic)`
-iteration touches is validated with one [`checked_span_bounds`](@ref) call
-before anything is packed or written, and the packing/micro-kernel calls
-inside it then go through `unsafe_pack_a!`/`unsafe_pack_b!`/
-`unsafe_execute_tile!`. The test performed is exactly the conjunction of the
-per-sliver and per-tile tests (see `checked_span_bounds`), so no address the
-macro-blocking pack/execute path can reach is unvalidated, and a contraction
-is rejected exactly when a per-tile check would reject it; `execute_tilewise!`
-runs the per-tile checked path as an independent oracle for both the values
-and the rejections.
-
-Scoped to that path deliberately: the `Qk == 0 || alpha == 0` beta-only
-short-circuit above it goes to `_scale_all_of_C!`, which performs no
-storage-bounds check at all (it writes through `scale_tile!`'s `@inbounds`
-path, relying on the `AxisGroup`s' own construction-time validation). It is
-named here only so this paragraph is not read as a claim about it.
+Compute `C = alpha * A * B + beta * C` for the contraction `plan` describes,
+and return `plan.Cstorage`. Runs a BLIS five-loop nest over `plan.blocking`,
+or a dedicated dot/outer-product path for degenerate extents. `beta` applies
+exactly once per element and `beta == 0` never reads `C`; empty K or
+`alpha == 0` never reads `A`/`B`. Operand bounds are checked once per macro
+block. Allocation-free.
 """
 function execute!(plan::ContractPlan{T}, alpha::Number, beta::Number) where {T}
     alphaT = convert(T, alpha)
     betaT = convert(T, beta)
-
-    kernel = plan.kernel
-    MRk = mr(kernel)
-    NRk = nr(kernel)
-
-    Qm = axis_length(plan.mgroup)
-    Qn = axis_length(plan.ngroup)
-    Qk = axis_length(plan.kgroup)
-
-    # Empty output: no-op, nothing read or written at all.
-    (Qm == 0 || Qn == 0) && return plan.Cstorage
-
-    # Nothing to contract: beta-only pass, A and B never read.
-    if Qk == 0 || iszero(alphaT)
-        _scale_all_of_C!(plan, betaT, MRk, NRk, Qm, Qn)
-        return plan.Cstorage
-    end
-
-    mc_eff = plan.blocking.mc
-    kc_eff = plan.blocking.kc
-    nc_eff = plan.blocking.nc
-
-    # A reused workspace may be oversized: every extent below comes from the
-    # *current* block, never from a buffer's length.
-    ws = plan.workspace
-
-    # Panels below borrow pointers into ws.packed_a/_b (src/packing/panel.jl), as do
-    # the PtrScatterAxes from `_axis_of`; this is their lifetime.
-    return GC.@preserve ws begin
-        _execute_nest!(
-            plan, ws, kernel, MRk, NRk, Qm, Qn, Qk,
-            mc_eff, kc_eff, nc_eff, alphaT, betaT
-        )
-    end
+    _execute_short_circuit!(plan, alphaT, betaT) && return plan.Cstorage
+    _execute_across_barrier!(plan, alphaT, betaT, _select_path(plan))
+    return plan.Cstorage
 end
 
-# Split out so the `GC.@preserve` above has one obvious scope.
+# The short-circuits every path shares; `true` when the call is finished.
+@inline function _execute_short_circuit!(plan::ContractPlan{T}, alphaT::T, betaT::T) where {T}
+    Qm = axis_length(plan.mgroup)
+    Qn = axis_length(plan.ngroup)
+    (Qm == 0 || Qn == 0) && return true
+    if axis_length(plan.kgroup) == 0 || iszero(alphaT)
+        _scale_all_of_C!(plan, betaT, mr(plan.kernel), nr(plan.kernel), Qm, Qn)
+        return true
+    end
+    return false
+end
+
+# The path `execute!` runs past its short-circuits: the dot path, else the
+# outer-product path, else the nest (B packed or read in place).
+@inline _select_path(plan::ContractPlan{T}) where {T} = _select_path(
+    T, _unpacked_b_kernel_eligible(plan.kernel),
+    plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan
+)
+
+# On the plan's parts, so `plan_contract` can predict the path before the
+# plan exists (`_path_hint`). `unpack_ok`: the kernel admits unpacked B.
+# `capacity`: the plan whose workspace must hold the dot path's vector, or
+# `nothing` to assume it does.
+@inline function _select_path(
+        ::Type{T}, unpack_ok::Bool, Astorage, Bstorage, Cstorage,
+        mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity
+    ) where {T}
+    Qm = axis_length(mgroup)
+    Qn = axis_length(ngroup)
+    Qk = axis_length(kgroup)
+    if (Qm == 1 || Qn == 1) && _dot_applicable(T, Astorage, Bstorage, kgroup, Qm, Qn, Qk) &&
+            _dot_capacity_ok(capacity)
+        W = _dot_lanewidth(T)
+        return Qm == 1 ? _lane_path(_DotPath{true}, W) : _lane_path(_DotPath{false}, W)
+    end
+    Qk == 1 && _outer_applicable(T, Astorage, Cstorage, mgroup, Qm) &&
+        return _lane_path(_OuterPath, _dot_lanewidth(T))
+    return _nest_path(unpack_ok && _unpacked_b_rule(mgroup, kgroup), mgroup, ngroup, kgroup)
+end
+
+# Run `path` behind a dynamic call. The plan crosses in the workspace slot
+# with its storages stripped; they cross as arguments.
+@inline function _execute_across_barrier!(plan::ContractPlan{T}, alphaT::T, betaT::T, path) where {T}
+    core = _strip_storage(plan)
+    slot = _barrier_slot!(plan.workspace, Tuple{typeof(core), T, T})
+    slot[] = (core, alphaT, betaT)
+    Base.inferencebarrier(_execute_resolved!)(
+        path, slot, plan.Astorage, plan.Bstorage, plan.Cstorage
+    )
+    return nothing
+end
+
+function _execute_resolved!(
+        path::P, slot::Base.RefValue{Tuple{R, T, T}}, Astorage::SA, Bstorage::SB, Cstorage::SC
+    ) where {P, R <: ContractPlan, T, SA, SB, SC}
+    core, alphaT, betaT = slot[]
+    _execute_path!(_with_storage(core, Astorage, Bstorage, Cstorage), alphaT, betaT, path)
+    return nothing
+end
+
+@inline _strip_storage(p::ContractPlan) = ContractPlan(
+    p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
+    nothing, p.Abase, nothing, p.Bbase, nothing, p.Cbase,
+    p.atransform, p.btransform, p.workspace
+)
+@inline _with_storage(p::ContractPlan, Astorage, Bstorage, Cstorage) = ContractPlan(
+    p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
+    Astorage, p.Abase, Bstorage, p.Bbase, Cstorage, p.Cbase,
+    p.atransform, p.btransform, p.workspace
+)
+
+# The continuation the TensorOperations adapter hands `_planned`: `execute!`
+# inside the planning barrier. A struct, not a closure, so the scalars are
+# concretely typed.
+struct _Execute{T}
+    alpha::T
+    beta::T
+end
+(e::_Execute)(plan::ContractPlan) = (execute!(plan, e.alpha, e.beta); nothing)
+
+# The path predicted before the kernel barrier, so its callee is specialised
+# on the path as well as the kernel.
+@inline _path_hint(::_Execute, req::_PlanRequest{T}, unpack_ok::Bool) where {T} = _select_path(
+    T, unpack_ok,
+    req.Astorage, req.Bstorage, req.Cstorage, req.mgroup, req.ngroup, req.kgroup, nothing
+)
+
+@inline _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T} =
+    (_execute_hinted!(plan, e.alpha, e.beta, hint); nothing)
+@inline _continue(e::_Execute{T}, plan::ContractPlan{T}, ::Nothing) where {T} =
+    (execute!(plan, e.alpha, e.beta); nothing)
+
+# Runs the predicted path statically when it provably equals the plan's own
+# `_select_path` (always, for an automatically chosen kernel); otherwise
+# falls back to `execute!`'s barrier.
+@inline function _execute_hinted!(plan::ContractPlan{T}, alphaT::T, betaT::T, hint) where {T}
+    _execute_short_circuit!(plan, alphaT, betaT) && return nothing
+    if _hint_holds(plan, hint)
+        _execute_path!(plan, alphaT, betaT, hint)
+    else
+        _execute_across_barrier!(plan, alphaT, betaT, _select_path(plan))
+    end
+    return nothing
+end
+
+# The prediction differs from `_select_path(plan)` in two inputs only: the
+# kernel's unpacked-B eligibility (predicted from its method; folds) and the
+# dot path's workspace capacity (assumed).
+@inline _hint_holds(plan::ContractPlan, ::_NestPath) =
+    _unpacked_b_method_eligible(complex_method(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
+@inline _hint_holds(plan::ContractPlan, ::_DotPath) = _dot_capacity_ok(plan)
+@inline _hint_holds(plan::ContractPlan, ::_OuterPath) = true
+
+_execute_path!(plan::ContractPlan, alphaT, betaT, ::_DotPath{MATB, W}) where {MATB, W} =
+    (_execute_dot!(plan, alphaT, betaT, MATB, Val(W)); nothing)
+
+_execute_path!(plan::ContractPlan, alphaT, betaT, ::_OuterPath{W}) where {W} = (
+    _execute_outer!(
+        plan, alphaT, betaT, axis_length(plan.mgroup), axis_length(plan.ngroup), Val(W)
+    ); nothing
+)
+
+function _execute_path!(
+        plan::ContractPlan{T}, alphaT::T, betaT::T, path::_NestPath
+    ) where {T}
+    kernel = plan.kernel
+    ws = plan.workspace
+    # Panels and `PtrScatterAxis`es borrow pointers into `ws`.
+    GC.@preserve ws begin
+        _execute_nest!(
+            plan, ws, kernel, mr(kernel), nr(kernel),
+            axis_length(plan.mgroup), axis_length(plan.ngroup), axis_length(plan.kgroup),
+            plan.blocking.mc, plan.blocking.kc, plan.blocking.nc, alphaT, betaT, path
+        )
+    end
+    return nothing
+end
+
 function _execute_nest!(
         plan::ContractPlan{T}, ws, kernel::K, MRk::Int, NRk::Int,
         Qm::Int, Qn::Int, Qk::Int, mc_eff::Int, kc_eff::Int, nc_eff::Int,
-        alphaT::T, betaT::T
-    ) where {T, K}
-    # GUARDRAIL: reals per sliver per LOGICAL K step, which is what addresses
-    # the packed panels. NOT interchangeable with `MRk`/`NRk`, which keep their
-    # meaning everywhere else here (sliver counts, block extents,
-    # `_classify_slivers!`): one counts register-tile rows, the other reals.
-    # `MRp === MRk` for every real kernel (pinned in test/planning/test_kernel_selection.jl), so
-    # the substitution below is provably the identity on the real path.
+        alphaT::T, betaT::T, ::_NestPath{UNPACKED_B, AFF}
+    ) where {T, K, UNPACKED_B, AFF}
+    # GUARDRAIL: reals per sliver per K step address the packed panels;
+    # `MRk`/`NRk` count register-tile rows. They differ for complex kernels.
     MRp = packed_a_per_k(kernel)
     NRp = packed_b_per_k(kernel)
 
     atransform = plan.atransform
     btransform = plan.btransform
 
-    # Resolved once per `execute!`, not per block: each composite's type is
-    # concrete here, so `affine_ramp` unrolls to a few integer compares and the
-    # `if`s below are cheap, predictable branches outside every inner loop.
+    # Ramp composites get closed-form block descriptors, no offset buffers.
     (m_ramp, m_step) = affine_ramp(plan.mgroup)
     (n_ramp, n_step) = affine_ramp(plan.ngroup)
     (k_ramp, k_step) = affine_ramp(plan.kgroup)
 
-    # Hoisted storage-bounds validation: storage lengths read once here rather
-    # than per sliver / per micro-tile.
     lenA = length(plan.Astorage)
     lenB = length(plan.Bstorage)
     lenC = length(plan.Cstorage)
+
+    aff_mA, aff_mC, aff_nB, aff_nC, aff_kA, aff_kB = map(Val, AFF)
 
     # --- loop 5: jc over N in steps of nc_eff ---
     jc = 0
@@ -166,28 +243,26 @@ function _execute_nest!(
                     descriptor_offset_range(dB, ws.k_buf_B, 0),
                 )
             end
-            colsA_k = _axis_of(dK_A, ws.k_buf_A, 0)
-            rowsB_k = _axis_of(dK_B, ws.k_buf_B, 0)
+            colsA_k = _axis_of(dK_A, ws.k_buf_A, 0, aff_kA)
+            rowsB_k = _axis_of(dK_B, ws.k_buf_B, 0, aff_kB)
 
-            # HOISTED CHECK 1 of 3 -- the whole B panel of this (jc, pc).
-            # `rowsB_k` is shared by every N-sliver and `rng_nB` is the union
-            # of the slivers' own column ranges, so this rectangle is exactly
-            # the union of the addresses the `unsafe_pack_b!` calls below read;
-            # see `checked_span_bounds` for why checking the union is
-            # equivalent to checking each sliver, not weaker.
+            # Hoisted bounds checks (B here, A and C per ic block): each
+            # rectangle is exactly the union of the per-sliver/per-tile
+            # regions, so the `unsafe_*` calls below read nothing unchecked.
             checked_span_bounds(plan.Bbase, rng_kB, rng_nB, lenB)
 
             beta_eff = firstpanel ? betaT : one(T)
 
-            # Pack the whole B panel for this (jc, pc): every N-sliver.
-            for s in 0:(n_slivers - 1)
-                sfirst = s * NRk
-                colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst)
-                bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
-                _pack_sliver!(
-                    unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
-                    kernel, btransform
-                )
+            if !UNPACKED_B
+                for s in 0:(n_slivers - 1)
+                    sfirst = s * NRk
+                    colsB = _axis_of(ws.n_desc_B[s + 1], ws.n_buf_B, sfirst, aff_nB)
+                    bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
+                    _pack_sliver!(
+                        unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
+                        kernel, btransform
+                    )
+                end
             end
 
             # --- loop 3: ic over M in steps of mc_eff ---
@@ -208,23 +283,12 @@ function _execute_nest!(
                     )
                 end
 
-                # HOISTED CHECK 2 of 3 -- the whole A panel of this
-                # (jc, pc, ic): every M-sliver's rows against the shared K
-                # columns.
                 checked_span_bounds(plan.Abase, rng_mA, rng_kA, lenA)
-
-                # HOISTED CHECK 3 of 3 -- every micro-tile of this (ic, jc)
-                # block at once. The micro-tile loop below is the full cross
-                # product of the M-sliver rows and the N-sliver columns, and
-                # those two families partition the block's row and column
-                # offset sets, so this rectangle is exactly their union. It
-                # precedes every write to C, as a per-tile check would.
                 checked_span_bounds(plan.Cbase, rng_mC, rng_nC, lenC)
 
-                # Pack the whole A panel for this (jc, pc, ic): every M-sliver.
                 for r in 0:(m_slivers - 1)
                     rfirst = r * MRk
-                    rowsA = _axis_of(ws.m_desc_A[r + 1], ws.m_buf_A, rfirst)
+                    rowsA = _axis_of(ws.m_desc_A[r + 1], ws.m_buf_A, rfirst, aff_mA)
                     apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
                     _pack_sliver!(
                         unsafe_pack_a!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
@@ -233,19 +297,16 @@ function _execute_nest!(
                 end
 
                 # --- loop 2: jr over N-slivers; loop 1: ir over M-slivers ---
-                for s in 0:(n_slivers - 1)
-                    sfirst = s * NRk
-                    colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst)
-                    bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
-                    for r in 0:(m_slivers - 1)
-                        rfirst = r * MRk
-                        rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst)
-                        apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
-                        unsafe_execute_micro_tile!(
-                            kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                            apanel, bpanel, kblock, alphaT, beta_eff
-                        )
-                    end
+                if UNPACKED_B
+                    _micro_tiles_unpacked_b!(
+                        kernel, plan, ws, rowsB_k, m_slivers, n_slivers,
+                        MRk, NRk, MRp, kblock, alphaT, beta_eff, aff_mC, aff_nC
+                    )
+                else
+                    _micro_tiles_packed_b!(
+                        kernel, plan, ws, m_slivers, n_slivers,
+                        MRk, NRk, MRp, NRp, kblock, alphaT, beta_eff, aff_mC, aff_nC
+                    )
                 end
 
                 ic += mblock
@@ -261,9 +322,30 @@ function _execute_nest!(
     return plan.Cstorage
 end
 
-# ----------------------------------------------------------------------------
-# contract!
-# ----------------------------------------------------------------------------
+# Loops 2/1 over one (jc, pc, ic) block. `@noinline`: one call per block, and
+# the inlined microkernel is most of a nest's size; compile cost grows faster
+# than linearly with function size.
+@noinline function _micro_tiles_packed_b!(
+        kernel::K, plan::ContractPlan, ws, m_slivers::Int, n_slivers::Int,
+        MRk::Int, NRk::Int, MRp::Int, NRp::Int, kblock::Int, alphaT, beta_eff,
+        aff_mC::Val{MC}, aff_nC::Val{NC}
+    ) where {K, MC, NC}
+    for s in 0:(n_slivers - 1)
+        sfirst = s * NRk
+        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst, aff_nC)
+        bpanel = _sliver_panel(ws.packed_b, NRp, kblock, s)
+        for r in 0:(m_slivers - 1)
+            rfirst = r * MRk
+            rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst, aff_mC)
+            apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
+            unsafe_execute_micro_tile!(
+                kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
+                apanel, bpanel, kblock, alphaT, beta_eff
+            )
+        end
+    end
+    return nothing
+end
 
 """
     contract!(C::StridedView, alpha::Number,

@@ -1,12 +1,7 @@
-# Scalar reference microkernel.
-
 """
-    ScalarKernel(descriptor::KernelDescriptor{MR,NR,T})
     ScalarKernel(::Val{MR}, ::Val{NR}, ::Type{T})
 
-Scalar reference microkernel for register-tile shape `(MR, NR)` and scalar
-type `T`. `zero_accumulator` returns an ordinary `Matrix{T}` of size
-`(MR, NR)`, indexed `acc[i+1, j+1]` for zero-based `(i, j)`.
+Scalar reference microkernel for register tile `(MR, NR)` and element type `T`.
 """
 struct ScalarKernel{MR, NR, T} <: DescriptorKernel{MR, NR, T}
     descriptor::KernelDescriptor{MR, NR, T}
@@ -15,22 +10,10 @@ end
 ScalarKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
     ScalarKernel(KernelDescriptor(Val(MR), Val(NR), T))
 
-"""
-    zero_accumulator(kernel::ScalarKernel{MR,NR,T}) -> Matrix{T}
-
-Return a logical `MR`-by-`NR` zero accumulator tile, `acc[i+1,j+1] == 0`
-for every zero-based `(i,j)` in `0:MR-1 x 0:NR-1`.
-"""
+# `acc[i+1, j+1]` for zero-based `(i, j)`.
 zero_accumulator(kernel::ScalarKernel{MR, NR, T}) where {MR, NR, T} = zeros(T, MR, NR)
 
-"""
-    accumulate(kernel::ScalarKernel, acc, packed_a, packed_b, kc::Int) -> acc
-
-Extends `Base.accumulate` (avoids a name collision with the also-exported
-`Base.accumulate` under `using QuasiStrided`), not type piracy. Updates
-`acc[i,j] += sum_p Ap[i,p]*Bp[j,p]` in place over `kc` K-steps; `kc == 0`
-returns `acc` unchanged without reading the packed buffers.
-"""
+# Extends `Base.accumulate` so `using QuasiStrided` does not clash with it.
 function Base.accumulate(
         kernel::ScalarKernel{MR, NR, T}, acc::AbstractMatrix{T},
         packed_a::PA, packed_b::PB, kc::Int
@@ -49,15 +32,6 @@ function Base.accumulate(
     return acc
 end
 
-
-"""
-    store_tile!(destination::QSTile{T}, acc, alpha::T, beta::T, kernel::ScalarKernel) -> destination
-
-`C[i,j] = alpha*R[i,j] + beta*C[i,j]` over the valid rectangle only, with
-BLAS-like shortcuts: `alpha == 0` never reads `acc`; `beta == 0` never reads
-old `C`; `beta == 1` skips the multiplication. Padding lanes (`i>=m`/`j>=n`)
-are never read, so nonfinite padding in `acc` cannot propagate.
-"""
 function store_tile!(
         destination::QSTile, acc::AbstractMatrix{T},
         alpha::T, beta::T, kernel::ScalarKernel
