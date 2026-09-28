@@ -51,7 +51,6 @@ end
 
 complex_method(::FMAddSubKernel) = FMAddSubMethod()
 lanewidth(::FMAddSubKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
-avecs_per_column(::FMAddSubKernel{MR, NR, T, W}) where {MR, NR, T, W} = (2 * MR) ÷ W
 
 # `x*y - c` in even lanes, `x*y + c` in odd lanes, each one fused rounding.
 # Generic IR (`fneg` + two `llvm.fma` + a blend), which the X86 backend folds

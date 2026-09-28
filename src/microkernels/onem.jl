@@ -48,7 +48,6 @@ end
 
 complex_method(::OneMKernel) = OneMMethod()
 lanewidth(::OneMKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
-avecs_per_column(::OneMKernel{MR, NR, T, W}) where {MR, NR, T, W} = (2 * MR) ÷ W
 
 zero_accumulator(kernel::OneMKernel) = zero_accumulator(kernel.inner)
 

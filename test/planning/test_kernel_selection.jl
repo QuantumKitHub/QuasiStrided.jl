@@ -1,12 +1,6 @@
 # Register shape, kernel and blocking selection from a `TargetProfile`.
 
 using StridedViews: StridedView
-using QuasiStrided: TargetProfile, CacheLevel, target_profile, unknown_target,
-    _derived_shape, _fallback_shape, _shape_override, _kernel_for, _default_kernel,
-    _fallback_blocking, kernel_shapes, NR_DEFAULT, _rule_applies, _isa_nregisters,
-    packed_a_per_k, packed_b_per_k, realtype, complex_method, RealMethod,
-    PlanarMethod, OneMMethod, FMAddSubMethod, accumulator_planes, a_reals, b_reals,
-    _modelled_blocking, _scale_blocking, _real_blocking_row, _planar_pressure
 
 @testset "real shape selection" begin
     @testset "unknown target: fallback shape and blocking" begin

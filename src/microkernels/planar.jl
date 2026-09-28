@@ -36,7 +36,6 @@ end
 
 complex_method(::PlanarKernel) = PlanarMethod()
 lanewidth(::PlanarKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
-avecs_per_column(::PlanarKernel{MR, NR, T, W}) where {MR, NR, T, W} = MR ÷ W  # per plane
 
 # One flat tuple: the real plane at `1:NV`, the imaginary plane at `NV+1:2NV`,
 # each laid out as the real kernel's. Flat keeps the accumulator in registers.

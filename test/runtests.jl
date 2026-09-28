@@ -7,8 +7,15 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
     AffineAxis, ScatterAxis, SourceTile, DestinationTile, axis_from_descriptor, nrows,
     ncols, axis_offset_range, checked_tile_storage_bounds, pack_a!, pack_b!,
-    zero_accumulator, accumulate, scale_tile!, store_tile!, execute_tile!, lanewidth,
-    avecs_per_column, contract!, Blocking, default_blocking, ScalarKernel, SIMDKernel
+    zero_accumulator, accumulate, store_tile!, execute_tile!, lanewidth, contract!,
+    Blocking, default_blocking, ScalarKernel, SIMDKernel, TargetProfile, CacheLevel,
+    target_profile, cache_topology, unknown_target, _detect_isa, _detect_target,
+    _derived_shape, _fallback_shape, _shape_override, _kernel_for, _default_kernel,
+    _fallback_blocking, kernel_shapes, _parse_size, _count_cpu_list, NR_DEFAULT,
+    _rule_applies, _isa_nregisters, packed_a_per_k, packed_b_per_k, realtype,
+    complex_method, RealMethod, PlanarMethod, OneMMethod, accumulator_planes, a_reals,
+    b_reals, FMAddSubMethod, _modelled_blocking, _scale_blocking, _real_blocking_row,
+    _planar_pressure
 # plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 
 # All files share one scope, so helper names must be unique across files.
@@ -22,18 +29,18 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     include("layout/test_tiles.jl")
 
     include("packing/test_kernel_descriptor.jl")
+    # Defines `ref_pack`/`pack_fixture`, which the two complex packing files reuse.
     include("packing/test_pack_real.jl")
     include("packing/test_pack_complex.jl")
     include("packing/test_pack_complex_contiguous.jl")
 
+    # Defines the `mk_*` kernel-contract helpers the other microkernel files use.
     include("microkernels/test_scalar_kernel.jl")
     include("microkernels/test_simd_kernel.jl")
     include("microkernels/test_planar_kernel.jl")
     include("microkernels/test_planar_store_fastpath.jl")
     include("microkernels/test_onem_kernel.jl")
     include("microkernels/test_fmaddsub_kernel.jl")
-    # After test_planar_store_fastpath.jl: reuses its `ref_axpby` reference.
-    include("microkernels/test_fmaddsub_store_fastpath.jl")
 
     include("planning/test_kernel_selection.jl")
     include("planning/test_plan_contract.jl")

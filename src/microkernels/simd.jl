@@ -30,7 +30,6 @@ SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
     SIMDKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(T)))
 
 lanewidth(::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
-avecs_per_column(::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W} = MR ÷ W
 
 # `(MR÷W)*NR` vectors; vector `v` of column `j` is at `v + (MR÷W)*j + 1`.
 function zero_accumulator(kernel::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W}

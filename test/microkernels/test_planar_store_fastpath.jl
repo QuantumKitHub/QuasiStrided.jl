@@ -11,7 +11,7 @@
 # The fast path ships for AVX-512 only; every expectation derives from the live
 # profile, so `test/forced_isa_runner.jl` checks the other ISAs too.
 
-using QuasiStrided: PlanarKernel, FMAddSubKernel, PtrScatterAxis, TargetProfile, CacheLevel,
+using QuasiStrided: PlanarKernel, FMAddSubKernel, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, PtrScatterAxis, TargetProfile, CacheLevel,
     target_profile, unknown_target, KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 
 const STORE_FASTPATH_ON = QuasiStrided._complex_fastpath_isa_eligible()
@@ -111,4 +111,10 @@ end
         @test !QuasiStrided._complex_fastpath_isa_eligible(unknown_target())
         @test STORE_FASTPATH_ON == (target_profile().vector_bytes == QuasiStrided._isa_vector_bytes(Val(:avx512)))
     end
+end
+
+
+@testset "fmaddsub store fast path" begin
+    mk_store_fastpath(FMAddSubKernel, ComplexF64, KERNEL_SHAPES_C64_FMADDSUB; beta0_exact = true)
+    mk_store_fastpath(FMAddSubKernel, ComplexF32, KERNEL_SHAPES_C32_FMADDSUB; beta0_exact = true)
 end
