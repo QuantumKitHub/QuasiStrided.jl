@@ -823,9 +823,17 @@ end
 # Labels: a=1 b=2 c=3 d=4 e=5, distinct extents so a wrong order shows up as a
 # wrong stride, not a coincidentally equal one. `_KO_EXT` is small (every
 # operand fits any L2); `_KO_BIG` makes B's lines-touched-before-`d`-advances
-# footprint b*c*e*64 B = 4 MB, beyond every measured core's L2 share.
+# footprint b*c*e*64 B exceed THIS host's L2 share (`_l2_core_bytes`), so the
+# model reorders K wherever the suite runs. A fixed e = 40 (4.1 MB) sits just
+# below the 4 MB share of GitHub's macOS arm64 runner (a 3-vCPU virtual M1:
+# 12 MB L2 over `hw.perflevel0.cpusperl2` = 3), where the model rightly keeps
+# indA order; so e is derived from the detected share, never below 40.
+function _ko_big(l2 = QuasiStrided._l2_core_bytes(Float64))
+    e = max(40, fld(l2, 40 * 40 * 64) + 1)
+    return Dict(1 => 9, 2 => 40, 3 => 40, 4 => 5, 5 => e)
+end
 const _KO_EXT = Dict(1 => 9, 2 => 3, 3 => 4, 4 => 5, 5 => 6)
-const _KO_BIG = Dict(1 => 9, 2 => 40, 3 => 40, 4 => 5, 5 => 40)
+const _KO_BIG = _ko_big()
 _ko_array(::Type{T}, ind, ext = _KO_EXT) where {T} = randn(T, Tuple(ext[l] for l in ind)...)
 _ko_stride(v, ind, l) = Base.strides(v)[findfirst(==(l), ind)]
 
@@ -989,6 +997,8 @@ end
 @testset "K order: plan_contract flips contract_scrambled at an L2-exceeding size" begin
     T = Float64
     ext = _KO_BIG
+    # The premise, on this host's detected L2 share (what `plan_contract` reads).
+    @test ext[2] * ext[3] * ext[5] * 64 > QuasiStrided._l2_core_bytes(T)
     Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))   # B[d,c,b,e]
     Cv = StridedView(zeros(T, ext[1], ext[5]))
@@ -1004,7 +1014,7 @@ end
     @test p.kgroup.strides[1] == (9, 360, 14400)
 
     # The swapped orientation (B feeds M: C stored as (e, a), an N run of
-    # 40 >= mr) uses the same K order with the maps exchanged.
+    # e >= 40 >= mr) uses the same K order with the maps exchanged.
     Ct = StridedView(zeros(T, ext[5], ext[1]))
     kernel = SIMDKernel(Val(8), Val(6), T)
     pt = plan_contract(Ct, Av, (1, 2, 3, 4), Bs, (4, 3, 2, 5), (5, 1); kernel = kernel)
