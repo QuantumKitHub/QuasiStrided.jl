@@ -26,10 +26,14 @@ struct QuasiStridedBackend <: TO.AbstractBackend end
 # pack into `Vector{real(T)}` and `reserve!` is grow-only, so they can share one.
 const _QS_WORKSPACE_KEY = :quasistrided_contract_workspaces
 
-@inline function _qs_task_workspace(::Type{T}) where {T}
-    pool = get!(task_local_storage(), _QS_WORKSPACE_KEY) do
+@inline function _qs_workspace_pool()
+    return get!(task_local_storage(), _QS_WORKSPACE_KEY) do
         return Dict{DataType, ContractWorkspace}()
     end::Dict{DataType, ContractWorkspace}
+end
+
+@inline function _qs_task_workspace(::Type{T}) where {T}
+    pool = _qs_workspace_pool()
     ws = get(pool, T, nothing)
     # Both assertions are needed: without them the branches join to the abstract
     # `ContractWorkspace`, and the call into `_planned` boxes its arguments.
