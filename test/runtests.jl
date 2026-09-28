@@ -1,9 +1,7 @@
 using Test
 using Random
 using QuasiStrided
-# QuasiStrided.jl un-exports its internal/public-unexported tiers; this test
-# suite still references all of them unqualified across its included files,
-# so restore them here once rather than editing each file individually.
+# Internal names the test files use unqualified.
 using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescriptor,
     describe_block, block_descriptors!, normalize_group, KernelDescriptor, mr, nr,
     scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
@@ -11,14 +9,9 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     ncols, axis_offset_range, checked_tile_storage_bounds, pack_a!, pack_b!,
     zero_accumulator, accumulate, scale_tile!, store_tile!, execute_tile!, lanewidth,
     avecs_per_column, contract!, Blocking, default_blocking, ScalarKernel, SIMDKernel
-# plan_contract, execute! and ContractPlan are intentionally NOT restored here:
-# helpers.jl introduces its own unqualified `plan_contract`/`execute!`/
-# `ContractPlan` bindings via `const ... = QuasiStrided.<name>`, and
-# execution/test_macro_blocking.jl deliberately writes `QuasiStrided.<name>` to
-# avoid colliding with those (see its header comment).
+# plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 
-# Every file below is included into this one scope, in pipeline-stage order;
-# helper names must therefore be unique across files.
+# All files share one scope, so helper names must be unique across files.
 @testset "QuasiStrided.jl" begin
     include("helpers.jl")
 
@@ -58,13 +51,7 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     include("execution/test_dot.jl")
     include("execution/test_outer.jl")
 
-    # Last among the functional tests: it does a bare `using TensorOperations`,
-    # which exports its own `scalartype` and would otherwise conflict with the
-    # `scalartype` restored from QuasiStrided above for any file included
-    # after it.
+    # Last: its `using TensorOperations` makes `scalartype` ambiguous for later files.
     include("integrations/test_tensoroperations.jl")
-    # Quality gate (Aqua): runs last since it audits the *whole* loaded
-    # package/dependency graph after every other testset has already forced
-    # everything to load, rather than gating functional tests on it.
     include("quality/test_aqua.jl")
 end
