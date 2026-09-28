@@ -1,8 +1,6 @@
 # Packers: copy one sliver of A (up to MR logical rows) or B (up to NR logical
 # columns) over a K range into a contiguous panel in the descriptor's format.
 
-using SIMD: shufflevector
-
 # A runtime check rather than dispatch, so a mismatch is an ArgumentError.
 @inline function _check_packed_eltype(packed, kernel::Descriptor{MR, NR, T2}) where {MR, NR, T2}
     R = realtype(kernel)

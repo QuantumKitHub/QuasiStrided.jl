@@ -3,6 +3,8 @@
 # destination and the driver's `identity`/`conj` transform. They read exactly
 # the addresses the scalar loop would, so they skip no validation.
 
+using SIMD: shufflevector
+
 # `conj` is the identity on a real element type.
 @inline _copies_unchanged(::typeof(identity), ::Type) = true
 @inline _copies_unchanged(::typeof(conj), ::Type{T}) where {T <: Real} = true
@@ -34,16 +36,16 @@ end
     return packed
 end
 
-# Complex: a deinterleave of the source's native `[re, im, ...]` layout plus,
-# for `conj`, a sign flip. `lane_axis` is the axis the packed index runs along
-# (`source.rows` for A, `source.cols` for B); unit stride over dense rank-1
-# storage is what makes reading `PD` elements as `2PD` reals a sound bitcast.
-# `valid == PD` keeps padding (and its no-`-0.0` rule) on the scalar path.
 # The transforms `_pack_alt` covers; anything else must take the scalar path.
 @inline _complex_pack_transform_eligible(::typeof(identity)) = true
 @inline _complex_pack_transform_eligible(::typeof(conj)) = true
 @inline _complex_pack_transform_eligible(::Any) = false
 
+# Complex: a deinterleave of the source's native `[re, im, ...]` layout plus,
+# for `conj`, a sign flip. `lane_axis` is the axis the packed index runs along
+# (`source.rows` for A, `source.cols` for B); unit stride over dense rank-1
+# storage is what makes reading `PD` elements as `2PD` reals a sound bitcast.
+# `valid == PD` keeps padding (and its no-`-0.0` rule) on the scalar path.
 @inline function _pack_complex_contiguous_eligible(
         packed::V, storage::S, lane_axis::AX, transform::F, format::FMT,
         valid::Int, ::Val{PD}, ::Type{T}
