@@ -1,24 +1,17 @@
 # Macro-kernel helpers for the five-loop nest: function barriers over the
 # tile axis types, packed-sliver addressing, and sliver classification.
 
-# GUARDRAIL, load-bearing: `_axis_of` returns a `Union{AffineAxis,PtrScatterAxis}`, and each
-# consumer below is a `where {R<:Axis, C<:Axis}` barrier method that Julia
-# specializes per concrete (R,C), so no partially-applied -- heap-boxed --
-# `QSTile` is ever built. **Do not** collapse these helpers into their call
-# sites, and do not let a union cross any other boundary.
-# Both arms are isbits, so this Union itself needs no heap box (see
-# PtrScatterAxis).
+# GUARDRAIL: `_axis_of` returns a `Union{AffineAxis,PtrScatterAxis}` (both
+# isbits, so unboxed), and each consumer below is a barrier specialised per
+# concrete axis type, so no partially-typed, heap-boxed `QSTile` is ever
+# built. Do not inline these helpers into their callers.
 @inline function _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int)
     return d.regular ? AffineAxis(d.base, d.stride, d.count) :
         PtrScatterAxis(pointer(buffer, first + 1), d.count)
 end
 
-# The same, with the sliver's axis type fixed statically by the execution
-# path (`_NestPath`, src/execution/barrier.jl): `Val(true)` where the
-# composite's map is an affine ramp, which makes every block descriptor
-# `describe_block` or `_ramp_descriptor` produces from it regular, so the axis
-# is always an `AffineAxis` and no `PtrScatterAxis` arm is compiled
-# downstream. The `regular` test stays as a cheap guard on that invariant.
+# The same with the axis type fixed by the path: `Val(true)` for a ramp map,
+# whose descriptors are always regular (checked).
 @inline _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{false}) =
     _axis_of(d, buffer, first)
 @inline function _axis_of(d::BlockDescriptor, ::Vector{Int}, ::Int, ::Val{true})
@@ -28,22 +21,9 @@ end
 @noinline _throw_irregular_ramp_descriptor() =
     throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))
 
-# `pack!` is pack_a!/pack_b! -- or their `unsafe_pack_a!`/`unsafe_pack_b!`
-# siblings (src/packing/pack.jl) -- as a plain function, specialized on, never a
-# closure; A and B differ only in which of rows/cols is the k axis, which the
-# caller has already resolved. `transform` is the plan's per-operand
-# `identity`/`conj` singleton.
-#
-# This helper is only as safe as the `pack!` it is handed: with an `unsafe_*`
-# packer it performs no storage-bounds check, which is why the call sites spell
-# that name out rather than hiding it behind a flag.
-#
-# GUARDRAIL: every argument here has its OWN bound type parameter, `transform`
-# included. Leaving `TF` unbound costs a dynamic dispatch (~80 B/call), for the
-# reason spelled out at `pack_a!` in src/microkernels/interface.jl.
-# And all THREE call sites -- `_execute_nest!`'s two and `execute_tilewise!`'s
-# one -- must pass the matching operand's transform: missing the third makes
-# the in-tree ORACLE silently wrong for conjugated inputs.
+# `pack!` is one of pack_a!/pack_b!/unsafe_pack_a!/unsafe_pack_b!; call sites
+# spell the unsafe name out. GUARDRAIL: `transform` needs its own bound type
+# parameter, or it costs a dynamic dispatch per call (see `pack_a!`).
 @inline function _pack_sliver!(
         pack!::PF, packed::PK, storage::S, base::Int,
         rows::R, cols::C, kernel, transform::TF
@@ -61,11 +41,7 @@ end
     return nothing
 end
 
-# Same guardrail barrier as `_execute_micro_tile!`, over `unsafe_execute_tile!`
-# (src/microkernels/interface.jl) instead of `execute_tile!`: the destination's storage-bounds
-# check has already been made ONCE for the whole (ic, jc) macro block this tile
-# belongs to. `unsafe_` is in the name at every call site precisely because the
-# precondition lives at the caller.
+# The caller has bounds-checked the whole macro block this tile belongs to.
 @inline function unsafe_execute_micro_tile!(
         kernel, storage::S, base::Int, rows::R, cols::C,
         packed_a::PA, packed_b::PB, kc_len::Int, alpha, beta
@@ -83,31 +59,18 @@ end
     return nothing
 end
 
-# Sliver `s` of a shared packed panel, as a borrowed pointer, at the CURRENT
-# block's depth `kc_len` (< the buffer's per-sliver capacity on a tail K block,
-# since the buffer is sized for kc_eff). Used by both the packing and the
-# consuming step of a (jc,pc,ic) iteration, so the two cannot disagree.
-#
-# GUARDRAIL: `reg_tile` here is a count of REALS per logical K step --
-# `packed_a_per_k`/`packed_b_per_k`, NOT `mr`/`nr`. They coincide for every
-# real kernel (pinned in test/planning/test_kernel_selection.jl), so this is the identity on the
-# real path; for a complex kernel only the packed count addresses the panel
-# correctly.
+# Sliver `s` of a packed panel at the current block's depth `kc_len`, shared by
+# the packing and the consuming step so the two cannot disagree. GUARDRAIL:
+# `reg_tile` counts reals per K step (`packed_a_per_k`), not `mr`; they differ
+# for complex kernels.
 @inline function _sliver_panel(buffer, reg_tile::Int, kc_len::Int, s::Int)
     stride = reg_tile * kc_len
     return packed_panel(buffer, s * stride + 1, stride)
 end
 
-# Classify each register sliver of a just-filled macro block. Shared by the
-# N side (jc: B/C) and the M side (ic: A/C), which are structurally identical.
-#
-# Also returns the two maps' BLOCK offset ranges, `((lo1, hi1), (lo2, hi2))`,
-# accumulated from the sliver descriptors as they are produced rather than in a
-# second pass -- `O(1)` per regular sliver, and for an irregular one exactly
-# the scan a per-sliver `checked_tile_storage_bounds` would do.
-# Because the slivers partition `buf[1:blocklen]`, this union IS the range of
-# the whole block, which is what `_execute_nest!`'s hoisted
-# `checked_span_bounds` calls need.
+# Classify each register sliver of a just-filled macro block, and return the
+# two maps' offset ranges over the whole block (the slivers partition it) for
+# the hoisted bounds checks.
 @inline function _classify_slivers!(
         desc1::Vector{BlockDescriptor}, desc2::Vector{BlockDescriptor},
         buf1::Vector{Int}, buf2::Vector{Int},
@@ -131,40 +94,25 @@ end
             lo2 = min(lo2, l2); hi2 = max(hi2, h2)
         end
     end
-    # `hi < lo` is `checked_span_bounds`'s "empty, always passes" convention,
-    # which is what these initial values mean when no sliver contributed.
+    # `hi < lo` means empty to `checked_span_bounds`.
     return ((lo1, hi1), (lo2, hi2))
 end
 
-# ----------------------------------------------------------------------------
-# Closed-form block description for an affine-ramp composite. When
-# `affine_ramp(g)` holds, logical
-# coordinate `q` maps to offset `q * step[p]` for every map `p`, so a block's
-# whole sliver structure follows from arithmetic and neither the offset buffer
-# nor `describe_block`'s scan is needed. `fill_offsets!` + `_classify_slivers!`
-# stay as the fallback for every composite that is not provably a ramp.
-# ----------------------------------------------------------------------------
-
-# Exactly what `describe_block` classifies a materialized ramp interval as,
-# INCLUDING its `stride == 0` convention for a count-1 block (which is
-# behaviourally irrelevant -- an `AffineAxis` of count 1 never multiplies by
-# its stride -- but keeping it identical means the descriptors these two paths
-# produce are `==`, not merely equivalent, which a test can assert).
+# Closed-form block descriptors for an affine-ramp composite (offset of `q`
+# is `q * step`), with no offset buffer or scan. `==` to what `describe_block`
+# gives for the materialized interval, including its `stride == 0` for a
+# count-1 block.
 @inline _ramp_descriptor(step::Int, first::Int, count::Int) =
     count == 0 ? BlockDescriptor(0, 0, 0, true) :
     count == 1 ? BlockDescriptor(first * step, 0, 1, true) :
     BlockDescriptor(first * step, step, count, true)
 
-# Offset range of `[first, first+count)` under a ramp, in `axis_offset_range`'s
-# `(lo, hi)` / `(0, -1)`-if-empty convention. `first * step` and
-# `(first+count-1) * step` are offsets of coordinates inside the group's
-# domain, so they are covered by `AxisGroup`'s construction-time excursion
-# validation and cannot overflow.
+# Offset range of `[first, first+count)`; `(0, -1)` if empty. Cannot overflow:
+# `AxisGroup` validated every in-domain offset at construction.
 @inline _ramp_offset_range(step::Int, first::Int, count::Int) =
     count == 0 ? (0, -1) : minmax(first * step, (first + count - 1) * step)
 
-# `_classify_slivers!`'s closed-form twin: same descriptors, same returned
-# block ranges, no buffer touched.
+# `_classify_slivers!`'s closed-form twin.
 @inline function _ramp_slivers!(
         desc1::Vector{BlockDescriptor}, desc2::Vector{BlockDescriptor},
         step1::Int, step2::Int, first::Int,

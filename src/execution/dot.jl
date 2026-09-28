@@ -1,44 +1,27 @@
-# The dot-product ("gemv") path for a degenerate free extent: `M == 1` or
-# `N == 1`, when the operand that still has a free extent -- the MATRIX
-# operand, `Qfree x K` -- is stored with K unit-stride.
-#
-# Why the register microkernel is the wrong tool here: it vectorizes along M.
-# With `M == 1` every A vector is 1/mr full, and with the roles swapped
-# (`N == 1`) the matrix operand feeds M through a pack that gathers its K-major
-# rows one element at a time -- on the suite's `C[cde] = A[ab] B[abcde]`
-# cases that gather is 70% (Float64) of the call. A gemv wants to vectorize
-# along K instead: `C[q] = sum_k v[k] * Mat[q, k]` with `Mat[q, :]` a
-# contiguous run, i.e. one W-wide FMA per W elements of the matrix, which is
-# read exactly once, plus one horizontal reduction per output. Nothing is
-# packed except the K-vector `v` (gathered once per K block, with its
-# conjugation folded in). This is what `?gemv` does for the transposed case.
-#
-# Selected by `execute!` through `_select_path` when `_dot_applicable` holds
-# (see there for the eligibility rule and the measurement), before the
-# five-loop nest; on an ineligible plan the nest runs. `_DOT_MODE` overrides the
-# automatic choice for tests and benchmarks.
+# The dot-product ("gemv") path for `M == 1` or `N == 1` when the matrix
+# operand (`Qfree x K`) is stored with K unit-stride. The register microkernel
+# vectorizes along M, which is 1/mr full here, and gathering the K-major
+# matrix into packed panels would dominate the call. This path vectorizes
+# along K instead: one W-wide FMA per W matrix elements, the matrix read once
+# and unpacked, one horizontal reduction per output. Only the K-vector is
+# gathered, once per K block, with its conjugation folded in.
 
+# Forces the path off (`:never`) for benchmarks and tests; `:auto` otherwise.
 const _DOT_MODE = Ref{Symbol}(:auto)
 
-# One full hardware vector register of `real(T)`: 8 Float64 on AVX-512, 4 on
-# AVX2; the fallback lane width where the register width is unknown.
+# One full hardware vector register of `real(T)`.
 @inline function _dot_lanewidth(::Type{T}) where {T}
     R = real(T)
     vb = target_profile().vector_bytes
     return (vb > 0 && vb % sizeof(R) == 0) ? vb ÷ sizeof(R) : _default_lanewidth(R)
 end
 
-# Outputs computed together, each with its own accumulator(s): 8 for a real
-# `T` (8 FMA chains in flight cover the FMA latency on every x86 we ship for),
-# 4 for a complex one (two accumulator planes each, so 8 chains as well).
+# Outputs computed together: 8 independent FMA chains cover the FMA latency
+# (a complex output has two accumulator planes).
 _dot_group_width(::Type{T}) where {T} = T <: Complex ? 4 : 8
 
-# The affine step of map `p` of `g` alone, or `nothing` when that map is not
-# a single ramp in the logical coordinate. `affine_ramp` (src/layout/axis_group.jl)
-# asks the same of EVERY map at once; here the two operands' K maps are judged
-# separately, because only the matrix operand's needs to be contiguous (the
-# vector is gathered through its own offsets, whatever they are). Same
-# singleton-skipping and Int128 comparison as `affine_ramp`.
+# The affine step of map `p` of `g` alone, or `nothing` if it is not a single
+# ramp; `affine_ramp` asks the same of all maps at once.
 function _map_ramp_step(g::AxisGroup{D, P}, p::Int) where {D, P}
     step = 0
     run = 1
@@ -60,45 +43,9 @@ function _map_ramp_step(g::AxisGroup{D, P}, p::Int) where {D, P}
     return step
 end
 
-"""
-    _dot_applicable(plan::ContractPlan, Qm, Qn, Qk) -> Bool
-
-Whether `execute!` takes the dot-product path on `plan` (`_select_path`,
-src/execution/execute.jl, which then runs it as `_DotPath{Qm == 1, W}` with
-`W = _dot_lanewidth(T)`). Eligible when `_DOT_MODE[]` is not `:never` and
-
-  * `Qm == 1` (the matrix operand is B, its free composite the N group) or
-    `Qn == 1` (the matrix operand is A, the M group);
-  * the matrix operand's K map is the unit ramp `offset(k) = k` (checked per
-    map by `_map_ramp_step`, so a permuted or strided K on the VECTOR operand
-    does not disqualify), and its storage is a `DenseVector{T}` (the K runs
-    are read with raw-pointer vector loads);
-  * `Qk >= W` for the lane width `W = _dot_lanewidth(T)`: below one vector
-    the path would be all scalar tail;
-  * the plan's packed-A buffer can hold one K block of the gathered vector
-    (always true for the shipped kernel shapes; checked, not assumed).
-
-Measured 2026-09-27, ccqlin038 (Cascade Lake, AVX-512, Julia 1.12.7), the
-suite's `dim{6,8,12,16}_0_2_3_gemm_ready` cases `C[cde] = A[ab] B[abcde]` (K
-= dim^2, N = dim^3), `execute!` time, this path vs the nest on the same tree
-(`benchmark/bench_degenerate.jl`, interleaved medians), and OpenBLAS `gemv`
-on the same data:
-
-                1x36x216   1x64x512   1x144x1728   1x256x4096
-    Float64     4.9 -> 1.9  18.9 -> 4.2  176 -> 81   728 -> 331 us    (gemv 1.0 / 3.4 / 76 / 323)
-    ComplexF64  12.1 -> 2.6 41.7 -> 7.6  304 -> 157  1359 -> 680 us   (gemv 2.4 / 8.6 / 152 / 679)
-
-The nest's time there is the gather pack of the matrix operand, which this
-path does not perform at all. The K tail is one masked step (not a scalar
-loop): 1x36x216 Float64 went 3.0 -> 1.9 us with it.
-"""
-function _dot_applicable(plan::ContractPlan{T}, Qm::Int, Qn::Int, Qk::Int) where {T}
-    return _dot_applicable(T, plan.Astorage, plan.Bstorage, plan.kgroup, Qm, Qn, Qk) &&
-        _dot_capacity_ok(plan)
-end
-
-# Every clause but the workspace capacity, on the plan's parts, so that
-# `plan_contract` can predict the path before the plan exists (`_path_hint`).
+# Whether the dot path applies (all but the workspace capacity): a degenerate
+# free extent, a matrix operand with unit-ramp K in dense storage (raw-pointer
+# loads), and at least one vector of K.
 function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, Qm::Int, Qn::Int, Qk::Int) where {T}
     _DOT_MODE[] === :never && return false
     (Qm == 1 || Qn == 1) || return false
@@ -114,9 +61,8 @@ function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, Qm::I
 end
 
 # The gathered vector (and, complex, its pair-swapped copy) lives in the
-# packed-A buffer, reinterpreted as `T`. Always true for an automatically
-# chosen kernel (the buffer holds `mr >= 2` K columns of reals per K step);
-# `nothing` is the prediction's "assume so".
+# packed-A buffer. Always true for an automatically chosen kernel; `nothing`
+# is the prediction's "assume so".
 function _dot_capacity_ok(plan::ContractPlan{T}) where {T}
     need = (T <: Complex ? 2 : 1) * plan.blocking.kc
     return (length(plan.workspace.packed_a) * sizeof(real(T))) ÷ sizeof(T) >= need
@@ -143,11 +89,8 @@ function _execute_dot!(plan::ContractPlan{T}, alphaT::T, betaT::T, matB::Bool, :
     return plan.Cstorage
 end
 
-# Conjugation is folded rather than applied per element in the kernel:
-# `sum conj(m)*v == conj(sum m*conj(v))`, so a conjugated matrix operand
-# becomes a flip of the gathered vector plus one `conj` of each output, and
-# the vector's own transform composes with that flip by parity (XOR), the
-# same rule `plan_contract` uses for a flag against a view's `op`.
+# Conjugation is folded out of the kernel: `sum conj(m)*v == conj(sum m*conj(v))`,
+# so a conjugated matrix becomes a flipped vector plus a `conj` per output.
 @inline _is_conj(::typeof(conj)) = true
 @inline _is_conj(::typeof(identity)) = false
 
@@ -179,8 +122,6 @@ function _dot_nest!(
     vflip = _is_conj(vtrans) ⊻ mconj
     NB = _dot_group_width(T)
 
-    # `ws`: the gather buffer and every offset buffer. `mstorage`: the K runs
-    # are raw-pointer vector loads.
     GC.@preserve ws mstorage begin
         gptr = reinterpret(Ptr{T}, pointer(ws.packed_a))
         mptr = pointer(mstorage)
@@ -190,8 +131,6 @@ function _dot_nest!(
             kblock = min(kc_eff, Qk - pc)
             beta_eff = firstblock ? betaT : one(T)
 
-            # The vector's K offsets for this block (both K maps are filled;
-            # only the vector's is read -- the matrix's is the unit ramp).
             fill_offsets!((ws.k_buf_A, ws.k_buf_B), plan.kgroup, pc, kblock)
             checked_span_bounds(vbase, _buffer_range(vkbuf, kblock), (0, 0), lenv)
             if vflip
@@ -204,10 +143,7 @@ function _dot_nest!(
             while q0 < Qf
                 qcount = min(blocklen, Qf - q0)
                 fill_offsets!((bufM, bufC), g, q0, qcount)
-                # Every address this block reads/writes, validated before any
-                # of it: the matrix rows against this K block (the matrix's
-                # K offsets are `pc .. pc+kblock-1` by the unit-ramp
-                # eligibility), and the C elements.
+                # The matrix's K offsets are `pc .. pc+kblock-1` (unit ramp).
                 checked_span_bounds(mbase, _buffer_range(bufM, qcount), (pc, pc + kblock - 1), lenm)
                 checked_span_bounds(cbase, _buffer_range(bufC, qcount), (0, 0), lenc)
                 if mconj
@@ -231,11 +167,9 @@ function _dot_nest!(
     return nothing
 end
 
-# Gather `v[t] = transform(vstorage[vbase + vkbuf[t+1] + 1])`, `0 <= t <
-# kblock`, into `gptr`; for a complex `T` also its pair-swapped copy
-# `Complex(imag, real)` at `gptr + kblock`, which the complex kernel
-# multiplies by to get the imaginary part without a per-step shuffle. The
-# caller has bounds-checked the vector region.
+# Gather the transformed vector into `gptr`; for a complex `T` also its
+# pair-swapped copy at `gptr + kblock`, which gives the imaginary part without
+# a per-step shuffle.
 @inline function _dot_gather!(
         gptr::Ptr{T}, vstorage::SV, vbase::Int, vkbuf::Vector{Int}, kblock::Int, transform::F
     ) where {T, SV, F}
@@ -250,8 +184,7 @@ end
 end
 
 # One block of outputs, `NB` at a time. The last group's padding outputs alias
-# the block's last valid output (computed, never stored) -- the same trick as
-# `UnpackedBView`'s padding columns.
+# the last valid one (computed, never stored).
 @inline function _dot_block!(
         Cstorage::SC, cbase::Int, bufC::Vector{Int}, mptr::Ptr{T}, mbase_k::Int,
         bufM::Vector{Int}, qcount::Int, gptr::Ptr{T}, kblock::Int,
@@ -271,8 +204,7 @@ end
     return nothing
 end
 
-# `(mbase_k + bufM[q + min(j, nvalid)])` for `j in 1:NB`, as a literal tuple
-# expression: an `ntuple` closure over the loop-carried `q` would box it.
+# A literal tuple: an `ntuple` closure over the loop-carried `q` would box it.
 @generated function _dot_bases(bufM::Vector{Int}, q::Int, nvalid::Int, mbase_k::Int, ::Val{NB}) where {NB}
     ex = [:(mbase_k + @inbounds(bufM[q + min($j, nvalid)])) for j in 1:NB]
     return quote
@@ -281,15 +213,9 @@ end
     end
 end
 
-# ----------------------------------------------------------------------------
-# The group kernels: `NB` dot products of length `kblock` between the gathered
-# vector at `gptr` and the matrix rows at `mptr + mbases[j]`, all unit-stride.
-# A W-wide main loop, one masked step for the `kblock % W` tail, and a
-# horizontal reduction; every tuple index is a literal (Cliff B, as in the
-# microkernels), which is why the step bodies are `@generated`.
-# ----------------------------------------------------------------------------
-
-# --- real ------------------------------------------------------------------
+# `NB` dot products of the gathered vector with unit-stride matrix rows: a
+# W-wide main loop, one masked tail step, a horizontal reduction. The step
+# bodies are `@generated` so every tuple index is a literal.
 
 @inline function _dot_group(
         mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, kblock::Int, ::Val{W}, ::Val{NB}
@@ -301,9 +227,7 @@ end
         accs = _dot_step_real(accs, mptr, gptr, mbases, t, nothing)
         t += W
     end
-    # The K tail (`kblock % W` elements) as ONE masked step: masked-off lanes
-    # load as zero and are never read from memory, so no address past a row's
-    # end is touched.
+    # Masked-off lanes are never read, so nothing past a row's end is touched.
     if t < kblock
         accs = _dot_step_real(accs, mptr, gptr, mbases, t, _dot_tailmask(Val(W), kblock - t))
     end
@@ -314,9 +238,8 @@ end
 @inline _dot_tailmask(::Val{W}, rem::Int) where {W} =
     Vec{W, Int}(ntuple(i -> i - 1, Val(W))) < rem
 
-# One W-wide K step for every output of the group; with a `mask`, the masked
-# tail step (`mask === nothing` for the main loop, resolved at compile time;
-# passed explicitly -- a default argument adds a non-inlined wrapper method).
+# `mask === nothing` for the main loop. Passed explicitly: a default argument
+# adds a non-inlined wrapper method.
 @generated function _dot_step_real(
         accs::NTuple{NB, Vec{W, T}}, mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, t::Int,
         mask::M
@@ -341,17 +264,10 @@ end
     end
 end
 
-# --- complex ---------------------------------------------------------------
-#
-# Interleaved (native) layout throughout, `W` REAL lanes = `W ÷ 2` complex
-# elements per vector. For output `j`, two accumulator planes over the K loop:
-#
-#     P1 += m .* v          lanes (mr*vr, mi*vi, ...)  ->  re = sum(P1 .* (+1,-1,+1,-1,...))
-#     P2 += m .* swap(v)    lanes (mr*vi, mi*vr, ...)  ->  im = sum(P2)
-#
-# with `swap(v)` the gathered pair-swapped copy at `gptr + kblock`. Two FMAs
-# per matrix vector, no shuffle in the loop. `accs[j]` is `P1_j`, `accs[NB+j]`
-# is `P2_j`.
+# Complex, interleaved layout (`W` real lanes). Per output two planes,
+#     P1 += m .* v        ->  re = sum(P1 .* (+1,-1,+1,-1,...))
+#     P2 += m .* swap(v)  ->  im = sum(P2)
+# so two FMAs per matrix vector and no shuffle. `accs[NB+j]` is `P2_j`.
 
 @inline function _dot_group(
         mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, kblock::Int, ::Val{W}, ::Val{NB}
@@ -365,7 +281,6 @@ end
         accs = _dot_step_cplx(accs, mptr, gptr, gptr + sizeof(T) * kblock, mbases, t, nothing)
         t += WC
     end
-    # The K tail as one masked step over its `2 * (kblock - t)` real lanes.
     if t < kblock
         accs = _dot_step_cplx(
             accs, mptr, gptr, gptr + sizeof(T) * kblock, mbases, t,
@@ -379,9 +294,7 @@ end
         accs::NTuple{NA, Vec{W, R}}, mptr::Ptr{T}, gptr::Ptr{T}, gsptr::Ptr{T},
         mbases::NTuple{NB, Int}, t::Int, mask::M
     ) where {NA, W, R, T, NB, M}
-    NA == 2 * NB || return :(throw(ArgumentError("_dot_step_cplx: expected 2NB accumulators")))
-    T === Complex{R} || return :(throw(ArgumentError("_dot_step_cplx: lane type must be real(T)")))
-    sz = sizeof(T)   # bytes per complex element; offsets below are in elements
+    sz = sizeof(T)
     mk = M === Nothing ? () : (:mask,)
     loads = [
         :($(Symbol(:m, j)) = vload(Vec{$W, $R}, reinterpret(Ptr{$R}, mptr + $sz * (mbases[$j] + t)), $(mk...)))

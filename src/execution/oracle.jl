@@ -1,21 +1,11 @@
-"""
-    execute_tilewise!(plan::ContractPlan, alpha::Number, beta::Number)
-
-Unexported. The independent tile-by-tile correctness oracle for
-[`execute!`](@ref): tiles M/N in steps of
-`mr(plan.kernel)`/`nr(plan.kernel)` and, per output tile, K in
-`plan.blocking.kc`-sized panels, packing one sliver per tile and calling
-`execute_tile!` with `beta` on the first panel and `one(T)` on later ones.
-Uses only its own `tw_*` buffers, so it shares no mutable state with
-`execute!`. Allocation-free.
-
-Requires a plan built with `oracle = true` (the default); throws
-`ArgumentError` otherwise, since `oracle = false` is exactly the request not
-to allocate these buffers.
-"""
+# The tile-by-tile correctness oracle for `execute!`: per register tile, K in
+# `kc` panels, pack one sliver each and call the checked `execute_tile!`. Uses
+# only its own `tw_*` buffers, so it shares no mutable state with `execute!`.
+# Needs a plan built with `oracle = true`.
 function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) where {T}
     ws = plan.workspace
-    _has_oracle(ws) || throw(
+    # `tw_packed_a` is never empty for a legal blocking unless `oracle = false`.
+    isempty(ws.tw_packed_a) && throw(
         ArgumentError(
             "execute_tilewise! needs the oracle buffers, which this plan was built " *
                 "without; re-plan with `oracle = true`"
@@ -67,11 +57,7 @@ function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) w
                 colsK_A = _axis_of(dK_A, ws.tw_k_buf_A, 0)
                 rowsK_B = _axis_of(dK_B, ws.tw_k_buf_B, 0)
 
-                # The third `_pack_sliver!` call site: the oracle must apply
-                # the same transforms as `execute!` or it silently disagrees on
-                # conjugated inputs. No `_sliver_panel` here -- these are whole
-                # buffers sized by `packed_a_length`/`packed_b_length`, which
-                # already count reals, so no `MRp`/`NRp` treatment is needed.
+                # Whole single-sliver buffers, so no `_sliver_panel`.
                 _pack_sliver!(
                     pack_a!, ws.tw_packed_a, plan.Astorage, plan.Abase, rowsA, colsK_A,
                     kernel, plan.atransform
