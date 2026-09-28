@@ -98,8 +98,16 @@ const _OUTER_AB = ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0), (-0.5, 1.25))
         pc = plan_contract(_outer_maker(T, 16, 9, 1; variant = :cpermC)()...)
         @test axis_length(pc.mgroup) == 9
         @test _outer_eligible(pc) == (9 >= W)
-        # Below one vector of M: declined. K > 1: not an outer product.
-        @test !_outer_eligible(plan_contract(_outer_maker(T, W - 1, 9, 1)()...))
+        # Below one vector of M: declined. N is kept below W too: where W = 2
+        # (NEON Float64) `W - 1` is a singleton axis, which makes C's N axis
+        # unit-stride as well, so with a long N the planner legitimately
+        # swaps the roles and takes the 9-long N as M (as :cpermC above).
+        @test !_outer_eligible(plan_contract(_outer_maker(T, W - 1, W - 1, 1)()...))
+        # With a long N the bound applies to the M the plan ends up with.
+        p1 = plan_contract(_outer_maker(T, W - 1, 9, 1)()...)
+        @test axis_length(p1.mgroup) in (W - 1, 9)
+        @test _outer_eligible(p1) == (axis_length(p1.mgroup) >= W)
+        # K > 1: not an outer product.
         @test !_outer_eligible(_mm_plan(zeros(T, 16, 9), randn(T, 16, 2), randn(T, 2, 9)))
         # The mode override.
         p = plan_contract(_outer_maker(T, 16, 9, 1)()...)
@@ -140,6 +148,20 @@ end
         @test C_out ≈ C_nest
         Cv0, Av0, iA, Bv0, iB, iC = mk()
         @test C_out ≈ _hp_ref(Array(Av0), iA, Array(Bv0), iB, Array(Cv0), iC, 1.5, 0.5)
+    end
+    # A singleton M beside a long N: C's N axis is unit-stride too, so the
+    # planner swaps the roles and the path runs on the 9-long N, with a scalar
+    # tail wherever W does not divide 9 -- the plan NEON Float64 (W = 2)
+    # takes for `M = W - 1` above.
+    for (alpha, beta) in _OUTER_AB
+        mk = _outer_maker(T, 1, 9, 77)
+        C_nest, _ = _outer_run(mk, :never, alpha, beta)
+        C_out, plan = _outer_run(mk, :auto, alpha, beta)
+        @test axis_length(plan.mgroup) == 9
+        @test _outer_eligible(plan) == (9 >= W)
+        @test C_out ≈ C_nest
+        Cv0, Av0, iA, Bv0, iB, iC = mk()
+        @test C_out ≈ _hp_ref(Array(Av0), iA, Array(Bv0), iB, Array(Cv0), iC, alpha, beta)
     end
 end
 
