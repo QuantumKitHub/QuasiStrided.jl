@@ -89,11 +89,12 @@ end
     return acc
 end
 
-# Vector store eligibility: unit-stride rows into rank-1 dense storage of `T`,
-# exactly what SIMD.jl's array `vload`/`vstore` accept. Must admit `Memory{T}`:
-# that is the `parent` of an Array-backed `StridedView` on Julia >= 1.11.
+# Vector store eligibility: unit-stride rows into rank-1 dense storage of `T`
+# or of another real type the lanes convert to and from, exactly what SIMD.jl's
+# array `vload`/`vstore` accept. Must admit `Memory`: that is the `parent` of an
+# Array-backed `StridedView` on Julia >= 1.11.
 @inline _vector_store_eligible(tile::QSTile, ::Type{T}) where {T} =
-    _unit_stride_rows(tile.rows) && tile.storage isa DenseVector{T}
+    _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T)
 
 @generated function _store_tile_scattered!(
         destination::QSTile, acc::NTuple{NV, Vec{W, T}},
@@ -128,12 +129,15 @@ end
 # Whole `W`-row blocks are one vector load/store; a block straddling `m` is
 # stored lane by lane, so nothing outside the valid rectangle is touched.
 # `rows::AffineAxis` in the signature: an ineligible tile is a MethodError.
+# `C` is loaded into and rounded back from `T` lanes.
 @generated function _store_tile_vector!(
         destination::QSTile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, T}},
         alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, NV}
     NVECA = MR ÷ W
+    RC = eltype(S)
+    old = :(convert(Vec{$W, $T}, vload(Vec{$W, $RC}, storage, at)))
     blocks = Any[]
     for j in 0:(NR - 1)
         vblocks = Any[]
@@ -145,9 +149,12 @@ end
                     if $((v + 1) * W) <= m
                         at = colbase + $(v * W) + 1
                         vstore(
-                            iszero(beta) ? alpha * vec :
-                                isone(beta) ? muladd(alpha, vec, vload(Vec{$W, $T}, storage, at)) :
-                                muladd(alpha, vec, beta * vload(Vec{$W, $T}, storage, at)),
+                            convert(
+                                Vec{$W, $RC},
+                                iszero(beta) ? alpha * vec :
+                                    isone(beta) ? muladd(alpha, vec, $old) :
+                                    muladd(alpha, vec, beta * $old)
+                            ),
                             storage, at
                         )
                     elseif $(v * W) < m

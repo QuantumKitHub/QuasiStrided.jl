@@ -174,25 +174,25 @@ end
 end
 
 # One full `W÷2`-row block, already in `Complex`'s memory order, so no
-# interleave shuffle. Base's `Complex` expression trees in lanes, as planar's
+# interleave shuffle. `C` converts from and to its storage type `RC`. Base's `Complex` expression trees in lanes, as planar's
 # `_planar_store_block!`:
 #     beta == 0:  addsub(ar*r, ai*swap(r))
 #     beta == 1:  fmaddsub(ar, r, fmaddsub(ai, swap(r), C))
 #     otherwise:  as beta == 1 with C := addsub(br*C, bi*swap(C))
 @inline function _fmaddsub_store_block!(
-        sp::Ptr{R}, at::Int, r::Vec{W, R},
+        sp::Ptr{RC}, at::Int, r::Vec{W, R},
         ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
         beta::Complex{R}
-    ) where {R, W}
+    ) where {RC, R, W}
     s = _swap_pairs(r)
     if iszero(beta)
         new = _addsub(ar * r, ai * s)
     else
-        old = vload(Vec{W, R}, sp + sizeof(R) * at)
+        old = convert(Vec{W, R}, vload(Vec{W, RC}, sp + sizeof(RC) * at))
         x = isone(beta) ? old : _addsub(br * old, bi * _swap_pairs(old))
         new = _fmaddsub(ar, r, _fmaddsub(ai, s, x))
     end
-    vstore(new, sp + sizeof(R) * at)
+    vstore(convert(Vec{W, RC}, new), sp + sizeof(RC) * at)
     return nothing
 end
 
@@ -202,9 +202,10 @@ end
         alpha::T, beta::T, kernel::FMAddSubKernel{MR, NR, T, W},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NV}
-    # The pointer reinterpretation is only sound on dense rank-1 storage of `T`.
-    S <: DenseVector{T} ||
-        throw(ArgumentError("_store_tile_fmaddsub_vector!: storage $S is not a DenseVector{$T}"))
+    # The pointer reinterpretation is only sound on dense rank-1 complex storage.
+    S <: DenseVector && _lane_convertible(eltype(S), T) ||
+        throw(ArgumentError("_store_tile_fmaddsub_vector!: storage $S is not a dense vector convertible to $T"))
+    RC = real(eltype(S))
     iseven(W) || throw(ArgumentError("_store_tile_fmaddsub_vector!: requires an even W, got $W"))
     MV = (2 * MR) ÷ W
     _check_acc(:_store_tile_fmaddsub_vector!, R, T, NV, MV * NR)
@@ -254,7 +255,7 @@ end
         br = Vec{$W, $R}(real(beta))
         bi = Vec{$W, $R}(imag(beta))
         GC.@preserve storage begin
-            sp = reinterpret(Ptr{$R}, pointer(storage))
+            sp = reinterpret(Ptr{$RC}, pointer(storage))
             @inbounds begin
                 $(blocks...)
             end

@@ -104,7 +104,8 @@ end
 
     kernel = KernelDescriptor(Val(MR), Val(3), T)
     vals = T.(collect(1.0:2000.0))
-    storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals)) : (vals,)
+    mixed = (T === Float64 ? Float32 : Float64).(collect(1.0:2000.0) ./ 3)
+    storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals), mixed) : (vals, mixed)
     koffs = [7, 900, 300, 1500]
     contig = collect(0:(MR - 1))
     GC.@preserve koffs contig for storage in storages

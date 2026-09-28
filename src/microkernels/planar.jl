@@ -173,10 +173,11 @@ end
 end
 
 # Vector store: unit-stride rows into rank-1 dense `Complex` storage (so the
-# storage can be reinterpreted as `2W` consecutive reals per `W` rows), on an
-# ISA the complex fast paths ship for (shared with the complex pack fast path).
+# storage can be reinterpreted as `2W` consecutive reals per `W` rows) of `T` or
+# another complex type the lanes convert to and from, on an ISA the complex
+# fast paths ship for (shared with the complex pack fast path).
 @inline _complex_vector_eligible(tile::QSTile, ::Type{T}) where {T} =
-    _unit_stride_rows(tile.rows) && tile.storage isa DenseVector{T} &&
+    _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T) &&
     _complex_fastpath_isa_eligible()
 
 # Shuffle patterns built from `W` at specialization time, never hardcoded to
@@ -198,7 +199,8 @@ end
     return :(shufflevector(re, im, Val($idx)))
 end
 
-# One full `W`-row block; `at` is the zero-based index of its first real.
+# One full `W`-row block; `at` is the zero-based index of its first real. `C`
+# is `RC` in memory and converts to and from `R` around the arithmetic.
 # The arithmetic transcribes Base's `Complex` expression trees (the ones
 # `_axpby_tile!` reaches), so full blocks match them bitwise: `*` is unfused,
 # `muladd(z, w, x) = (muladd(zr, wr, -muladd(zi, wi, -xr)), muladd(zr, wi,
@@ -206,15 +208,15 @@ end
 # `beta == 0/1` and ~1 ULP otherwise, because LLVM contracts Base's scalar
 # complex `muladd` depending on inlining context.
 @inline function _planar_store_block!(
-        sp::Ptr{R}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
+        sp::Ptr{RC}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
         ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
         beta::Complex{R}, ::Val{W}
-    ) where {R, W}
+    ) where {RC, R, W}
     if iszero(beta)
         newre = ar * rev - ai * imv
         newim = ar * imv + ai * rev
     else
-        old = vload(Vec{2 * W, R}, sp + sizeof(R) * at)
+        old = convert(Vec{2 * W, R}, vload(Vec{2 * W, RC}, sp + sizeof(RC) * at))
         orv = _deinterleave_re(old, Val(W))
         oiv = _deinterleave_im(old, Val(W))
         if isone(beta)
@@ -226,7 +228,7 @@ end
         newre = muladd(ar, rev, -muladd(ai, imv, -xr))
         newim = muladd(ar, imv, muladd(ai, rev, xi))
     end
-    vstore(_interleave_planes(newre, newim, Val(W)), sp + sizeof(R) * at)
+    vstore(convert(Vec{2 * W, RC}, _interleave_planes(newre, newim, Val(W))), sp + sizeof(RC) * at)
     return nothing
 end
 
@@ -237,9 +239,10 @@ end
         alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NA}
-    # The pointer reinterpretation is only sound on dense rank-1 storage of `T`.
-    S <: DenseVector{T} ||
-        throw(ArgumentError("_store_tile_planar_vector!: storage $S is not a DenseVector{$T}"))
+    # The pointer reinterpretation is only sound on dense rank-1 complex storage.
+    S <: DenseVector && _lane_convertible(eltype(S), T) ||
+        throw(ArgumentError("_store_tile_planar_vector!: storage $S is not a dense vector convertible to $T"))
+    RC = real(eltype(S))
     MV = MR ÷ W
     NV = MV * NR
     _check_acc(:_store_tile_planar_vector!, R, T, NA, 2NV)
@@ -291,7 +294,7 @@ end
         br = Vec{$W, $R}(real(beta))
         bi = Vec{$W, $R}(imag(beta))
         GC.@preserve storage begin
-            sp = reinterpret(Ptr{$R}, pointer(storage))
+            sp = reinterpret(Ptr{$RC}, pointer(storage))
             @inbounds begin
                 $(blocks...)
             end

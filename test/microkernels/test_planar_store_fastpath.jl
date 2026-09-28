@@ -43,10 +43,11 @@ mk_store_ab(T) = (
 )
 
 # `beta0_exact`: the fast path also matches the scalar store bitwise at beta == 0.
-function mk_store_fastpath(K, T, shapes; beta0_exact = false)
+# `S` is the storage eltype: C converts to `T` on load and rounds once on store.
+function mk_store_fastpath(K, T, shapes; beta0_exact = false, S = T)
     R = real(T)
-    tol = 8 * eps(R)
-    return @testset "$K store fast path $T $s" for s in shapes
+    tol = 8 * max(eps(R), eps(real(S)))
+    return @testset "$K store fast path $T into $S $s" for s in shapes
         MR, NR, W = s
         k = K(Val(MR), Val(NR), T, Val(W))
         blk = k isa PlanarKernel ? W : W ÷ 2  # complex rows per vector
@@ -60,7 +61,7 @@ function mk_store_fastpath(K, T, shapes; beta0_exact = false)
         )
         for (m, n) in extents
             acc = map(v -> typeof(v)(ntuple(_ -> R(2rand(rng) - 1), W)), zero_accumulator(k))
-            cold = [Complex(R(2rand(rng) - 1), R(2rand(rng) - 1)) for _ in 1:(m * n)]
+            cold = [S(2rand(rng) - 1, 2rand(rng) - 1) for _ in 1:(m * n)]
             for (alpha, beta) in mk_store_ab(T)
                 fast = mk_dense(cold)
                 dfast = DestinationTile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
@@ -68,7 +69,7 @@ function mk_store_fastpath(K, T, shapes; beta0_exact = false)
                 store_tile!(dfast, acc, alpha, beta, k)
                 scal = copy(cold)  # scattered rows: always the scalar store
                 store_tile!(DestinationTile(scal, 0, ScatterAxis(collect(0:(m - 1)), m), AffineAxis(0, m, n)), acc, alpha, beta, k)
-                want = [ref_axpby(alpha, reim(mk_read(k, acc, i, j))..., beta, cold[i + j * m + 1]) for i in 0:(m - 1), j in 0:(n - 1)]
+                want = [S(ref_axpby(alpha, reim(mk_read(k, acc, i, j))..., beta, T(cold[i + j * m + 1]))) for i in 0:(m - 1), j in 0:(n - 1)]
                 got = reshape(collect(fast), m, n)
                 vectorized = STORE_FASTPATH_ON ? (1:((m ÷ blk) * blk)) : (1:0)
                 @test isequal(got[vectorized, :], want[vectorized, :])
@@ -83,6 +84,8 @@ end
 @testset "planar store fast path" begin
     mk_store_fastpath(PlanarKernel, ComplexF64, KERNEL_SHAPES_C64_PLANAR)
     mk_store_fastpath(PlanarKernel, ComplexF32, KERNEL_SHAPES_C32_PLANAR)
+    mk_store_fastpath(PlanarKernel, ComplexF64, KERNEL_SHAPES_C64_PLANAR[[1, end]]; S = ComplexF32)
+    mk_store_fastpath(PlanarKernel, ComplexF32, KERNEL_SHAPES_C32_PLANAR[[1, end]]; S = ComplexF64)
 
     @testset "eligibility gate: one violated condition at a time" begin
         T = ComplexF64
@@ -98,7 +101,7 @@ end
         GC.@preserve ptr_rows @test !eligible(storage, PtrScatterAxis(pointer(ptr_rows), m))
         @test !eligible(view(storage, 1:(m * n)), AffineAxis(0, 1, m))
         @test !eligible(reshape(storage, 4m, n), AffineAxis(0, 1, m))
-        @test !eligible(zeros(ComplexF32, m * n), AffineAxis(0, 1, m))
+        @test eligible(zeros(ComplexF32, m * n), AffineAxis(0, 1, m)) == STORE_FASTPATH_ON
         @test !eligible(zeros(Float64, m * n), AffineAxis(0, 1, m))
     end
 
@@ -117,4 +120,6 @@ end
 @testset "fmaddsub store fast path" begin
     mk_store_fastpath(FMAddSubKernel, ComplexF64, KERNEL_SHAPES_C64_FMADDSUB; beta0_exact = true)
     mk_store_fastpath(FMAddSubKernel, ComplexF32, KERNEL_SHAPES_C32_FMADDSUB; beta0_exact = true)
+    mk_store_fastpath(FMAddSubKernel, ComplexF64, KERNEL_SHAPES_C64_FMADDSUB[[1, end]]; beta0_exact = true, S = ComplexF32)
+    mk_store_fastpath(FMAddSubKernel, ComplexF32, KERNEL_SHAPES_C32_FMADDSUB[[1, end]]; beta0_exact = true, S = ComplexF64)
 end

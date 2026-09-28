@@ -10,27 +10,37 @@ using SIMD: shufflevector
 @inline _copies_unchanged(::typeof(conj), ::Type{T}) where {T <: Real} = true
 @inline _copies_unchanged(::Any, ::Type) = false
 
+# Dense rank-1 storage whose elements load as SIMD lanes and convert lane-wise
+# to `T`: `T` itself, or another supported type of the same domain. Shared with
+# the vector stores.
+const _LaneFloat = Union{Float32, Float64}
+@inline _dense_lanes(storage::S, ::Type{T}) where {S, T} =
+    storage isa DenseVector{T} || (storage isa DenseVector && _lane_convertible(eltype(S), T))
+_lane_convertible(::Type, ::Type) = false
+_lane_convertible(::Type{<:_LaneFloat}, ::Type{<:_LaneFloat}) = true
+_lane_convertible(::Type{Complex{S}}, ::Type{Complex{T}}) where {S <: _LaneFloat, T <: _LaneFloat} = true
+
 # Everything but `m == MR` and the stride test folds at compile time.
 # `_unit_stride_rows` deliberately has no fallback method: an unknown axis type
 # must be a MethodError.
 @inline function _pack_a_contiguous_eligible(
         packed::V, source::QSTile, transform::F, m::Int, ::Val{MR}, ::Type{T}
     ) where {V, F, MR, T}
-    return packed isa PackedPanel{T} && source.storage isa DenseVector{T} &&
+    return packed isa PackedPanel{T} && _dense_lanes(source.storage, T) &&
         _copies_unchanged(transform, T) && m == MR && _unit_stride_rows(source.rows)
 end
 
-# Real A: one `Vec{MR,T}` load/store per K step.
+# Real A: one `Vec{MR}` load/convert/store per K step.
 @inline function _pack_a_contiguous!(
-        packed::PackedPanel{T}, storage::DenseVector{T}, rowbase::Int, cols::C,
+        packed::PackedPanel{T}, storage::DenseVector{S}, rowbase::Int, cols::C,
         ::Val{MR}, kc::Int
-    ) where {T, C, MR}
+    ) where {T, S, C, MR}
     GC.@preserve storage begin
         sp = pointer(storage)
         dp = packed.ptr
         for p in 0:(kc - 1)
-            v = vload(Vec{MR, T}, sp + sizeof(T) * (rowbase + axis_offset(cols, p)))
-            vstore(v, dp + sizeof(T) * (MR * p))
+            v = vload(Vec{MR, S}, sp + sizeof(S) * (rowbase + axis_offset(cols, p)))
+            vstore(convert(Vec{MR, T}, v), dp + sizeof(T) * (MR * p))
         end
     end
     return packed
@@ -51,7 +61,7 @@ end
         valid::Int, ::Val{PD}, ::Type{T}
     ) where {V, S, AX, F, FMT, PD, T}
     return !(format isa RealFormat) &&
-        packed isa PackedPanel{real(T)} && storage isa DenseVector{T} &&
+        packed isa PackedPanel{real(T)} && _dense_lanes(storage, T) &&
         _complex_pack_transform_eligible(transform) &&
         valid == PD && _unit_stride_rows(lane_axis) &&
         _complex_fastpath_isa_eligible()
@@ -102,21 +112,21 @@ _single_region_shuffle(::InterleavedFormat) = _onee_pack_shuffle_a
 
 # Lane `t` of K step `p` is element `elembase + axis_offset(steps, p) + t`;
 # only the lane axis must be unit-stride, `steps` may be scattered. Pinning
-# `Complex{R}` in the signature makes an eltype mismatch a MethodError rather
-# than a bitcast to the wrong width.
+# `Complex{RS}` in the signature keeps the bitcast to `RS` lanes sound; the
+# lanes convert to `R` before the shuffle.
 @inline function _pack_complex_contiguous!(
         format::Union{PlanarFormat, InterleavedFormat}, packed::PackedPanel{R},
-        storage::DenseVector{Complex{R}}, elembase::Int, steps::C, ::Val{PD}, kc::Int,
+        storage::DenseVector{Complex{RS}}, elembase::Int, steps::C, ::Val{PD}, kc::Int,
         transform::F
-    ) where {R, C, PD, F}
+    ) where {R, RS, C, PD, F}
     shuffle = _single_region_shuffle(format)
     GC.@preserve storage begin
-        sp = reinterpret(Ptr{R}, pointer(storage))
+        sp = reinterpret(Ptr{RS}, pointer(storage))
         dp = packed.ptr
         for p in 0:(kc - 1)
-            src = vload(
+            src = convert(
                 Vec{2 * PD, R},
-                sp + sizeof(R) * (2 * (elembase + axis_offset(steps, p)))
+                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + axis_offset(steps, p))))
             )
             vstore(
                 shuffle(src, _pack_alt(src, transform), Val(PD)),
@@ -128,16 +138,16 @@ _single_region_shuffle(::InterleavedFormat) = _onee_pack_shuffle_a
 end
 
 @inline function _pack_complex_contiguous!(
-        ::OneEFormat, packed::PackedPanel{R}, storage::DenseVector{Complex{R}},
+        ::OneEFormat, packed::PackedPanel{R}, storage::DenseVector{Complex{RS}},
         elembase::Int, steps::C, ::Val{PD}, kc::Int, transform::F
-    ) where {R, C, PD, F}
+    ) where {R, RS, C, PD, F}
     GC.@preserve storage begin
-        sp = reinterpret(Ptr{R}, pointer(storage))
+        sp = reinterpret(Ptr{RS}, pointer(storage))
         dp = packed.ptr
         for p in 0:(kc - 1)
-            src = vload(
+            src = convert(
                 Vec{2 * PD, R},
-                sp + sizeof(R) * (2 * (elembase + axis_offset(steps, p)))
+                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + axis_offset(steps, p))))
             )
             at = 4 * PD * p
             vstore(
