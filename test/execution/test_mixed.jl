@@ -25,7 +25,7 @@ const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
 @testset "mixed eltypes: $TA x $TB -> $TC, accumulator = $acc, $layout" for (TA, TB, TC, acc, layout, MKN, beta, conjA, conjB, path, K) in (
         (Float32, Float64, Float64, nothing, :dense, (23, 37, 19), 0, false, false, QuasiStrided._NestPath, SIMDKernel),
         (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided._NestPath, SIMDKernel),
-        (Float64, ComplexF64, ComplexF64, nothing, :dense, (21, 33, 17), 0.3 - 0.7im, false, true, QuasiStrided._NestPath, _RC),
+        (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided._NestPath, _RC),
         (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided._NestPath, _CR),
         (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided._NestPath, _PROMOTED),
         (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided._NestPath, _PROMOTED),
@@ -60,28 +60,42 @@ end
     @test _steady_allocs!(execute!, _mm_plan(Cmat, Amat, Bmat), Cmat) == 0 skip = (VERSION < v"1.11")
 end
 
-@testset "Float32 C, Float64 compute type, K over several kc blocks: within one ulp ($TA, $layout, beta = $beta)" for (TA, acc, layout) in (
-            (Float32, Float64, :dense), (Float64, nothing, :dense), (Float32, Float64, :scattered),
-        ), beta in (0, 0.5)
-    fx = if layout === :scattered
-        Cv = scattered_fixture(Float32, 32, 512)[1]
-        copyto!(Cv, randn(MersenneTwister(4), Float32, size(Cv)))
-        (Cv, scattered_fixture(TA, 32, 512)[2:end]...)
+# Along K, 1, 2^-30 and -1 fall in different kc blocks: the 2^-30 and the small
+# beta*C survive only if the partial sums stay in the compute type between blocks.
+@testset "one rounding to $TC across kc blocks: $TA x $TB, M = $M, $case, beta = $beta" for (TA, TB, TC, acc, M, N, K, case, beta) in (
+        (Float64, Float64, Float32, nothing, 13, 40, 20, :manual_nc16, 0.5),
+        (Float32, Float32, Float32, Float64, 13, 9, 20, :packed_b, 1),
+        (Float64, ComplexF64, ComplexF32, nothing, 13, 9, 20, :strided_c, 0.5),
+        (Float32, Float32, Float32, Float64, 7, 5, 3000, :backend, 0),
+        (Float64, Float64, Float32, nothing, 1, 9, 20, :strided_c, 1),
+        (Float64, Float64, Float32, nothing, 13, 9, 20, :strided_c, 0),
+    )
+    b = TB <: Complex ? TB(1, 1) : one(TB)
+    A = zeros(TA, M, K)
+    A[:, 1] .= 1
+    A[:, K ÷ 2 + 1] .= 2.0^-30
+    A[:, K] .= -1
+    Av, Bv = StridedView(A), StridedView(fill(b, K, N))
+    case === :packed_b && (Bv = permutedims(StridedView(permutedims(Array(Bv))), (2, 1)))
+    Cv = case === :strided_c ? StridedView(zeros(TC, 2M, 3N))[2:2:2M, 1:3:3N] : StridedView(zeros(TC, M, N))
+    fill!(Cv, iszero(beta) ? NaN : 2.0^-28)
+    if case === :backend
+        @test K ÷ 2 > QuasiStrided._resolved_defaults(Float64).real_row.kc
+        backend = QuasiStrided.QuasiStridedBackend(accumulator = acc)
+        TO.tensorcontract!(Cv, Av, ((1,), (2,)), false, Bv, ((1,), (2,)), false, ((1, 2), ()), 1, beta, backend)
     else
-        rng = MersenneTwister(5)
-        A, B, C = randn(rng, TA, 64, 512), randn(rng, TA, 512, 48), randn(rng, Float32, 64, 48)
-        (StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3))
+        allocator = case === :manual_nc16 ? TO.ManualAllocator() : TO.DefaultAllocator()
+        nc = case === :manual_nc16 ? 16 : nothing
+        plan = plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3); accumulator = acc, kc = 4, nc, allocator)
+        @test _path_of(plan) isa QuasiStrided._PanelPath
+        @test axis_length(plan.mgroup) == M
+        case === :manual_nc16 && @test N > plan.blocking.nc && !(plan.workspace.c_panel isa Vector)
+        case === :packed_b && @test _path_of(plan) isa QuasiStrided._PanelPath{<:QuasiStrided._NestPath{false}}
+        TB <: Complex && @test plan.kernel isa _RC
+        execute!(plan, 1, beta)
+        QuasiStrided.release!(plan.workspace, allocator)
     end
-    ref = Float32.(_mixed_ref(fx, 1, beta))
-    C32 = copy(fx[1])
-    execute!(plan_contract(C32, map(x -> x isa StridedView ? StridedView(Float32.(x)) : x, fx[2:end])...), 1, beta)
-    plan = plan_contract(fx...; accumulator = acc)
-    @test _path_of(plan) isa QuasiStrided._PanelPath
-    @test axis_length(plan.kgroup) > plan.blocking.kc
-    execute!(plan, 1, beta)
-    err = abs.(Array(fx[1]) .- ref)
-    @test all(err .<= eps.(ref))
-    @test maximum(err) < maximum(abs.(Array(C32) .- ref))
+    @test all(==(TC(2.0^-30 * b + beta * 2.0^-28)), Array(Cv))
 end
 
 @testset "Float32 C, Float64 compute type: steady-state execute! allocates nothing" begin
