@@ -1,13 +1,11 @@
 # Mixed-domain GEMM, single core: complex x real (CR) and real x complex (RC)
-# through the named mixed-domain kernel, the default planar kernel (which
-# promotes the real operand to complex), and the real GEMM of the same real FMA count
-# (2M x N x K for CR, M x 2N x K for RC).
+# through the mixed-domain kernel, the planar kernel (the real operand promoted)
+# and the real GEMM of equal FMA count (2M x N x K for CR, M x 2N x K for RC).
+# The inner real tile is the host's default real shape, so `real/mixed` is the
+# fraction of real efficiency reached.
 #
 #   julia --project=benchmark benchmark/bench_mixed.jl [--dtypes ComplexF64,ComplexF32]
 #       [--sizes 512,2048] [--reps 5] [--outdir DIR]
-#
-# The mixed kernels' inner real tile is the host's default real shape, so
-# `real/mixed` is the fraction of real efficiency reached.
 
 include(joinpath(@__DIR__, "harness.jl"))
 
