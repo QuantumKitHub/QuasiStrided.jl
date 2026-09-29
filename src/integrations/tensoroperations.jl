@@ -22,14 +22,15 @@ falls back to another backend. `tensoradd!` and `tensortrace!` are forwarded to
 
 The backend is not registered with `TensorOperations.select_backend`.
 """
-struct QuasiStridedBackend{A} <: TO.AbstractBackend end
-
-function QuasiStridedBackend(; accumulator = nothing)
-    accumulator in (nothing, Float32, Float64) || throw(
-        ArgumentError("QuasiStridedBackend: accumulator must be nothing, Float32 or Float64, got $accumulator")
-    )
-    return QuasiStridedBackend{accumulator}()
+struct QuasiStridedBackend{A} <: TO.AbstractBackend
+    function QuasiStridedBackend{A}() where {A}
+        A in (nothing, Float32, Float64) ||
+            throw(ArgumentError("QuasiStridedBackend: accumulator must be nothing, Float32 or Float64, got $A"))
+        return new{A}()
+    end
 end
+
+QuasiStridedBackend(; accumulator = nothing) = QuasiStridedBackend{accumulator}()
 
 # Task-local pool of workspaces, keyed by the compute type only: all complex
 # methods pack into `Vector{real(T)}` and `reserve!` is grow-only, so they can
