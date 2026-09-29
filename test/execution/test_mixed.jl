@@ -54,12 +54,6 @@ end
     end
 end
 
-@testset "mixed eltypes: steady-state execute! allocates nothing" begin
-    rng = MersenneTwister(3)
-    Amat, Bmat, Cmat = randn(rng, Float32, 40, 30), randn(rng, ComplexF64, 30, 20), zeros(ComplexF64, 40, 20)
-    @test _steady_allocs!(execute!, _mm_plan(Cmat, Amat, Bmat), Cmat) == 0 skip = (VERSION < v"1.11")
-end
-
 # Along K, 1, 2^-30 and -1 fall in different kc blocks: the 2^-30 and the small
 # beta*C survive only if the partial sums stay in the compute type between blocks.
 @testset "one rounding to $TC across kc blocks: $TA x $TB, M = $M, $case, beta = $beta" for (TA, TB, TC, acc, M, N, K, case, beta) in (
@@ -98,10 +92,12 @@ end
     @test all(==(TC(2.0^-30 * b + beta * 2.0^-28)), Array(Cv))
 end
 
-@testset "Float32 C, Float64 compute type: steady-state execute! allocates nothing" begin
-    rng = MersenneTwister(6)
-    Amat, Bmat, Cmat = randn(rng, Float32, 64, 700), randn(rng, Float32, 700, 40), zeros(Float32, 64, 40)
-    plan = _mm_plan(Cmat, Amat, Bmat; accumulator = Float64)
-    @test _path_of(plan) isa QuasiStrided._PanelPath
+@testset "steady-state execute! allocates nothing: $TA x $TB -> $TC, accumulator = $acc" for (TA, TB, TC, acc, K) in (
+        (Float32, ComplexF64, ComplexF64, nothing, 30), (Float32, Float32, Float32, Float64, 700),
+    )
+    rng = MersenneTwister(3)
+    Amat, Bmat, Cmat = randn(rng, TA, 64, K), randn(rng, TB, K, 40), zeros(TC, 64, 40)
+    plan = _mm_plan(Cmat, Amat, Bmat; accumulator = acc)
+    @test _path_of(plan) isa (TC === Float32 ? QuasiStrided._PanelPath : QuasiStrided._NestPath)
     @test _steady_allocs!(execute!, plan, Cmat) == 0 skip = (VERSION < v"1.11")
 end

@@ -1,4 +1,4 @@
-using QuasiStrided: ComplexRealKernel, RealComplexKernel, ComplexRealMethod, RealComplexMethod, packed_panel
+using QuasiStrided: ComplexRealKernel, RealComplexKernel, packed_panel
 
 mk_optypes(k::ComplexRealKernel) = (scalartype(k), real(scalartype(k)))
 mk_optypes(k::RealComplexKernel) = (real(scalartype(k)), scalartype(k))
@@ -33,11 +33,6 @@ end
     @testset "construction" begin
         cr = ComplexRealKernel(Val(8), Val(4), ComplexF32)
         rc = RealComplexKernel(Val(8), Val(4), ComplexF64)
-        @test complex_method(cr) === ComplexRealMethod()
-        @test complex_method(rc) === RealComplexMethod()
-        @test (a_reals(ComplexRealMethod()), b_reals(ComplexRealMethod())) == (2, 1)
-        @test (a_reals(RealComplexMethod()), b_reals(RealComplexMethod())) == (1, 2)
-        @test accumulator_planes(ComplexRealMethod()) == accumulator_planes(RealComplexMethod()) == 1
         @test cr.inner isa SIMDKernel{16, 4, Float32, 8}
         @test rc.inner isa SIMDKernel{8, 8, Float64, 4}
         @test (packed_a_per_k(cr), packed_b_per_k(cr), packed_a_per_k(rc), packed_b_per_k(rc)) == (16, 4, 8, 8)
@@ -96,7 +91,7 @@ end
         saved = QuasiStrided._UNPACKED_B_MODE[]
         QuasiStrided._UNPACKED_B_MODE[] = mode
         try
-            for (cA, cB) in ((false, false), (true, false), (false, true))
+            for (cA, cB) in ((false, false), (true, true))
                 C = copy(C0)
                 plan = plan_contract(
                     StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
