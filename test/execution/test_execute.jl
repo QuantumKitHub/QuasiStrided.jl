@@ -270,10 +270,16 @@ function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
     )
 end
 
-@testset "line-by-line packing: the planner splits A of intensli_7 past L2" begin
-    split_of(d) = (p = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...); _path_of(p))
-    @test split_of(16) isa _NestPath{false, <:Any, (true, false)}  # a 4 MB reuse window
-    @test split_of(4) isa _NestPath{<:Any, <:Any, (false, false)}
+@testset "line-by-line packing: the planner splits A of intensli_7 past the cache" begin
+    plan_of(d) = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...)
+    p = plan_of(16)
+    k, b = p.kernel, p.blocking
+    splits(cap) = QuasiStrided._is_split(_pack_split(p.mgroup, p.kgroup, 1, mr(k), 8, false, b.kc, b.mc, b.mc, default_blocking(k).kc, cap)[2])
+    @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
+    host = splits(QuasiStrided._split_capacity(target_profile(), true))
+    @test QuasiStrided._is_split(p.mpack) == host
+    host && @test _path_of(p) isa _NestPath{false, <:Any, (true, false)}
+    @test _path_of(plan_of(4)) isa _NestPath{<:Any, <:Any, (false, false)}
 end
 
 @testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
