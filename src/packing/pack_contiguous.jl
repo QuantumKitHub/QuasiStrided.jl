@@ -15,7 +15,7 @@ using SIMD: shufflevector
 # the vector stores.
 const _LaneFloat = Union{Float32, Float64}
 @inline _dense_lanes(storage::S, ::Type{T}) where {S, T} =
-    storage isa DenseVector{T} || (storage isa DenseVector && _lane_convertible(eltype(S), T))
+    storage isa DenseVector && _lane_convertible(eltype(S), T)
 _lane_convertible(::Type, ::Type) = false
 _lane_convertible(::Type{<:_LaneFloat}, ::Type{<:_LaneFloat}) = true
 _lane_convertible(::Type{Complex{S}}, ::Type{Complex{T}}) where {S <: _LaneFloat, T <: _LaneFloat} = true

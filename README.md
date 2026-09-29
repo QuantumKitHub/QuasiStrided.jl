@@ -121,9 +121,9 @@ Implemented:
   needs a complex output). The compute type is the promoted eltype, or the
   precision chosen with `accumulator = Float32`/`Float64`
   (`plan_contract(...; accumulator)`, `QuasiStridedBackend(; accumulator)`);
-  the result is rounded to `eltype(C)` once. A real operand of a complex contraction is
-  promoted at pack time. `conjA`/`conjB` and each operand's `StridedView.op`
-  are applied during packing.
+  the result is rounded to `eltype(C)` once. A real operand of a complex
+  contraction is promoted at pack time. `conjA`/`conjB` and each operand's
+  `StridedView.op` are applied during packing.
 - Zero steady-state allocation on Julia >= 1.11 for `execute!` on a reused
   plan and for `tensorcontract!` through the backend (which pools workspaces
   per task). On Julia 1.10 `SIMDKernel`'s accumulator is not kept in
