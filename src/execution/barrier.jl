@@ -49,20 +49,31 @@ struct _NestPath{UNPACKED_B, AFF} end
 # sliver axis, so the flag would only split specialisations.
 @inline _nest_path(unpacked_b::Bool, mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup) =
     _nest_path_from_flags(
-    unpacked_b,
+    _NEST_PATHS, unpacked_b,
     _is_ramp_map(mgroup, 1), _is_ramp_map(mgroup, 2),
     !unpacked_b && _is_ramp_map(ngroup, 1), _is_ramp_map(ngroup, 2),
     _is_ramp_map(kgroup, 1), _is_ramp_map(kgroup, 2)
 )
 
+# The nest run against a dense panel of C in the compute type, whose M and N
+# maps are ramps.
+struct _PanelPath{P <: _NestPath} end
+
+@inline _panel_path(unpacked_b::Bool, mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup) =
+    _nest_path_from_flags(
+    _PANEL_PATHS, unpacked_b,
+    _is_ramp_map(mgroup, 1), true, !unpacked_b && _is_ramp_map(ngroup, 1), true,
+    _is_ramp_map(kgroup, 1), _is_ramp_map(kgroup, 2)
+)
+
 # Table lookup rather than `_NestPath{u, aff}()` built at runtime (a dynamic
 # type application) or a 128-leaf branch tree (slow to infer).
-@inline function _nest_path_from_flags(flags::Vararg{Bool, 7})
+@inline function _nest_path_from_flags(table::Vector{Any}, flags::Vararg{Bool, 7})
     index = 1
     for i in 1:7
         index += flags[i] << (i - 1)
     end
-    return @inbounds _NEST_PATHS[index]
+    return @inbounds table[index]
 end
 
 const _NEST_PATHS = let
@@ -73,6 +84,8 @@ const _NEST_PATHS = let
     end
     table
 end
+
+const _PANEL_PATHS = Any[_PanelPath{typeof(p)}() for p in _NEST_PATHS]
 
 # The dot path at lane width `W`; `MATB`: the matrix operand is B (`Qm == 1`).
 struct _DotPath{MATB, W} end

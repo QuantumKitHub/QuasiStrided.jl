@@ -57,28 +57,41 @@ end
 # outer-product path, else the nest (B packed or read in place).
 @inline _select_path(plan::ContractPlan{T}) where {T} = _select_path(
     T, _unpacked_b_kernel_eligible(plan.kernel),
-    plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan
+    plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan,
+    plan.blocking.kc
 )
 
 # On the plan's parts, so `plan_contract` can predict the path before the
 # plan exists (`_path_hint`). `unpack_ok`: the kernel admits unpacked B.
 # `capacity`: the plan whose workspace must hold the dot path's vector, or
-# `nothing` to assume it does.
+# `nothing` to assume it does. `kc`: the requested K block, `nothing` for
+# the default.
 @inline function _select_path(
         ::Type{T}, unpack_ok::Bool, Astorage, Bstorage, Cstorage,
-        mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity
+        mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity, kc
     ) where {T}
     Qm = axis_length(mgroup)
     Qn = axis_length(ngroup)
     Qk = axis_length(kgroup)
-    if (Qm == 1 || Qn == 1) && _dot_applicable(T, Astorage, Bstorage, kgroup, Qm, Qn, Qk) &&
+    panel = _c_panel_needed(T, Cstorage, Qk, kc)
+    if (Qm == 1 || Qn == 1) && !panel && _dot_applicable(T, Astorage, Bstorage, kgroup, Qm, Qn, Qk) &&
             _dot_capacity_ok(capacity)
         W = _dot_lanewidth(T)
         return Qm == 1 ? _lane_path(_DotPath{true}, W) : _lane_path(_DotPath{false}, W)
     end
     Qk == 1 && _outer_applicable(T, Astorage, Cstorage, mgroup, Qm) &&
         return _lane_path(_OuterPath, _dot_lanewidth(T))
-    return _nest_path(unpack_ok && _unpacked_b_rule(mgroup, kgroup), mgroup, ngroup, kgroup)
+    unpacked_b = unpack_ok && _unpacked_b_rule(mgroup, kgroup)
+    panel && return _panel_path(unpacked_b, mgroup, ngroup, kgroup)
+    return _nest_path(unpacked_b, mgroup, ngroup, kgroup)
+end
+
+# Whether the partial sums between K blocks must live in a compute-type panel
+# rather than in a C of narrower eltype. Static `false` unless C is narrower,
+# so the default blocking is looked up only then.
+@inline function _c_panel_needed(::Type{T}, Cstorage, Qk::Int, kc) where {T}
+    sizeof(real(eltype(Cstorage))) < sizeof(real(T)) || return false
+    return Qk > (kc === nothing ? _resolved_defaults(T).real_row.kc : kc)
 end
 
 # Run `path` behind a dynamic call. The plan crosses in the workspace slot
@@ -125,7 +138,8 @@ end
 # on the path as well as the kernel.
 @inline _path_hint(::_Execute, req::_PlanRequest{T}, unpack_ok::Bool) where {T} = _select_path(
     T, unpack_ok,
-    req.Astorage, req.Bstorage, req.Cstorage, req.mgroup, req.ngroup, req.kgroup, nothing
+    req.Astorage, req.Bstorage, req.Cstorage, req.mgroup, req.ngroup, req.kgroup, nothing,
+    req.kc
 )
 
 @inline _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T} =
@@ -153,6 +167,7 @@ end
     _unpacked_b_method_eligible(complex_method(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
 @inline _hint_holds(plan::ContractPlan, ::_DotPath) = _dot_capacity_ok(plan)
 @inline _hint_holds(plan::ContractPlan, ::_OuterPath) = true
+@inline _hint_holds(plan::ContractPlan, ::_PanelPath{P}) where {P} = _hint_holds(plan, P())
 
 _execute_path!(plan::ContractPlan, alphaT, betaT, ::_DotPath{MATB, W}) where {MATB, W} =
     (_execute_dot!(plan, alphaT, betaT, MATB, Val(W)); nothing)
@@ -173,8 +188,81 @@ function _execute_path!(
         _execute_nest!(
             plan, ws, kernel, mr(kernel), nr(kernel),
             axis_length(plan.mgroup), axis_length(plan.ngroup), axis_length(plan.kgroup),
-            plan.blocking.mc, plan.blocking.kc, plan.blocking.nc, alphaT, betaT, path
+            plan.blocking.mc, plan.blocking.kc, plan.blocking.nc, alphaT, betaT, path, nothing
         )
+    end
+    return nothing
+end
+
+# The nest over `pplan`, a copy of `plan` whose C is the workspace panel with
+# dense M/N maps, one `jc` block at a time: `_panel_enter!` loads the block of
+# C into the panel and `_panel_exit!` rounds it back.
+function _execute_path!(
+        plan::ContractPlan{T}, alphaT::T, betaT::T, ::_PanelPath{P}
+    ) where {T, P}
+    kernel = plan.kernel
+    ws = plan.workspace
+    Qm = axis_length(plan.mgroup)
+    pplan = ContractPlan(
+        kernel, _dense_second_map(plan.mgroup, 1), _dense_second_map(plan.ngroup, Qm),
+        plan.kgroup, plan.blocking, plan.Astorage, plan.Abase, plan.Bstorage, plan.Bbase,
+        ws.c_panel, 0, plan.atransform, plan.btransform, ws
+    )
+    GC.@preserve ws begin
+        _execute_nest!(
+            pplan, ws, kernel, mr(kernel), nr(kernel),
+            Qm, axis_length(plan.ngroup), axis_length(plan.kgroup),
+            plan.blocking.mc, plan.blocking.kc, plan.blocking.nc, alphaT, betaT, P(), plan
+        )
+    end
+    return nothing
+end
+
+# `g` with its second map replaced by the column-major one scaled by `step`.
+@inline function _dense_second_map(g::AxisGroup{D, 2}, step::Int) where {D}
+    dense = ntuple(d -> step * _unchecked_axis_length(ntuple(i -> i < d ? g.lengths[i] : 1, Val(D))), Val(D))
+    return AxisGroup(g.lengths, (g.strides[1], dense))
+end
+
+# `target`: `nothing`, or the plan whose C the panel stands in for.
+@inline _panel_enter!(::Nothing, plan, ws, jc, nblock, betaT) = plan
+@inline _panel_exit!(::Nothing, plan, ws, jc, nblock) = nothing
+
+function _panel_enter!(target::ContractPlan, plan::ContractPlan, ws, jc::Int, nblock::Int, betaT)
+    iszero(betaT) || _panel_copy!(target, plan.Cstorage, ws, jc, nblock, true)
+    Qm = axis_length(plan.mgroup)
+    return ContractPlan(
+        plan.kernel, plan.mgroup, plan.ngroup, plan.kgroup, plan.blocking,
+        plan.Astorage, plan.Abase, plan.Bstorage, plan.Bbase, plan.Cstorage, -jc * Qm,
+        plan.atransform, plan.btransform, plan.workspace
+    )
+end
+
+_panel_exit!(target::ContractPlan, plan::ContractPlan, ws, jc::Int, nblock::Int) =
+    _panel_copy!(target, plan.Cstorage, ws, jc, nblock, false)
+
+# Columns `jc .+ (0:nblock-1)` of `target`'s C into (`load`) or out of the
+# panel, converting to the destination's eltype. Borrows the M/N offset
+# buffers, which the nest refills before reading them again.
+function _panel_copy!(target::ContractPlan, panel::Vector, ws, jc::Int, nblock::Int, load::Bool)
+    C = target.Cstorage
+    Qm = axis_length(target.mgroup)
+    mc = target.blocking.mc
+    fill_offsets!((ws.n_buf_B, ws.n_buf_C), target.ngroup, jc, nblock)
+    ic = 0
+    while ic < Qm
+        mblock = min(mc, Qm - ic)
+        fill_offsets!((ws.m_buf_A, ws.m_buf_C), target.mgroup, ic, mblock)
+        for j in 1:nblock, i in 1:mblock
+            c = target.Cbase + ws.m_buf_C[i] + ws.n_buf_C[j] + 1
+            q = ic + i + (j - 1) * Qm
+            if load
+                panel[q] = C[c]
+            else
+                C[c] = panel[q]
+            end
+        end
+        ic += mblock
     end
     return nothing
 end
@@ -182,7 +270,7 @@ end
 function _execute_nest!(
         plan::ContractPlan{T}, ws, kernel::K, MRk::Int, NRk::Int,
         Qm::Int, Qn::Int, Qk::Int, mc_eff::Int, kc_eff::Int, nc_eff::Int,
-        alphaT::T, betaT::T, ::_NestPath{UNPACKED_B, AFF}
+        alphaT::T, betaT::T, ::_NestPath{UNPACKED_B, AFF}, target
     ) where {T, K, UNPACKED_B, AFF}
     # GUARDRAIL: reals per sliver per K step address the packed panels;
     # `MRk`/`NRk` count register-tile rows. They differ for complex kernels.
@@ -207,6 +295,7 @@ function _execute_nest!(
     jc = 0
     while jc < Qn
         nblock = min(nc_eff, Qn - jc)
+        cplan = _panel_enter!(target, plan, ws, jc, nblock, betaT)
         n_slivers = cld(nblock, NRk)
         (rng_nB, rng_nC) = if n_ramp
             _ramp_slivers!(
@@ -284,7 +373,7 @@ function _execute_nest!(
                 end
 
                 checked_span_bounds(plan.Abase, rng_mA, rng_kA, lenA)
-                checked_span_bounds(plan.Cbase, rng_mC, rng_nC, lenC)
+                checked_span_bounds(cplan.Cbase, rng_mC, rng_nC, lenC)
 
                 for r in 0:(m_slivers - 1)
                     rfirst = r * MRk
@@ -299,12 +388,12 @@ function _execute_nest!(
                 # --- loop 2: jr over N-slivers; loop 1: ir over M-slivers ---
                 if UNPACKED_B
                     _micro_tiles_unpacked_b!(
-                        kernel, plan, ws, rowsB_k, m_slivers, n_slivers,
+                        kernel, cplan, ws, rowsB_k, m_slivers, n_slivers,
                         MRk, NRk, MRp, kblock, alphaT, beta_eff, aff_mC, aff_nC
                     )
                 else
                     _micro_tiles_packed_b!(
-                        kernel, plan, ws, m_slivers, n_slivers,
+                        kernel, cplan, ws, m_slivers, n_slivers,
                         MRk, NRk, MRp, NRp, kblock, alphaT, beta_eff, aff_mC, aff_nC
                     )
                 end
@@ -316,6 +405,7 @@ function _execute_nest!(
             pc += kblock
         end
 
+        _panel_exit!(target, plan, ws, jc, nblock)
         jc += nblock
     end
 
