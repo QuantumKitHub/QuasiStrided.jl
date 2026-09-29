@@ -11,8 +11,7 @@ using SIMD: shufflevector
 @inline _copies_unchanged(::Any, ::Type) = false
 
 # Dense rank-1 storage whose elements load as SIMD lanes and convert lane-wise
-# to `T`: `T` itself, or another supported type of the same domain. Shared with
-# the vector stores.
+# to `T`: `T` itself, or another supported type of the same domain.
 const _LaneFloat = Union{Float32, Float64}
 @inline _dense_lanes(storage::S, ::Type{T}) where {S, T} =
     storage isa DenseVector && _lane_convertible(eltype(S), T)

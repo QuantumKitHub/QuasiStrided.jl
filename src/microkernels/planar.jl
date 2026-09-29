@@ -182,9 +182,8 @@ end
 end
 
 # Vector store: unit-stride rows into rank-1 dense `Complex` storage (so the
-# storage can be reinterpreted as `2W` consecutive reals per `W` rows) of `T` or
-# another complex type the lanes convert to and from, on an ISA the complex
-# fast paths ship for (shared with the complex pack fast path).
+# storage can be reinterpreted as `2W` consecutive reals per `W` rows), on an
+# ISA the complex fast paths ship for (shared with the complex pack fast path).
 @inline _complex_vector_eligible(tile::QSTile, ::Type{T}) where {T} =
     _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T) &&
     _complex_fastpath_isa_eligible()
@@ -208,8 +207,7 @@ end
     return :(shufflevector(re, im, Val($idx)))
 end
 
-# One full `W`-row block; `at` is the zero-based index of its first real. `C`
-# is `RC` in memory and converts to and from `R` around the arithmetic.
+# One full `W`-row block; `at` is the zero-based index of its first real.
 # The arithmetic transcribes Base's `Complex` expression trees (the ones
 # `_axpby_tile!` reaches), so full blocks match them bitwise: `*` is unfused,
 # `muladd(z, w, x) = (muladd(zr, wr, -muladd(zi, wi, -xr)), muladd(zr, wi,

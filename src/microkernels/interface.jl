@@ -113,8 +113,7 @@ end
 _default_lanewidth(::Type{Float64}) = 4
 _default_lanewidth(::Type{Float32}) = 8
 
-# `beta == 0` writes zeros without reading `C`; `beta == 1` is a no-op. These
-# helpers load C as `T`, compute in `T` and round on store.
+# `beta == 0` writes zeros without reading `C`; `beta == 1` is a no-op.
 function scale_tile!(destination::QSTile, beta::T) where {T}
     m = nrows(destination)
     n = ncols(destination)

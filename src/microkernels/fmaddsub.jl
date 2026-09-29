@@ -174,8 +174,8 @@ end
 end
 
 # One full `W÷2`-row block, already in `Complex`'s memory order, so no
-# interleave shuffle. `C` converts from and to its storage type `RC`. Base's
-# `Complex` expression trees in lanes, as planar's `_planar_store_block!`:
+# interleave shuffle. Base's `Complex` expression trees in lanes, as planar's
+# `_planar_store_block!`:
 #     beta == 0:  addsub(ar*r, ai*swap(r))
 #     beta == 1:  fmaddsub(ar, r, fmaddsub(ai, swap(r), C))
 #     otherwise:  as beta == 1 with C := addsub(br*C, bi*swap(C))
