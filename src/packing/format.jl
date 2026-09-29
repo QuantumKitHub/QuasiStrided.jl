@@ -55,9 +55,13 @@ function _check_descriptor(MR, NR, T, FA, FB)
         T === Float32 || T === Float64 ||
             throw(ArgumentError("KernelDescriptor requires T ∈ (Float32, Float64), got $T"))
     else
-        (FA === RealFormat || FB === RealFormat) && throw(
+        # A real operand of a complex `T` only in the mixed-domain pairings.
+        mixed = (FA, FB) === (InterleavedFormat, RealFormat) ||
+            (FA, FB) === (RealFormat, InterleavedFormat)
+        !mixed && (FA === RealFormat || FB === RealFormat) && throw(
             ArgumentError(
-                "ComplexKernelDescriptor requires complex formats on both operands, got ($FA, $FB)"
+                "ComplexKernelDescriptor requires complex formats on both operands, " *
+                    "or (InterleavedFormat, RealFormat) / (RealFormat, InterleavedFormat), got ($FA, $FB)"
             )
         )
         T === ComplexF32 || T === ComplexF64 || throw(

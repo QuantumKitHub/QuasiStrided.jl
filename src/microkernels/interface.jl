@@ -20,6 +20,8 @@ struct RealMethod <: ComplexMethod end      # what a real kernel reports
 struct PlanarMethod <: ComplexMethod end    # split re/im planes, 4 real FMAs per MAC
 struct OneMMethod <: ComplexMethod end      # Van Zee's 1m: a real 2mr x nr kernel
 struct FMAddSubMethod <: ComplexMethod end  # interleaved A, x86 `vfmaddsub`
+struct ComplexRealMethod <: ComplexMethod end  # complex A, real B: the real kernel on 2MR rows
+struct RealComplexMethod <: ComplexMethod end  # real A, complex B: the real kernel on 2NR columns
 
 # Reals per packed A / B element. Blocking divides the real `mc`/`nc` by these,
 # so every method gets the same packed byte budget.
@@ -31,12 +33,18 @@ a_reals(::OneMMethod) = 4
 b_reals(::OneMMethod) = 2
 a_reals(::FMAddSubMethod) = 2
 b_reals(::FMAddSubMethod) = 2
+a_reals(::ComplexRealMethod) = 2
+b_reals(::ComplexRealMethod) = 1
+a_reals(::RealComplexMethod) = 1
+b_reals(::RealComplexMethod) = 2
 
 # Accumulator planes held live: planar keeps separate re/im planes.
 accumulator_planes(::RealMethod) = 1
 accumulator_planes(::PlanarMethod) = 2
 accumulator_planes(::OneMMethod) = 1
 accumulator_planes(::FMAddSubMethod) = 1
+accumulator_planes(::ComplexRealMethod) = 1
+accumulator_planes(::RealComplexMethod) = 1
 
 complex_method(::Any) = RealMethod()
 

@@ -199,7 +199,7 @@ end
 # Same unroll and full-block / row-tail split as `_store_tile_planar_vector!`.
 @generated function _store_tile_fmaddsub_vector!(
         destination::QSTile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, R}},
-        alpha::T, beta::T, kernel::FMAddSubKernel{MR, NR, T, W},
+        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NV}
     # The pointer reinterpretation is only sound on dense rank-1 complex storage.

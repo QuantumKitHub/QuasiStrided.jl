@@ -32,6 +32,7 @@ include("microkernels/simd.jl")
 include("microkernels/planar.jl")
 include("microkernels/onem.jl")
 include("microkernels/fmaddsub.jl")
+include("microkernels/mixed.jl")
 
 # --- Planning: labels, conjugation, kernel and blocking choice, the plan ---
 include("planning/labels.jl")
@@ -70,6 +71,7 @@ end
             :public, :contract!, :plan_contract, :execute!, :ContractPlan,
             :ContractWorkspace, :Blocking, :default_blocking,
             :ScalarKernel, :SIMDKernel, :PlanarKernel, :OneMKernel, :FMAddSubKernel,
+            :ComplexRealKernel, :RealComplexKernel,
             :target_profile, :cache_topology,
             :TargetProfile, :CacheLevel
         )

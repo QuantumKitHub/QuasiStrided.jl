@@ -98,7 +98,7 @@ end
         transform::F, m::Int, kc::Int
     ) where {FMT, V, MR, NR, T2, F}
     if format isa RealFormat
-        if _pack_a_contiguous_eligible(packed, source, transform, m, Val(MR), T2)
+        if _pack_a_contiguous_eligible(packed, source, transform, m, Val(MR), real(T2))
             rowbase = source.base + source.rows.base
             return _pack_a_contiguous!(packed, source.storage, rowbase, source.cols, Val(MR), kc)
         end
@@ -112,7 +112,7 @@ end
     end
     load = (i, p) -> tile_load(source, i, p)
     plane_offset = (plane, i, p) -> packed_a_plane_offset(kernel, plane, i, p)
-    return _pack_panel!(packed, T2, format, Val(MR), kc, m, transform, load, plane_offset)
+    return _pack_panel!(packed, _element_type(format, T2), format, Val(MR), kc, m, transform, load, plane_offset)
 end
 
 @inline function _pack_b_sliver!(
@@ -129,8 +129,13 @@ end
     end
     load = (j, p) -> tile_load(source, p, j)
     plane_offset = (plane, j, p) -> packed_b_plane_offset(kernel, plane, j, p)
-    return _pack_panel!(packed, T2, format, Val(NR), kc, n, transform, load, plane_offset)
+    return _pack_panel!(packed, _element_type(format, T2), format, Val(NR), kc, n, transform, load, plane_offset)
 end
+
+# What a packed element converts to: the real operand of a mixed-domain kernel
+# packs `real(T)`.
+@inline _element_type(::RealFormat, ::Type{T}) where {T} = real(T)
+@inline _element_type(::PackFormat, ::Type{T}) where {T} = T
 
 # One sliver over `kc` K steps; `PD` (MR or NR) is a compile-time constant. A
 # full sliver gets a constant-trip inner loop that LLVM fully unrolls; a tail

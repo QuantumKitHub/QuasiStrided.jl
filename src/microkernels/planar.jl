@@ -134,10 +134,17 @@ function Base.accumulate(
     return acc
 end
 
+# Generator-time accumulator indices of the re/im vectors of block `v`, column
+# `j`: planar's two planes, or `RealComplexKernel`'s column pairs.
+function _planar_acc_index(kernel::Type, MV::Int, NR::Int, v::Int, j::Int)
+    kernel <: PlanarKernel && return (v + MV * j + 1, MV * NR + v + MV * j + 1)
+    return (v + MV * 2j + 1, v + MV * (2j + 1) + 1)
+end
+
 # Scalar fallback store, for every destination the vector store cannot take.
 @generated function _store_tile_planar!(
         destination::QSTile, acc::NTuple{NA, Vec{W, R}},
-        alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W},
+        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {MR, NR, T, W, R, NA}
     MV = MR ÷ W
@@ -146,12 +153,12 @@ end
 
     blocks = Any[]
     for j in 0:(NR - 1), v in 0:(MV - 1)
-        idx = v + MV * j + 1
+        ire, iim = _planar_acc_index(kernel, MV, NR, v, j)
         push!(
             blocks, quote
                 if $j < n
-                    revec = acc[$idx]
-                    imvec = acc[$(NV + idx)]
+                    revec = acc[$ire]
+                    imvec = acc[$iim]
                     for lane in 1:$W
                         i = $(v * W) + lane - 1
                         i < m || break
@@ -236,7 +243,7 @@ end
 # block of `2W` reals. The raw pointer is only dereferenced inside `GC.@preserve`.
 @generated function _store_tile_planar_vector!(
         destination::QSTile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
-        alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W},
+        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NA}
     # The pointer reinterpretation is only sound on dense rank-1 complex storage.
@@ -251,11 +258,11 @@ end
     for j in 0:(NR - 1)
         vblocks = Any[]
         for v in 0:(MV - 1)
-            idx = v + MV * j + 1
+            ire, iim = _planar_acc_index(kernel, MV, NR, v, j)
             push!(
                 vblocks, quote
-                    revec = acc[$idx]
-                    imvec = acc[$(NV + idx)]
+                    revec = acc[$ire]
+                    imvec = acc[$iim]
                     if $((v + 1) * W) <= m
                         _planar_store_block!(
                             sp, 2 * (colbase + $(v * W)), revec, imvec,
