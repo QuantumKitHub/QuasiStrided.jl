@@ -94,10 +94,6 @@ end
     return Qk > (kc === nothing ? _resolved_defaults(T).real_row.kc : kc)
 end
 
-# The panel length at the plan's effective `blocking`, 0 if none is needed.
-@inline _c_panel_length(::Type{T}, Cstorage, Qm::Int, Qn::Int, Qk::Int, blocking::Blocking) where {T} =
-    _c_panel_needed(T, Cstorage, Qk, blocking.kc) ? Qm * min(blocking.nc, Qn) : 0
-
 # Run `path` behind a dynamic call. The plan crosses in the workspace slot
 # with its storages stripped; they cross as arguments.
 @inline function _execute_across_barrier!(plan::ContractPlan{T}, alphaT::T, betaT::T, path) where {T}
@@ -168,21 +164,11 @@ end
 # kernel's unpacked-B eligibility (predicted from its method; folds), the
 # dot path's workspace capacity (assumed) and the panel decision (made at the
 # default `kc`; folds to `false` unless C is narrower than `T`).
-@inline _hint_holds(plan::ContractPlan, ::_NestPath) = _panel_holds(plan, false) && _unpacked_b_holds(plan)
-@inline _hint_holds(plan::ContractPlan, ::_PanelPath) = _panel_holds(plan, true) && _unpacked_b_holds(plan)
+@inline _hint_holds(plan::ContractPlan{T}, path::Union{_NestPath, _PanelPath}) where {T} =
+    _c_panel_needed(T, plan.Cstorage, axis_length(plan.kgroup), plan.blocking.kc) === (path isa _PanelPath) &&
+    _unpacked_b_method_eligible(complex_method(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
 @inline _hint_holds(plan::ContractPlan, ::_DotPath) = _dot_capacity_ok(plan)
 @inline _hint_holds(plan::ContractPlan, ::_OuterPath) = true
-
-@inline _unpacked_b_holds(plan::ContractPlan) =
-    _unpacked_b_method_eligible(complex_method(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
-
-@inline function _panel_holds(plan::ContractPlan{T}, panel::Bool) where {T}
-    n = _c_panel_length(
-        T, plan.Cstorage, axis_length(plan.mgroup), axis_length(plan.ngroup),
-        axis_length(plan.kgroup), plan.blocking
-    )
-    return panel ? n > 0 && length(plan.workspace.c_panel) >= n : n == 0
-end
 
 _execute_path!(plan::ContractPlan, alphaT, betaT, ::_DotPath{MATB, W}) where {MATB, W} =
     (_execute_dot!(plan, alphaT, betaT, MATB, Val(W)); nothing)
@@ -240,26 +226,26 @@ end
 end
 
 # `target`: `nothing`, or the plan whose C the panel stands in for.
-@inline _panel_enter!(::Nothing, plan, ws, jc, nblock, betaT) = plan
-@inline _panel_exit!(::Nothing, plan, ws, jc, nblock) = nothing
+@inline _panel_enter!(::Nothing, plan, jc, nblock, betaT) = plan
+@inline _panel_exit!(::Nothing, jc, nblock) = nothing
 
-function _panel_enter!(target::ContractPlan, plan::ContractPlan, ws, jc::Int, nblock::Int, betaT)
-    iszero(betaT) || _panel_copy!(target, plan.Cstorage, ws, jc, nblock, true)
-    Qm = axis_length(plan.mgroup)
+function _panel_enter!(target::ContractPlan, plan::ContractPlan, jc::Int, nblock::Int, betaT)
+    iszero(betaT) || _panel_copy!(target, jc, nblock, true)
     return ContractPlan(
         plan.kernel, plan.mgroup, plan.ngroup, plan.kgroup, plan.blocking,
-        plan.Astorage, plan.Abase, plan.Bstorage, plan.Bbase, plan.Cstorage, -jc * Qm,
-        plan.atransform, plan.btransform, plan.workspace
+        plan.Astorage, plan.Abase, plan.Bstorage, plan.Bbase, plan.Cstorage,
+        -jc * axis_length(plan.mgroup), plan.atransform, plan.btransform, plan.workspace
     )
 end
 
-_panel_exit!(target::ContractPlan, plan::ContractPlan, ws, jc::Int, nblock::Int) =
-    _panel_copy!(target, plan.Cstorage, ws, jc, nblock, false)
+_panel_exit!(target::ContractPlan, jc::Int, nblock::Int) = _panel_copy!(target, jc, nblock, false)
 
 # Columns `jc .+ (0:nblock-1)` of `target`'s C into (`load`) or out of the
 # panel, converting to the destination's eltype. Borrows the M/N offset
 # buffers, which the nest refills before reading them again.
-function _panel_copy!(target::ContractPlan, panel::AbstractVector, ws, jc::Int, nblock::Int, load::Bool)
+function _panel_copy!(target::ContractPlan, jc::Int, nblock::Int, load::Bool)
+    ws = target.workspace
+    panel = ws.c_panel
     C = target.Cstorage
     Qm = axis_length(target.mgroup)
     mc = target.blocking.mc
@@ -310,7 +296,7 @@ function _execute_nest!(
     jc = 0
     while jc < Qn
         nblock = min(nc_eff, Qn - jc)
-        cplan = _panel_enter!(target, plan, ws, jc, nblock, betaT)
+        cplan = _panel_enter!(target, plan, jc, nblock, betaT)
         n_slivers = cld(nblock, NRk)
         (rng_nB, rng_nC) = if n_ramp
             _ramp_slivers!(
@@ -420,7 +406,7 @@ function _execute_nest!(
             pc += kblock
         end
 
-        _panel_exit!(target, plan, ws, jc, nblock)
+        _panel_exit!(target, jc, nblock)
         jc += nblock
     end
 
