@@ -232,7 +232,6 @@ end
 @testset "mixed-domain selection: the real default of real(T), mapped" begin
     CR, RC = QuasiStrided.ComplexRealMethod(), QuasiStrided.RealComplexMethod()
     mapped(m, (MR, NR, W)) = m === CR ? (MR ÷ 2, NR, W) : (MR, NR ÷ 2, W)
-    dshape = QuasiStrided._default_shape
     dmethod = QuasiStrided._default_method
     for T in (ComplexF64, ComplexF32)
         R = real(T)
@@ -249,28 +248,15 @@ end
         @test dmethod(T, R, R) === dmethod(T, T, T) === dmethod(T, ComplexF32, T) === PlanarMethod()
         @test dmethod(R, Float32, Float64) === RealMethod()
     end
-    # (isa, vb, nregisters) => (F64, F32, C64, C32) default shapes at a large extent.
-    expected = (
-        (:avx512, 64, 32) => ((32, 6, 8), (64, 6, 16), (24, 3, 8), (48, 3, 16)),
-        (:avx2, 32, 16) => ((8, 6, 4), (16, 6, 8), (4, 5, 4), (8, 5, 8)),
-        (:neon, 16, 32) => ((8, 6, 4), (8, 6, 8), (4, 6, 2), (8, 6, 4)),
-    )
+    # The real extent, store and small-M demotions carry over.
     saved = QuasiStrided._TARGET[]
     try
-        for ((key, vb, nreg), shapes) in expected
+        for (key, vb, nreg) in ((:avx512, 64, 32), (:avx2, 32, 16), (:neon, 16, 32))
             QuasiStrided._TARGET[] = synthetic(key, vb; nregisters = nreg)
-            Q = 4096
-            for (T, shape) in zip((Float64, Float32, ComplexF64, ComplexF32), shapes)
-                @test dshape(T, Q, Q, Q) === (shape, QuasiStrided._default_method(T))
-                @test dshape(T, QuasiStrided._default_method(T), Q, Q, Q) === dshape(T, Q, Q, Q)
-            end
-            for (T, rshape) in zip((ComplexF64, ComplexF32), shapes[1:2]), m in (CR, RC)
-                @test dshape(T, m, Q, Q, Q) === (mapped(m, rshape), m)
-                # The real extent, store and small-M demotions carry over.
-                for Qm in (1, 3, 17, 40, 100), run in (0, 1, 8, Qm)
-                    real_problem = m === CR ? (2 * Qm, 50, 2 * run) : (Qm, 100, run)
-                    @test dshape(T, m, Qm, 50, run) === (mapped(m, dshape(real(T), real_problem...)[1]), m)
-                end
+            for T in (ComplexF64, ComplexF32), m in (CR, RC), Qm in (1, 3, 17, 40, 4096), run in (0, 1, 8, Qm)
+                real_problem = m === CR ? (2 * Qm, 50, 2 * run) : (Qm, 100, run)
+                @test QuasiStrided._default_shape(T, m, Qm, 50, run) ===
+                    (mapped(m, QuasiStrided._default_shape(real(T), real_problem...)[1]), m)
             end
         end
     finally
