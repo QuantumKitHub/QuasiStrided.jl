@@ -40,6 +40,16 @@ const _MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
     end
 end
 
+# A plan that packs A line by line runs past the planner's predicted path.
+@testset "tensorcontract! through a split plan" begin
+    A, B = randn(16, 16, 16, 16, 16), randn(16, 16)
+    Cn, Cq = zeros(16, 16, 16, 16, 16), zeros(16, 16, 16, 16, 16)
+    pA, pB, pAB = ((1, 2, 3, 5), (4,)), ((1,), (2,)), ((4, 3, 2, 5, 1), ())
+    tensorcontract!(Cn, A, pA, false, B, pB, false, pAB, 1.0, 0.0, to_native)
+    tensorcontract!(Cq, A, pA, false, B, pB, false, pAB, 1.0, 0.0, qsbackend)
+    @test Cq ≈ Cn
+end
+
 # `conjA`/`conjB` and each operand's `StridedView.op` compose by xor.
 @testset "conjugation: flags x StridedView.op (eltype = $T)" for T in complex_eltypes
     Random.seed!(20260914)

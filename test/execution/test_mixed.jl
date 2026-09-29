@@ -3,8 +3,10 @@
 using LinearAlgebra: norm
 
 # `(Cv, Av, indA, Bv, indB, indC)` of shape `(M, K, N)`; `:scattered` takes each
-# operand from `scattered_fixture` of its own eltype.
+# operand from `scattered_fixture` of its own eltype, `:split` is intensli_7 with
+# M^4 rows.
 function _mixed_fixture(TA, TB, TC, M, K, N, layout, seed)
+    layout === :split && return _sp_views(TC, _SP_I7, (M, M, M, K, M, N), TA)
     layout === :scattered &&
         return (scattered_fixture(TC)[1], scattered_fixture(TA)[2:3]..., scattered_fixture(TB)[4:6]...)
     rng = MersenneTwister(seed)
@@ -27,6 +29,7 @@ const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
         (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided._NestPath, SIMDKernel),
         (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided._NestPath, _RC),
         (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided._NestPath, _CR),
+        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, _NestPath{false, <:Any, (true, false)}, _RC),
         (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided._NestPath, _PROMOTED),
         (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided._NestPath, _PROMOTED),
         (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided._NestPath, _CR),
@@ -36,7 +39,7 @@ const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
     fx = _mixed_fixture(TA, TB, TC, MKN..., layout, 7)
     alpha = 1.5
     ref = _mixed_ref(fx, alpha, beta; conjA, conjB)
-    plan = plan_contract(fx...; conjA, conjB, accumulator = acc)
+    plan = (layout === :split ? _sp_forced_plan : plan_contract)(fx...; conjA, conjB, accumulator = acc)
     T = acc === nothing ? promote_type(TA, TB, TC) : (TC <: Complex ? Complex{acc} : acc)
     @test plan isa ContractPlan{T}
     @test plan.kernel isa K

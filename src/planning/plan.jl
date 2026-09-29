@@ -33,6 +33,11 @@ struct ContractPlan{
     btransform::TB
 
     workspace::ContractWorkspace{T, VT, PT}
+
+    # Line-by-line packing of A (`mpack`) and B (`npack`); the groups above keep
+    # their natural order, and the nest path enumerates the split ones.
+    mpack::PackSplit
+    npack::PackSplit
 end
 
 """
@@ -73,6 +78,10 @@ invalid input.
   * `mc`/`kc`/`nc` override the fields of `default_blocking(kernel)` (each
     `>= 1`); `mc`/`nc` are rounded up to `mr`/`nr` multiples and all three are
     clamped to the extents.
+  * An operand whose register slivers would read one element per cache line,
+    with the lines' other elements needed only after more lines than fit L2,
+    is packed line by line (`PackSplit`); its `mc` (or `nc`) then becomes a
+    whole number of line groups, up to `requested kc / kc` times the request.
   * `workspace` reuses an existing [`ContractWorkspace`](@ref) for compute
     type `T`, grown by [`reserve!`](@ref) as needed. A non-default
     TensorOperations `allocator` sizes the buffers once via `tensoralloc`,
@@ -324,17 +333,38 @@ function _plan_contract(
     NRk = nr(kernel)
 
     # Empty extents: the drivers never read these; the floors keep them valid.
-    mc_eff = Qm == 0 ? MRk : min(_roundup(requested.mc, MRk), _roundup(Qm, MRk))
-    nc_eff = Qn == 0 ? NRk : min(_roundup(requested.nc, NRk), _roundup(Qn, NRk))
+    mc_rounded = _roundup(requested.mc, MRk)
+    nc_rounded = _roundup(requested.nc, NRk)
+    mc_eff = Qm == 0 ? MRk : min(mc_rounded, _roundup(Qm, MRk))
+    nc_eff = Qn == 0 ? NRk : min(nc_rounded, _roundup(Qn, NRk))
     kc_eff = Qk == 0 ? 1 : min(requested.kc, Qk)
+    panel = _c_panel_needed(T, req.Cstorage, Qk, kc_eff)
+    mpack = npack = _NO_SPLIT
+    # Cache lines hold each operand's storage eltype, and the block walk costs
+    # what its packed format's scatter does. B is not split under a panel of C:
+    # the panel holds `jc` blocks in C's own N order, which a split N group does
+    # not enumerate contiguously.
+    if Qm > 0 && Qn > 0 && Qk > 0
+        mc_eff, mpack = _pack_split(
+            req.mgroup, req.kgroup, 1, MRk, sizeof(eltype(req.Astorage)),
+            !(a_format(kernel) isa RealFormat), kc_eff, mc_eff, mc_rounded, requested.kc
+        )
+        if !panel
+            nc_eff, npack = _pack_split(
+                req.ngroup, req.kgroup, 2, NRk, sizeof(eltype(req.Bstorage)),
+                !(b_format(kernel) isa RealFormat), kc_eff, nc_eff, nc_rounded, requested.kc
+            )
+        end
+    end
     blocking = Blocking(mc_eff, kc_eff, nc_eff)
-    panel = _c_panel_needed(T, req.Cstorage, Qk, kc_eff) ? Qm * min(nc_eff, Qn) : 0
-    ws = _resolve_workspace(T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel)
+    ws = _resolve_workspace(
+        T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel ? Qm * min(nc_eff, Qn) : 0
+    )
 
     plan = ContractPlan(
         kernel, req.mgroup, req.ngroup, req.kgroup, blocking,
         req.Astorage, req.Abase, req.Bstorage, req.Bbase, req.Cstorage, req.Cbase,
-        atransform, btransform, ws
+        atransform, btransform, ws, mpack, npack
     )
     return _continue(req.f, plan, hint)
 end
