@@ -142,6 +142,10 @@ end
     @test_throws ArgumentError tensorcontract!(zeros(4, 5), D4, pA, false, randn(4, 5), pB, false, pAB, 1, 0, qsbackend)
     @test_throws ArgumentError tensorcontract!(zeros(4, 5), randn(4, 5), pA, false, D5, pB, false, pAB, 1, 0, qsbackend)
     @test_throws ArgumentError QuasiStrided.QuasiStridedBackend(accumulator = Float16)
+    @test_throws ArgumentError tensorcontract!(
+        zeros(4, 5), randn(4, 4), pA, false, randn(4, 5), pB, false, pAB, 1, 0,
+        QuasiStrided.QuasiStridedBackend{Float16}()
+    )
 end
 
 @testset "@tensor with mixed eltypes and an accumulator" begin

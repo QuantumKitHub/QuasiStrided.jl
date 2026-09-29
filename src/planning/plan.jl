@@ -230,9 +230,14 @@ const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
     (TC <: Real && !(TA <: Real && TB <: Real)) && _throw_complex_into_real(TA, TB, TC)
     return promote_type(TA, TB, TC)
 end
-@inline function _compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Type{R}) where {TA, TB, TC, R}
+@inline function _compute_type(
+        ::Type{TA}, ::Type{TB}, ::Type{TC}, ::Type{R}
+    ) where {TA, TB, TC, R <: Union{Float32, Float64}}
     return _compute_type(TA, TB, TC, nothing) <: Complex ? Complex{R} : R
 end
+@noinline _compute_type(TA, TB, TC, accumulator) = throw(
+    ArgumentError("accumulator must be nothing, Float32 or Float64, got $accumulator")
+)
 
 @noinline _throw_eltypes(TA, TB, TC) = throw(
     ArgumentError(

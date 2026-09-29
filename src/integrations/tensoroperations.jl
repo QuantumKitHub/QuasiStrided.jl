@@ -75,30 +75,20 @@ end
 
 @noinline _qs_throw(msg::AbstractString) = throw(ArgumentError(msg))
 
-@noinline function _qs_check_eligible(C, A, B)
-    f = TO.tensorcontract!
-    TA, TB, TC = eltype(A), eltype(B), eltype(C)
-    all(in(_QS_ELTYPES), (TA, TB, TC)) || _qs_throw(
-        "QuasiStridedBackend requires every tensor of $f to have an element type " *
-            "out of Float32, Float64, ComplexF32 and ComplexF64, got " *
-            join((TC, TA, TB), ", ")
-    )
-    (TC <: Complex || (TA <: Real && TB <: Real)) || _qs_throw(
-        "QuasiStridedBackend: a complex input of $f needs a complex output, got " *
-            join((TC, TA, TB), ", ")
-    )
+@noinline function _qs_check_strided(C, A, B)
     all(isstrided, (A, B, C)) || _qs_throw(
-        "QuasiStridedBackend requires strided arrays for $f, got " *
+        "QuasiStridedBackend requires strided arrays for $(TO.tensorcontract!), got " *
             join(map(typeof, (C, A, B)), ", ")
     )
     return nothing
 end
 
-# Checks shared by both `tensorcontract!` methods. The conjugated-C check
-# duplicates `plan_contract`'s so that a rejected call never acquires or grows
-# a pooled workspace (the workspace is an argument to `plan_contract`).
+# Checks shared by both `tensorcontract!` methods. The eltype and conjugated-C
+# checks precede `plan_contract`'s so that a rejected call never acquires or
+# grows a pooled workspace (the workspace is an argument to `plan_contract`).
 @inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β, accumulator)
-    _qs_check_eligible(C, A, B)
+    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    _qs_check_strided(C, A, B)
     TO.argcheck_tensorcontract(C, A, pA, B, pB, pAB)
     TO.dimcheck_tensorcontract(C, A, pA, B, pB, pAB)
 
@@ -114,9 +104,8 @@ end
             "`StridedView.op` on store, so a conjugated `C` would be silently wrong"
     )
 
-    # Dropping `Zero()`/`One()` is safe: the kernels branch on `iszero(alpha/beta)`.
-    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
     indA, indB, indC = _qs_labels(pA, pB, pAB)
+    # Dropping `Zero()`/`One()` is safe: the kernels branch on `iszero(alpha/beta)`.
     return Cv, Av, Bv, indA, indB, indC, convert(T, α), convert(T, β)
 end
 
