@@ -78,9 +78,7 @@ lanewidth(kernel::_MixedKernel) = lanewidth(kernel.inner)
 
 zero_accumulator(kernel::_MixedKernel) = zero_accumulator(kernel.inner)
 
-@inline Base.accumulate(
-    kernel::K, acc::NTuple{NV, Vec{W, R}}, packed_a::PA, packed_b::PB, kc::Int
-) where {K <: _MixedKernel, NV, W, R, PA, PB} =
+@inline Base.accumulate(kernel::_MixedKernel, acc::NTuple, packed_a, packed_b, kc::Int) =
     accumulate(kernel.inner, acc, packed_a, packed_b, kc)
 
 # Inlined or not as the fmaddsub and planar stores each reuses.
