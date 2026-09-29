@@ -172,8 +172,7 @@ function _planned(
     norder = _order_free_labels(nlabels, indC, C)
 
     # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
-    runs = T <: Real || method isa _MixedMethod
-    run_m = runs ? _leading_unit_run(morder, indC, C) : 0
+    run_m = T <: Real || method isa _MixedMethod ? _leading_unit_run(morder, indC, C) : 0
     run_n = T <: Real ? _leading_unit_run(norder, indC, C) : 0
 
     mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
@@ -211,12 +210,10 @@ end
 const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
 
 # A named mixed-domain kernel's `RealFormat` side packs a real operand only.
-@inline _check_kernel_domain(kernel, ::Type{TA}, ::Type{TB}) where {TA, TB} =
-    _check_kernel_domain(complex_method(kernel), kernel, TA, TB)
-@inline _check_kernel_domain(::ComplexMethod, kernel, ::Type, ::Type) = nothing
-@inline _check_kernel_domain(::ComplexRealMethod, kernel, ::Type, ::Type{TB}) where {TB} =
+@inline _check_kernel_domain(kernel, ::Type, ::Type) = nothing
+@inline _check_kernel_domain(kernel::ComplexRealKernel, ::Type, ::Type{TB}) where {TB} =
     TB <: Real || _throw_kernel_domain(kernel, "B", TB)
-@inline _check_kernel_domain(::RealComplexMethod, kernel, ::Type{TA}, ::Type) where {TA} =
+@inline _check_kernel_domain(kernel::RealComplexKernel, ::Type{TA}, ::Type) where {TA} =
     TA <: Real || _throw_kernel_domain(kernel, "A", TA)
 
 @noinline _throw_kernel_domain(kernel, side, T) = throw(
