@@ -57,9 +57,9 @@ invalid input.
     `T` is `promote_type` of the three, or, for `accumulator = Float32` or
     `Float64`, that precision in the domain (real or complex) of the promoted
     type. Operands are converted to `T` on load and `alpha*AB + beta*C` is
-    evaluated in `T`, rounding to `eltype(C)` on store. `C` holds the partial
-    sums between `kc` blocks of K, so a K longer than `kc` rounds once per
-    block.
+    evaluated in `T`, rounding to `eltype(C)` once. For an `eltype(C)` of
+    lower precision than `T`, a K longer than `kc` accumulates in a panel of
+    `T` in the workspace, of `M * min(N, nc)` elements.
   * `kernel = nothing` picks one from the hardware profile and the extents: a
     [`SIMDKernel`](@ref) for a real `T`, a [`PlanarKernel`](@ref) for a
     complex one (an [`FMAddSubKernel`](@ref) for a short M on AVX-512).
@@ -315,7 +315,8 @@ function _plan_contract(
     nc_eff = Qn == 0 ? NRk : min(_roundup(requested.nc, NRk), _roundup(Qn, NRk))
     kc_eff = Qk == 0 ? 1 : min(requested.kc, Qk)
     blocking = Blocking(mc_eff, kc_eff, nc_eff)
-    ws = _resolve_workspace(T, req.workspace, kernel, blocking, req.oracle, req.allocator)
+    panel = _c_panel_needed(T, req.Cstorage, Qk, kc_eff) ? Qm * min(nc_eff, Qn) : 0
+    ws = _resolve_workspace(T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel)
 
     plan = ContractPlan(
         kernel, req.mgroup, req.ngroup, req.kgroup, blocking,

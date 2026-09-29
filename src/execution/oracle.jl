@@ -1,7 +1,8 @@
 # The tile-by-tile correctness oracle for `execute!`: per register tile, K in
 # `kc` panels, pack one sliver each and call the checked `execute_tile!`. Uses
 # only its own `tw_*` buffers, so it shares no mutable state with `execute!`.
-# Needs a plan built with `oracle = true`.
+# Needs a plan built with `oracle = true`. Unlike `execute!`, rounds a C narrower
+# than the compute type once per `kc` block.
 function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) where {T}
     ws = plan.workspace
     # `tw_packed_a` is never empty for a legal blocking unless `oracle = false`.

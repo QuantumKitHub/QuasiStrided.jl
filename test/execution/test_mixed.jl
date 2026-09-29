@@ -49,14 +49,34 @@ end
     @test _steady_allocs!(execute!, _mm_plan(Cmat, Amat, Bmat), Cmat) == 0 skip = (VERSION < v"1.11")
 end
 
-# One K panel: between panels the partial sums round-trip through C.
-@testset "accumulator = Float64: Float32 operands within one ulp" begin
-    rng = MersenneTwister(5)
-    A, B, C0 = randn(rng, Float32, 64, 512), randn(rng, Float32, 512, 48), randn(rng, Float32, 64, 48)
-    ref = Float32.(Float64.(A) * Float64.(B) .+ 0.5 .* Float64.(C0))
-    C64, C32 = copy(C0), copy(C0)
-    execute!(_mm_plan(C64, A, B; accumulator = Float64, kc = 512), 1, 0.5)
-    execute!(_mm_plan(C32, A, B), 1, 0.5)
-    @test all(abs.(C64 .- ref) .<= eps.(ref))
-    @test maximum(abs.(C64 .- ref)) < maximum(abs.(C32 .- ref))
+@testset "Float32 C, Float64 compute type, K over several kc blocks: within one ulp ($TA, $layout, beta = $beta)" for (TA, acc, layout) in (
+            (Float32, Float64, :dense), (Float64, nothing, :dense), (Float32, Float64, :scattered),
+        ), beta in (0, 0.5)
+    fx = if layout === :scattered
+        Cv = scattered_fixture(Float32, 32, 512)[1]
+        copyto!(Cv, randn(MersenneTwister(4), Float32, size(Cv)))
+        (Cv, scattered_fixture(TA, 32, 512)[2:end]...)
+    else
+        rng = MersenneTwister(5)
+        A, B, C = randn(rng, TA, 64, 512), randn(rng, TA, 512, 48), randn(rng, Float32, 64, 48)
+        (StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3))
+    end
+    ref = Float32.(_mixed_ref(fx, 1, beta))
+    C32 = copy(fx[1])
+    execute!(plan_contract(C32, map(x -> x isa StridedView ? StridedView(Float32.(x)) : x, fx[2:end])...), 1, beta)
+    plan = plan_contract(fx...; accumulator = acc)
+    @test _path_of(plan) isa QuasiStrided._PanelPath
+    @test axis_length(plan.kgroup) > plan.blocking.kc
+    execute!(plan, 1, beta)
+    err = abs.(Array(fx[1]) .- ref)
+    @test all(err .<= eps.(ref))
+    @test maximum(err) < maximum(abs.(Array(C32) .- ref))
+end
+
+@testset "Float32 C, Float64 compute type: steady-state execute! allocates nothing" begin
+    rng = MersenneTwister(6)
+    Amat, Bmat, Cmat = randn(rng, Float32, 64, 700), randn(rng, Float32, 700, 40), zeros(Float32, 64, 40)
+    plan = _mm_plan(Cmat, Amat, Bmat; accumulator = Float64)
+    @test _path_of(plan) isa QuasiStrided._PanelPath
+    @test _steady_allocs!(execute!, plan, Cmat) == 0 skip = (VERSION < v"1.11")
 end
