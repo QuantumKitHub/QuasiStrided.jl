@@ -135,10 +135,12 @@ function Base.accumulate(
 end
 
 # Generator-time accumulator indices of the re/im vectors of block `v`, column
-# `j`: planar's two planes, or `RealComplexKernel`'s column pairs.
+# `j`: planar's two planes, or `RealComplexKernel`'s column pairs. A `<:` test
+# rather than dispatch, as `RealComplexKernel` is defined after this file.
 function _planar_acc_index(kernel::Type, MV::Int, NR::Int, v::Int, j::Int)
     kernel <: PlanarKernel && return (v + MV * j + 1, MV * NR + v + MV * j + 1)
-    return (v + MV * 2j + 1, v + MV * (2j + 1) + 1)
+    kernel <: RealComplexKernel && return (v + MV * 2j + 1, v + MV * (2j + 1) + 1)
+    throw(ArgumentError("_planar_acc_index: no planar accumulator layout for $kernel"))
 end
 
 # Scalar fallback store, for every destination the vector store cannot take.
