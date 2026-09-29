@@ -62,8 +62,9 @@ invalid input.
     `T` in the workspace, of `M * min(N, nc)` elements.
   * `kernel = nothing` picks one from the hardware profile and the extents: a
     [`SIMDKernel`](@ref) for a real `T`, a [`PlanarKernel`](@ref) for a
-    complex one (an [`FMAddSubKernel`](@ref) for a short M on AVX-512).
-    [`OneMKernel`](@ref) is used only when named.
+    complex one (an [`FMAddSubKernel`](@ref) for a short M on AVX-512), a
+    [`ComplexRealKernel`](@ref)/[`RealComplexKernel`](@ref) for a complex `T`
+    with a real `B`/`A`. [`OneMKernel`](@ref) is used only when named.
   * Labels within the M and N composites are ordered by their stride in `C`;
     the K order follows a cost model of the two packs. For a real `T` the
     operand roles are swapped (B feeds M) when only the N side gives `C` a
@@ -151,6 +152,8 @@ function _planned(
         accumulator::AC
     ) where {F, NA, NB, NC, AC}
     T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    method = _default_method(T, eltype(A), eltype(B))
+    _check_kernel_domain(kernel, eltype(A), eltype(B))
 
     # GUARDRAIL: a conjugated `C` is rejected; the engine writes through to
     # its parent, so there is nowhere to absorb its `op`.
@@ -168,8 +171,9 @@ function _planned(
     morder = _order_free_labels(mlabels, indC, C)
     norder = _order_free_labels(nlabels, indC, C)
 
-    # Only real `T` swaps or run-demotes; `0` is a placeholder.
-    run_m = T <: Real ? _leading_unit_run(morder, indC, C) : 0
+    # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
+    runs = T <: Real || method isa _MixedMethod
+    run_m = runs ? _leading_unit_run(morder, indC, C) : 0
     run_n = T <: Real ? _leading_unit_run(norder, indC, C) : 0
 
     mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
@@ -183,7 +187,7 @@ function _planned(
 
     Qk = axis_length(kgroup)
 
-    mr_asis, mr_swapped = _candidate_mrs(T, kernel, Qm, Qn, run_m, run_n)
+    mr_asis, mr_swapped = _candidate_mrs(T, method, kernel, Qm, Qn, run_m, run_n)
 
     if T <: Real && _prefer_swap(run_m, run_n, mr_asis, mr_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
@@ -194,17 +198,30 @@ function _planned(
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
             run_n, mc, kc, nc, workspace, allocator, oracle
         )
-        return _plan_with_kernel(kernel, btransform, atransform, req_swapped)
+        return _plan_with_kernel(kernel, method, btransform, atransform, req_swapped)
     end
     req = _plan_request(
         T, f, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
         run_m, mc, kc, nc, workspace, allocator, oracle
     )
-    return _plan_with_kernel(kernel, atransform, btransform, req)
+    return _plan_with_kernel(kernel, method, atransform, btransform, req)
 end
 
 const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
+
+# A named mixed-domain kernel's `RealFormat` side packs a real operand only.
+@inline _check_kernel_domain(kernel, ::Type{TA}, ::Type{TB}) where {TA, TB} =
+    _check_kernel_domain(complex_method(kernel), kernel, TA, TB)
+@inline _check_kernel_domain(::ComplexMethod, kernel, ::Type, ::Type) = nothing
+@inline _check_kernel_domain(::ComplexRealMethod, kernel, ::Type, ::Type{TB}) where {TB} =
+    TB <: Real || _throw_kernel_domain(kernel, "B", TB)
+@inline _check_kernel_domain(::RealComplexMethod, kernel, ::Type{TA}, ::Type) where {TA} =
+    TA <: Real || _throw_kernel_domain(kernel, "A", TA)
+
+@noinline _throw_kernel_domain(kernel, side, T) = throw(
+    ArgumentError("plan_contract: $(typeof(kernel)) needs a real $side, got eltype $T")
+)
 
 # Fold to the compute type, or a throw, at compile time.
 @inline function _compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Nothing) where {TA, TB, TC}
@@ -230,11 +247,11 @@ end
 # `mr` of the kernel each orientation would run, for the swap decision: a named
 # kernel either way, else `_default_shape`'s pick at that orientation's extents
 # and C run.
-@inline _candidate_mrs(::Type{T}, kernel, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T} =
+@inline _candidate_mrs(::Type{T}, method, kernel, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T} =
     (mr(kernel), mr(kernel))
-@inline function _candidate_mrs(::Type{T}, ::Nothing, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T}
-    mr_asis = _default_shape(T, Qm, Qn, run_m)[1][1]
-    mr_swapped = T <: Real ? _default_shape(T, Qn, Qm, run_n)[1][1] : mr_asis
+@inline function _candidate_mrs(::Type{T}, method, ::Nothing, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T}
+    mr_asis = _default_shape(T, method, Qm, Qn, run_m)[1][1]
+    mr_swapped = T <: Real ? _default_shape(T, method, Qn, Qm, run_n)[1][1] : mr_asis
     return mr_asis, mr_swapped
 end
 
@@ -244,11 +261,11 @@ end
 # kernel's code is compiled (holding the menu-wide kernel Union would box the
 # request; a static ladder would compile every menu kernel). All barrier
 # arguments are singletons or heap objects: 0 B, one method-cache hit.
-@inline _plan_with_kernel(kernel, atransform, btransform, req::_PlanRequest) =
+@inline _plan_with_kernel(kernel, method, atransform, btransform, req::_PlanRequest) =
     _plan_contract(kernel, atransform, btransform, req, nothing)
-@inline function _plan_with_kernel(::Nothing, atransform, btransform, req::_PlanRequest{T}) where {T}
+@inline function _plan_with_kernel(::Nothing, method, atransform, btransform, req::_PlanRequest{T}) where {T}
     Qm = axis_length(req.mgroup)
-    shape, method = _default_shape(T, Qm, axis_length(req.ngroup), req.run)
+    shape, method = _default_shape(T, method, Qm, axis_length(req.ngroup), req.run)
     shape = _demote_shape_for_run(T, shape, method, req.run, Qm, axis_length(req.kgroup))
     vshape = _menu_val(shape, T, method)
     # The execution path, predicted so the callee is specialised on it. Only a

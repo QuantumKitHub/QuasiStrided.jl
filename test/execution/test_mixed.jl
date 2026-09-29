@@ -19,16 +19,19 @@ function _mixed_ref(fx, alpha, beta; kw...)
     return _brute_ref(R.(Array(Av)), iA, R.(Array(Bv)), iB, R.(Array(Cv)), iC, alpha, beta; kw...)
 end
 
-@testset "mixed eltypes: $TA x $TB -> $TC, accumulator = $acc, $layout" for (TA, TB, TC, acc, layout, MKN, beta, conjA, conjB, path) in (
-        (Float32, Float64, Float64, nothing, :dense, (23, 37, 19), 0, false, false, QuasiStrided._NestPath),
-        (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided._NestPath),
-        (Float64, ComplexF64, ComplexF64, nothing, :dense, (21, 33, 17), 0.3 - 0.7im, false, true, QuasiStrided._NestPath),
-        (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided._NestPath),
-        (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided._NestPath),
-        (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided._NestPath),
-        (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided._NestPath),
-        (Float32, Float64, Float64, nothing, :dense, (1, 70, 29), 0.5, false, false, QuasiStrided._DotPath),
-        (Float64, Float32, Float64, nothing, :dense, (37, 1, 21), 1, false, false, QuasiStrided._OuterPath),
+const _CR, _RC = QuasiStrided.ComplexRealKernel, QuasiStrided.RealComplexKernel
+const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
+
+@testset "mixed eltypes: $TA x $TB -> $TC, accumulator = $acc, $layout" for (TA, TB, TC, acc, layout, MKN, beta, conjA, conjB, path, K) in (
+        (Float32, Float64, Float64, nothing, :dense, (23, 37, 19), 0, false, false, QuasiStrided._NestPath, SIMDKernel),
+        (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided._NestPath, SIMDKernel),
+        (Float64, ComplexF64, ComplexF64, nothing, :dense, (21, 33, 17), 0.3 - 0.7im, false, true, QuasiStrided._NestPath, _RC),
+        (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided._NestPath, _CR),
+        (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided._NestPath, _PROMOTED),
+        (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided._NestPath, _PROMOTED),
+        (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided._NestPath, _CR),
+        (Float32, Float64, Float64, nothing, :dense, (1, 70, 29), 0.5, false, false, QuasiStrided._DotPath, SIMDKernel),
+        (Float64, Float32, Float64, nothing, :dense, (37, 1, 21), 1, false, false, QuasiStrided._OuterPath, SIMDKernel),
     )
     fx = _mixed_fixture(TA, TB, TC, MKN..., layout, 7)
     alpha = 1.5
@@ -36,11 +39,19 @@ end
     plan = plan_contract(fx...; conjA, conjB, accumulator = acc)
     T = acc === nothing ? promote_type(TA, TB, TC) : (TC <: Complex ? Complex{acc} : acc)
     @test plan isa ContractPlan{T}
+    @test plan.kernel isa K
     @test _path_of(plan) isa path
     execute!(plan, alpha, beta)
-    K = layout === :scattered ? 32 : MKN[2]
-    rtol = 10 * sqrt(K) * max(eps(real(T)), eps(real(TC)))
+    Qk = layout === :scattered ? 32 : MKN[2]
+    rtol = 10 * sqrt(Qk) * max(eps(real(T)), eps(real(TC)))
     @test norm(Array(fx[1]) - ref) <= rtol * norm(ref)
+end
+
+@testset "a named mixed-domain kernel with a complex RealFormat side throws at plan time" begin
+    Cv, Av, Bv = (StridedView(zeros(ComplexF64, 8, 8)) for _ in 1:3)
+    for kernel in (_CR(Val(4), Val(6), ComplexF64, Val(4)), _RC(Val(8), Val(3), ComplexF64, Val(4)))
+        @test_throws ArgumentError plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3); kernel)
+    end
 end
 
 @testset "mixed eltypes: steady-state execute! allocates nothing" begin

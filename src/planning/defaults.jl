@@ -76,6 +76,17 @@ _default_kernel(::Type{T}) where {T} =
     return (d.fitted, method)
 end
 
+# The automatic `(shape, method)` under `method`, `_default_method(T, TA, TB)`.
+@inline _default_shape(::Type{T}, ::ComplexMethod, Qm::Int, Qn::Int, run::Int) where {T} =
+    _default_shape(T, Qm, Qn, run)
+
+# The real default shape of the real problem, mapped: the real extent, store and
+# small-M demotions carry over, on the real type's cached defaults.
+@inline function _default_shape(::Type{T}, method::_MixedMethod, Qm::Int, Qn::Int, run::Int) where {T}
+    shape, _ = _default_shape(real(T), _real_problem(method, Qm, Qn, run)...)
+    return (_mixed_shape(method, shape), method)
+end
+
 # `@noinline`: the return type is the Union of `T`'s menu kernels.
 @noinline function _default_kernel(::Type{T}, Qm::Int, Qn::Int) where {T}
     shape, method = _default_shape(T, Qm, Qn)

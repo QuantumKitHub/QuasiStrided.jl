@@ -8,6 +8,17 @@
 _default_method(::Type{<:Real}) = RealMethod()
 _default_method(::Type{<:Complex}) = PlanarMethod()
 
+const _MixedMethod = Union{ComplexRealMethod, RealComplexMethod}
+
+# The method for compute type `T` and (oriented) operand eltypes: a mixed-domain
+# method when exactly one operand is real.
+_default_method(::Type{T}, ::Type{TA}, ::Type{TB}) where {T, TA, TB} =
+    _default_method(T)
+_default_method(::Type{T}, ::Type{<:Complex}, ::Type{<:Real}) where {T <: Complex} =
+    ComplexRealMethod()
+_default_method(::Type{T}, ::Type{<:Real}, ::Type{<:Complex}) where {T <: Complex} =
+    RealComplexMethod()
+
 const NR_DEFAULT = 6
 
 # An (8, 6) tile at one 256-bit register's lane width: the shape wherever no rule applies.
@@ -48,6 +59,20 @@ kernel_shapes(::Type{ComplexF32}, ::PlanarMethod) = KERNEL_SHAPES_C32_PLANAR
 kernel_shapes(::Type{ComplexF32}, ::OneMMethod) = KERNEL_SHAPES_C32_ONEM
 kernel_shapes(::Type{ComplexF64}, ::FMAddSubMethod) = KERNEL_SHAPES_C64_FMADDSUB
 kernel_shapes(::Type{ComplexF32}, ::FMAddSubMethod) = KERNEL_SHAPES_C32_FMADDSUB
+# The mixed menus are the real menu of `real(T)`, mapped by `_mixed_shape`.
+kernel_shapes(::Type{T}, method::_MixedMethod) where {T <: Union{ComplexF32, ComplexF64}} =
+    map(s -> _mixed_shape(method, s), kernel_shapes(real(T), RealMethod()))
+
+# A real inner shape to the mixed kernel's `(MR, NR, W)`, and back: complex A
+# rows and complex B columns each span two reals of the inner kernel.
+_mixed_shape(::ComplexRealMethod, (MR, NR, W)::NTuple{3, Int}) = (MR ÷ 2, NR, W)
+_mixed_shape(::RealComplexMethod, (MR, NR, W)::NTuple{3, Int}) = (MR, NR ÷ 2, W)
+_real_shape(::ComplexRealMethod, (MR, NR, W)::NTuple{3, Int}) = (2 * MR, NR, W)
+_real_shape(::RealComplexMethod, (MR, NR, W)::NTuple{3, Int}) = (MR, 2 * NR, W)
+
+# The real problem the inner kernel sees: extents and C's unit-stride M run in reals.
+_real_problem(::ComplexRealMethod, Qm::Int, Qn::Int, run::Int) = (2 * Qm, Qn, 2 * run)
+_real_problem(::RealComplexMethod, Qm::Int, Qn::Int, run::Int) = (Qm, 2 * Qn, run)
 
 # The kernel type implementing `method` for `T`, or `nothing` (exactly the
 # pairs with a menu).
@@ -55,6 +80,8 @@ _kernel_type(::RealMethod, ::Type{<:Union{Float32, Float64}}) = SIMDKernel
 _kernel_type(::PlanarMethod, ::Type{<:Union{ComplexF32, ComplexF64}}) = PlanarKernel
 _kernel_type(::OneMMethod, ::Type{<:Union{ComplexF32, ComplexF64}}) = OneMKernel
 _kernel_type(::FMAddSubMethod, ::Type{<:Union{ComplexF32, ComplexF64}}) = FMAddSubKernel
+_kernel_type(::ComplexRealMethod, ::Type{<:Union{ComplexF32, ComplexF64}}) = ComplexRealKernel
+_kernel_type(::RealComplexMethod, ::Type{<:Union{ComplexF32, ComplexF64}}) = RealComplexKernel
 _kernel_type(::Any, ::Type) = nothing
 
 # An unrolled `shape === menu[i] ? ... :` ladder over the menu whose branches
@@ -261,6 +288,14 @@ end
     ) where {T}
     target = _run_demotion_target(T, shape[1], method, run, Qm, Qk)
     return target === nothing ? shape : target
+end
+
+@inline function _demote_shape_for_run(
+        ::Type{T}, shape::NTuple{3, Int}, method::_MixedMethod, run::Int, Qm::Int, Qk::Int
+    ) where {T}
+    m, _, r = _real_problem(method, Qm, 0, run)
+    real_shape = _demote_shape_for_run(real(T), _real_shape(method, shape), RealMethod(), r, m, Qk)
+    return _mixed_shape(method, real_shape)
 end
 
 function _run_demotion_target(::Type{T}, mrk::Int, method, run::Int, Qm::Int, Qk::Int) where {T}
