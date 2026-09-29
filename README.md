@@ -108,8 +108,10 @@ Implemented:
   kernel-specific panel formats and contiguous fast paths.
 - Microkernels: `ScalarKernel` (reference), `SIMDKernel` (default for real
   eltypes), `PlanarKernel` (split-complex, default for complex eltypes),
-  `OneMKernel` (the 1m method) and `FMAddSubKernel` (interleaved complex, used
-  for small-M complex contractions on AVX-512). Any of them can be named via
+  `OneMKernel` (the 1m method), `FMAddSubKernel` (interleaved complex, used
+  for small-M complex contractions on AVX-512) and `ComplexRealKernel`/
+  `RealComplexKernel` (a complex times a real operand on the real kernel,
+  default for those). Any of them can be named via
   `plan_contract(...; kernel = ...)`.
 - Register shapes derived from the detected ISA, demoted when `M` is too short
   for a full tile or when a smaller tile keeps stores into `C` unit-stride.
@@ -121,9 +123,9 @@ Implemented:
   needs a complex output). The compute type is the promoted eltype, or the
   precision chosen with `accumulator = Float32`/`Float64`
   (`plan_contract(...; accumulator)`, `QuasiStridedBackend(; accumulator)`);
-  the result is rounded to `eltype(C)` once. A real operand of a complex
-  contraction is promoted at pack time. `conjA`/`conjB` and each operand's
-  `StridedView.op` are applied during packing.
+  operands are converted during packing and the result is rounded to
+  `eltype(C)` once. `conjA`/`conjB` and each operand's `StridedView.op` are
+  applied during packing.
 - Zero steady-state allocation on Julia >= 1.11 for `execute!` on a reused
   plan and for `tensorcontract!` through the backend (which pools workspaces
   per task). On Julia 1.10 `SIMDKernel`'s accumulator is not kept in
@@ -136,7 +138,6 @@ Not implemented:
 - Other eltypes, a complex input with a real output, non-strided operands, an
   output aliased with an input, and a conjugated output view: `tensorcontract!`
   throws an `ArgumentError` instead of falling back to another backend.
-- Dedicated real-times-complex kernels.
 - Being the default backend: `StridedBLAS()` is faster on most shapes.
 - Batch axes, traces/diagonals, threading, GPU execution, the 3m complex
   method, autotuning.
