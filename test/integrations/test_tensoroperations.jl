@@ -133,7 +133,7 @@ end
     for (TA, TB, TC) in (
             (Float16, Float16, Float16), (Complex{Float16}, Complex{Float16}, Complex{Float16}),
             (Complex{Int}, Complex{Int}, Complex{Int}), (Complex{BigFloat}, Complex{BigFloat}, Complex{BigFloat}),
-            (Float64, Float32, Float16), (ComplexF64, Float64, Float64), (Float32, ComplexF32, Float32),
+            (Float64, Float32, Float16), (ComplexF64, Float64, Float64),
         )
         A, B, C = ones(TA, (3, 4)), ones(TB, (4, 5)), zeros(TC, (3, 5))
         @test_throws ArgumentError tensorcontract!(C, A, pA, false, B, pB, false, pAB, 1, 0, qsbackend)

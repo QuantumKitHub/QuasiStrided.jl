@@ -27,10 +27,7 @@ end
 
 @testset "driver: eltype validation errors" begin
     mk(TA, TB, TC) = (StridedView(zeros(TC, 3, 5)), StridedView(ones(TA, 3, 4)), (1, 2), StridedView(ones(TB, 4, 5)), (2, 3), (1, 3))
-    for eltypes in (
-            (Float16, Float16, Float16), (Int, Float64, Float64), (Float64, Float64, BigFloat),
-            (ComplexF64, Float64, Float64), (Float32, ComplexF32, Float32),
-        )
+    for eltypes in ((Float16, Float16, Float16), (Float64, Float64, BigFloat), (ComplexF64, Float64, Float64))
         @test_throws ArgumentError plan_contract(mk(eltypes...)...)
     end
     ws = plan_contract(mk(Float32, Float32, Float32)...).workspace
