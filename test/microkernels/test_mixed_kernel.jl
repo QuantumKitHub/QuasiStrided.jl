@@ -51,8 +51,8 @@ end
     @testset "pack -> accumulate -> store: $(nameof(K)) $T from $SA x $SB" for (K, T, SA, SB, MR, NR, W) in (
             (ComplexRealKernel, ComplexF32, ComplexF64, Float64, 8, 5, 8),
             (RealComplexKernel, ComplexF32, Float64, ComplexF64, 16, 3, 8),
-            (ComplexRealKernel, ComplexF64, ComplexF64, Float32, 4, 3, 4),
-            (RealComplexKernel, ComplexF64, Float32, ComplexF32, 8, 2, 4),
+            (ComplexRealKernel, ComplexF64, ComplexF64, Float32, 12, 8, 8),
+            (RealComplexKernel, ComplexF64, Float32, ComplexF32, 24, 4, 8),
         )
         k = K(Val(MR), Val(NR), T, Val(W))
         R = real(T)
@@ -86,9 +86,9 @@ end
     @testset "end to end: $(nameof(typeof(k))) $TA x $TB -> $TC, B $mode" for (k, TA, TB, TC, acc, mode) in (
             (ComplexRealKernel(Val(12), Val(8), ComplexF64, Val(8)), ComplexF64, Float64, ComplexF64, nothing, :always),
             (ComplexRealKernel(Val(12), Val(8), ComplexF64, Val(8)), ComplexF64, Float64, ComplexF64, nothing, :never),
-            (ComplexRealKernel(Val(8), Val(5), ComplexF32, Val(16)), ComplexF32, Float64, ComplexF32, Float32, :auto),
+            (ComplexRealKernel(Val(8), Val(5), ComplexF32, Val(8)), ComplexF32, Float64, ComplexF32, Float32, :auto),
             (RealComplexKernel(Val(24), Val(4), ComplexF64, Val(8)), Float64, ComplexF64, ComplexF64, nothing, :auto),
-            (RealComplexKernel(Val(16), Val(3), ComplexF32, Val(16)), Float64, ComplexF32, ComplexF32, Float32, :auto),
+            (RealComplexKernel(Val(16), Val(3), ComplexF32, Val(8)), Float64, ComplexF32, ComplexF32, Float32, :auto),
         )
         rng = MersenneTwister(4242)
         A, B, C0 = rand(rng, TA, 37, 41), rand(rng, TB, 41, 23), rand(rng, TC, 37, 23)
