@@ -75,9 +75,10 @@ end
 
 @noinline _qs_throw(msg::AbstractString) = throw(ArgumentError(msg))
 
-@noinline function _qs_check_strided(C, A, B)
+@noinline function _qs_check_eligible(C, A, B)
+    f = TO.tensorcontract!
     all(isstrided, (A, B, C)) || _qs_throw(
-        "QuasiStridedBackend requires strided arrays for $(TO.tensorcontract!), got " *
+        "QuasiStridedBackend requires strided arrays for $f, got " *
             join(map(typeof, (C, A, B)), ", ")
     )
     return nothing
@@ -88,7 +89,7 @@ end
 # grows a pooled workspace (the workspace is an argument to `plan_contract`).
 @inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β, accumulator)
     T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
-    _qs_check_strided(C, A, B)
+    _qs_check_eligible(C, A, B)
     TO.argcheck_tensorcontract(C, A, pA, B, pB, pAB)
     TO.dimcheck_tensorcontract(C, A, pA, B, pB, pAB)
 
@@ -104,8 +105,8 @@ end
             "`StridedView.op` on store, so a conjugated `C` would be silently wrong"
     )
 
-    indA, indB, indC = _qs_labels(pA, pB, pAB)
     # Dropping `Zero()`/`One()` is safe: the kernels branch on `iszero(alpha/beta)`.
+    indA, indB, indC = _qs_labels(pA, pB, pAB)
     return Cv, Av, Bv, indA, indB, indC, convert(T, α), convert(T, β)
 end
 
