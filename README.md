@@ -117,8 +117,13 @@ Implemented:
   from an analytical model of the detected cache sizes (fixed constants when
   they are undetected); plus automatically selected paths for dot-product,
   outer-product and read-B-in-place shapes.
-- `Float32`/`Float64`/`ComplexF32`/`ComplexF64`; `conjA`/`conjB` and each
-  operand's `StridedView.op` are applied during packing.
+- `Float32`/`Float64`/`ComplexF32`/`ComplexF64`, mixed freely (a complex input
+  needs a complex output). The compute type is the promoted eltype, or the
+  precision chosen with `accumulator = Float32`/`Float64`
+  (`plan_contract(...; accumulator)`, `QuasiStridedBackend(; accumulator)`);
+  `C` is rounded on store, once per `kc` block of K. A real operand of a complex contraction is
+  promoted at pack time. `conjA`/`conjB` and each operand's `StridedView.op`
+  are applied during packing.
 - Zero steady-state allocation on Julia >= 1.11 for `execute!` on a reused
   plan and for `tensorcontract!` through the backend (which pools workspaces
   per task). On Julia 1.10 `SIMDKernel`'s accumulator is not kept in
@@ -127,11 +132,11 @@ Implemented:
 Not implemented:
 
 - Anything but contraction: `tensoradd!`/`tensortrace!` under this backend are
-  forwarded to `StridedNative()`, so mixed `@tensor` networks still run.
-- Mixed eltypes (including real with complex; promotion is TensorOperations'
-  `promote_contract` job), other eltypes, non-strided operands, an output
-  aliased with an input, and a conjugated output view: `tensorcontract!` throws
-  an `ArgumentError` instead of falling back to another backend.
+  forwarded to `StridedNative()`, so whole `@tensor` networks still run.
+- Other eltypes, a complex input with a real output, non-strided operands, an
+  output aliased with an input, and a conjugated output view: `tensorcontract!`
+  throws an `ArgumentError` instead of falling back to another backend.
+- Dedicated real-times-complex kernels.
 - Being the default backend: `StridedBLAS()` is faster on most shapes.
 - Batch axes, traces/diagonals, threading, GPU execution, the 3m complex
   method, autotuning.

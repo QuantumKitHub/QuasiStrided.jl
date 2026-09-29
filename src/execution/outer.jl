@@ -63,7 +63,7 @@ end
     sz = sizeof(T)
     mmain = (Qm ÷ W) * W
     @inbounds for n in 1:nblock
-        b = btransform(Bstorage[Bbase + bufB[n] + 1])::T
+        b = convert(T, btransform(Bstorage[Bbase + bufB[n] + 1]))
         bv = Vec{W, T}(b)
         cpn = cp + sz * bufC[n]
         m = 0

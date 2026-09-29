@@ -25,6 +25,19 @@
     @test_throws ArgumentError contract!(Cv, 1.0, Av, (1, 2), Bv, (2, 3), 0.0, (2, 3))
 end
 
+@testset "driver: eltype validation errors" begin
+    mk(TA, TB, TC) = (StridedView(zeros(TC, 3, 5)), StridedView(ones(TA, 3, 4)), (1, 2), StridedView(ones(TB, 4, 5)), (2, 3), (1, 3))
+    for eltypes in (
+            (Float16, Float16, Float16), (Int, Float64, Float64), (Float64, Float64, BigFloat),
+            (ComplexF64, Float64, Float64), (Float32, ComplexF32, Float32),
+        )
+        @test_throws ArgumentError plan_contract(mk(eltypes...)...)
+    end
+    ws = plan_contract(mk(Float32, Float32, Float32)...).workspace
+    @test_throws ArgumentError plan_contract(mk(Float32, Float32, Float32)...; accumulator = Float64, workspace = ws)
+    @test plan_contract(mk(Float32, Float64, Float32)...; accumulator = Float32, workspace = ws).workspace === ws
+end
+
 
 @testset "Blocking: field validation" begin
     b = Blocking(4, 8, 16)

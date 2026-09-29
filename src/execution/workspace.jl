@@ -13,7 +13,7 @@ _SlotCache() = _SlotCache(nothing, IdDict{Any, Any}())
 The buffers [`execute!`](@ref) needs. Pass one back as
 `plan_contract(...; workspace = ws)` to reuse (and grow) it across
 contractions; one from a non-default allocator is single-use and must be
-[`release!`](@ref)d. `T` is the storage element type; the packed panels (`VT`)
+[`release!`](@ref)d. `T` is the plan's compute type; the packed panels (`VT`)
 hold `real(T)`. Field layout is an implementation detail.
 """
 # A `mutable struct` with `const` fields so a plan and a barrier slot hold one
@@ -66,7 +66,7 @@ mutable struct ContractWorkspace{T, VT <: AbstractVector}
         eltype(VT) === real(T) || throw(
             ArgumentError(
                 "ContractWorkspace{$T,$VT}: the packed panels must hold $(real(T)) " *
-                    "(the real type of the storage element type $T), got $(eltype(VT))"
+                    "(the real type of the compute type $T), got $(eltype(VT))"
             )
         )
         return new{T, VT}(
@@ -134,7 +134,7 @@ end
     ContractWorkspace(T, kernel, blocking::Blocking;
                       oracle = true, allocator = TensorOperations.DefaultAllocator())
 
-A workspace for storage type `T`, `kernel` and an effective `blocking`.
+A workspace for compute type `T`, `kernel` and an effective `blocking`.
 `oracle = false` leaves the `execute_tilewise!` buffers empty. Under a
 non-default `allocator` the packed panels come from `tensoralloc`, are never
 resized, and must be handed back with [`release!`](@ref).
@@ -259,7 +259,7 @@ function _resolve_workspace(
     return ContractWorkspace(T, kernel, blocking, oracle, allocator)
 end
 
-# The pool is keyed by `eltype(C)` alone, so also check the packed type
+# The pool is keyed by the compute type alone, so also check the packed type
 # (folds at compile time).
 @inline function _reuse_workspace(
         ::Type{T}, ws::ContractWorkspace{T, Vector{R}}, kernel, blocking::Blocking,
@@ -283,9 +283,9 @@ end
     ) where {T}
     throw(
         ArgumentError(
-            "plan_contract: cannot reuse a $(typeof(ws)) for an eltype-$T contraction " *
-                "on the default allocator; only a " *
-                "ContractWorkspace{$T,Vector{$(realtype(kernel))}} -- storage element " *
+            "plan_contract: cannot reuse a $(typeof(ws)) for a contraction of compute " *
+                "type $T on the default allocator; only a " *
+                "ContractWorkspace{$T,Vector{$(realtype(kernel))}} -- compute " *
                 "type $T, packed panels of $(realtype(kernel)) -- is `reserve!`-able"
         )
     )

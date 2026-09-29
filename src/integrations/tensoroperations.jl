@@ -5,25 +5,35 @@ import TupleTools
 using StridedViews: StridedView, isstrided
 
 """
-    QuasiStridedBackend()
+    QuasiStridedBackend(; accumulator = nothing)
 
 TensorOperations backend running contractions on QuasiStrided's engine:
 
     @tensor backend = QuasiStridedBackend() C[i, j] := A[i, k] * B[k, j]
 
-`tensorcontract!` accepts strided operands sharing one element type out of
-`Float32`/`Float64`/`ComplexF32`/`ComplexF64`, and honours `conjA`/`conjB`. Any
-other input (mixed or other eltypes, a non-strided operand, an output aliased
+`tensorcontract!` accepts strided operands with element types out of
+`Float32`/`Float64`/`ComplexF32`/`ComplexF64`, possibly mixed, and honours
+`conjA`/`conjB`. The compute type and `accumulator` (`nothing`, `Float32` or
+`Float64`) are as in [`plan_contract`](@ref). Any other input (other eltypes, a
+complex input with a real output, a non-strided operand, an output aliased
 with an input, a conjugated output view) throws an `ArgumentError`; it never
 falls back to another backend. `tensoradd!` and `tensortrace!` are forwarded to
-`TensorOperations.StridedNative()`, so mixed `@tensor` networks still run.
+`TensorOperations.StridedNative()`.
 
 The backend is not registered with `TensorOperations.select_backend`.
 """
-struct QuasiStridedBackend <: TO.AbstractBackend end
+struct QuasiStridedBackend{A} <: TO.AbstractBackend end
 
-# Task-local pool of workspaces, keyed by `eltype(C)` only: all complex methods
-# pack into `Vector{real(T)}` and `reserve!` is grow-only, so they can share one.
+function QuasiStridedBackend(; accumulator = nothing)
+    accumulator in (nothing, Float32, Float64) || throw(
+        ArgumentError("QuasiStridedBackend: accumulator must be nothing, Float32 or Float64, got $accumulator")
+    )
+    return QuasiStridedBackend{accumulator}()
+end
+
+# Task-local pool of workspaces, keyed by the compute type only: all complex
+# methods pack into `Vector{real(T)}` and `reserve!` is grow-only, so they can
+# share one.
 const _QS_WORKSPACE_KEY = :quasistrided_contract_workspaces
 
 @inline function _qs_workspace_pool()
@@ -63,16 +73,19 @@ function _qs_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
     return indA, indB, linearize(pAB)
 end
 
-const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
-
 @noinline _qs_throw(msg::AbstractString) = throw(ArgumentError(msg))
 
 @noinline function _qs_check_eligible(C, A, B)
     f = TO.tensorcontract!
-    eltype(A) === eltype(B) === eltype(C) && eltype(C) ∈ _QS_ELTYPES || _qs_throw(
-        "QuasiStridedBackend requires all tensors of $f to share a single " *
-            "element type out of Float32, Float64, ComplexF32 and ComplexF64, got " *
-            join(map(eltype, (C, A, B)), ", ")
+    TA, TB, TC = eltype(A), eltype(B), eltype(C)
+    all(in(_QS_ELTYPES), (TA, TB, TC)) || _qs_throw(
+        "QuasiStridedBackend requires every tensor of $f to have an element type " *
+            "out of Float32, Float64, ComplexF32 and ComplexF64, got " *
+            join((TC, TA, TB), ", ")
+    )
+    (TC <: Complex || (TA <: Real && TB <: Real)) || _qs_throw(
+        "QuasiStridedBackend: a complex input of $f needs a complex output, got " *
+            join((TC, TA, TB), ", ")
     )
     all(isstrided, (A, B, C)) || _qs_throw(
         "QuasiStridedBackend requires strided arrays for $f, got " *
@@ -84,7 +97,7 @@ end
 # Checks shared by both `tensorcontract!` methods. The conjugated-C check
 # duplicates `plan_contract`'s so that a rejected call never acquires or grows
 # a pooled workspace (the workspace is an argument to `plan_contract`).
-@inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β)
+@inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β, accumulator)
     _qs_check_eligible(C, A, B)
     TO.argcheck_tensorcontract(C, A, pA, B, pB, pAB)
     TO.dimcheck_tensorcontract(C, A, pA, B, pB, pAB)
@@ -102,7 +115,7 @@ end
     )
 
     # Dropping `Zero()`/`One()` is safe: the kernels branch on `iszero(alpha/beta)`.
-    T = eltype(C)
+    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
     indA, indB, indC = _qs_labels(pA, pB, pAB)
     return Cv, Av, Bv, indA, indB, indC, convert(T, α), convert(T, β)
 end
@@ -116,14 +129,14 @@ function TO.tensorcontract!(
         B::AbstractArray, pB::Index2Tuple, conjB::Bool,
         pAB::Index2Tuple,
         α::Number, β::Number,
-        backend::QuasiStridedBackend,
+        backend::QuasiStridedBackend{AC},
         allocator::TO.DefaultAllocator = TO.DefaultAllocator()
-    )
-    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β)
+    ) where {AC}
+    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β, AC)
     _planned(
         _Execute(α′, β′), Cv, Av, indA, Bv, indB, indC,
         nothing, conjA, conjB, nothing, nothing, nothing,
-        _qs_task_workspace(eltype(C)), allocator, false
+        _qs_task_workspace(typeof(α′)), allocator, false, AC  # α′ has the compute type
     )
     return C
 end
@@ -137,14 +150,14 @@ function TO.tensorcontract!(
         B::AbstractArray, pB::Index2Tuple, conjB::Bool,
         pAB::Index2Tuple,
         α::Number, β::Number,
-        backend::QuasiStridedBackend, allocator
-    )
-    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β)
+        backend::QuasiStridedBackend{AC}, allocator
+    ) where {AC}
+    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β, AC)
     checkpoint = TO.allocator_checkpoint!(allocator)
     plan = plan_contract(
         Cv, Av, indA, Bv, indB, indC;
         conjA = conjA, conjB = conjB,
-        workspace = nothing, allocator = allocator, oracle = false
+        workspace = nothing, allocator = allocator, oracle = false, accumulator = AC
     )
     try
         execute!(plan, α′, β′)

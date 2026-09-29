@@ -105,7 +105,8 @@ end
 _default_lanewidth(::Type{Float64}) = 4
 _default_lanewidth(::Type{Float32}) = 8
 
-# `beta == 0` writes zeros without reading `C`; `beta == 1` is a no-op.
+# `beta == 0` writes zeros without reading `C`; `beta == 1` is a no-op. These
+# helpers load C as `T`, compute in `T` and round on store.
 function scale_tile!(destination::QSTile, beta::T) where {T}
     m = nrows(destination)
     n = ncols(destination)
@@ -118,24 +119,24 @@ function scale_tile!(destination::QSTile, beta::T) where {T}
         end
     else
         @inbounds for j in 0:(n - 1), i in 0:(m - 1)
-            tile_store!(destination, i, j, tile_load(destination, i, j) * beta)
+            tile_store!(destination, i, j, convert(T, tile_load(destination, i, j)) * beta)
         end
     end
     return destination
 end
 
 # `C = alpha*r + beta*C` at one element. Ternaries, so `beta == 0` never reads C.
-@inline _axpby_tile!(dest, i::Int, j::Int, alpha, r, beta) = tile_store!(
+@inline _axpby_tile!(dest, i::Int, j::Int, alpha, r, beta::T) where {T} = tile_store!(
     dest, i, j,
     iszero(beta) ? alpha * r :
-        isone(beta) ? muladd(alpha, r, tile_load(dest, i, j)) :
-        muladd(alpha, r, beta * tile_load(dest, i, j))
+        isone(beta) ? muladd(alpha, r, convert(T, tile_load(dest, i, j))) :
+        muladd(alpha, r, beta * convert(T, tile_load(dest, i, j)))
 )
 
-@inline _axpby_at!(storage, idx::Int, alpha, r, beta) = @inbounds storage[idx] =
+@inline _axpby_at!(storage, idx::Int, alpha, r, beta::T) where {T} = @inbounds storage[idx] =
     iszero(beta) ? alpha * r :
-    isone(beta) ? muladd(alpha, r, storage[idx]) :
-    muladd(alpha, r, beta * storage[idx])
+    isone(beta) ? muladd(alpha, r, convert(T, storage[idx])) :
+    muladd(alpha, r, beta * convert(T, storage[idx]))
 
 # The `(m, n)` to store over, or `(0, 0)` when already done (empty destination,
 # or `alpha == 0` handled by `scale_tile!`).

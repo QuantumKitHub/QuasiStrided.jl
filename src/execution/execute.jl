@@ -352,25 +352,27 @@ end
               A::StridedView, indA::NTuple{NA,Int},
               B::StridedView, indB::NTuple{NB,Int},
               beta::Number,
-              indC::NTuple{NC,Int}) where {NA,NB,NC}
+              indC::NTuple{NC,Int}; accumulator = nothing) where {NA,NB,NC}
 
 Compute `C[indC] = alpha * sum_K A[indA] * B[indB] + beta * C[indC]`, with one
 `Int` label per axis: a label in `indA` and `indB` but not `indC` is contracted
 (K), and a label in `indC` and exactly one of `indA`/`indB` is free (M or N).
 Any other label pattern, or a label repeated within one tuple, throws an
 `ArgumentError`; matched labels of unequal axis length throw a
-`DimensionMismatch`. Equivalent to
-`execute!(plan_contract(C, A, indA, B, indB, indC), alpha, beta)` — use
-those directly to reuse a plan across calls. Returns `C`.
+`DimensionMismatch`. Eltypes and `accumulator` are as in
+[`plan_contract`](@ref). Equivalent to
+`execute!(plan_contract(C, A, indA, B, indB, indC; accumulator), alpha, beta)`
+— use those directly to reuse a plan across calls. Returns `C`.
 """
 function contract!(
         C::StridedView, alpha::Number,
         A::StridedView, indA::NTuple{NA, Int},
         B::StridedView, indB::NTuple{NB, Int},
         beta::Number,
-        indC::NTuple{NC, Int}
+        indC::NTuple{NC, Int};
+        accumulator::Union{Nothing, Type{Float32}, Type{Float64}} = nothing
     ) where {NA, NB, NC}
-    plan = plan_contract(C, A, indA, B, indB, indC)
+    plan = plan_contract(C, A, indA, B, indB, indC; accumulator)
     execute!(plan, alpha, beta)
     return C
 end

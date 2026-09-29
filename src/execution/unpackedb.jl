@@ -26,11 +26,12 @@ Base.length(u::UnpackedBView) = u.per_k * axis_length(u.ksteps)
     return u.transform(z)
 end
 
-@inline _b_step_load(u::UnpackedBView, kernel, j::Int, p::Int) = _unpacked_b_element(u, j, p)
+@inline _b_step_load(u::UnpackedBView, kernel, j::Int, p::Int) =
+    convert(scalartype(kernel), _unpacked_b_element(u, j, p))
 
 # Complex kernels: the planar `(re, im)` pair.
 @inline function _b_step_load2(u::UnpackedBView, kernel, j::Int, p::Int)
-    z = _unpacked_b_element(u, j, p)
+    z = convert(scalartype(kernel), _unpacked_b_element(u, j, p))
     return (real(z), imag(z))
 end
 

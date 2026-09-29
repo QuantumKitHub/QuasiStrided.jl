@@ -55,6 +55,7 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     include("execution/test_unpackedb.jl")
     include("execution/test_dot.jl")
     include("execution/test_outer.jl")
+    include("execution/test_mixed.jl")
 
     # Last: its `using TensorOperations` makes `scalartype` ambiguous for later files.
     include("integrations/test_tensoroperations.jl")
