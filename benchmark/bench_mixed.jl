@@ -1,6 +1,6 @@
 # Mixed-domain GEMM, single core: complex x real (CR) and real x complex (RC)
-# through the named mixed-domain kernel, the default plan (which promotes the
-# real operand to complex), and the real GEMM of the same real FMA count
+# through the named mixed-domain kernel, the default planar kernel (which
+# promotes the real operand to complex), and the real GEMM of the same real FMA count
 # (2M x N x K for CR, M x 2N x K for RC).
 #
 #   julia --project=benchmark benchmark/bench_mixed.jl [--dtypes ComplexF64,ComplexF32]
@@ -11,7 +11,8 @@
 
 include(joinpath(@__DIR__, "harness.jl"))
 
-using QuasiStrided: ComplexRealKernel, RealComplexKernel, target_profile, _derived_shape
+using QuasiStrided: ComplexRealKernel, RealComplexKernel, PlanarMethod, target_profile,
+    _derived_shape, _kernel_from_shape
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "ComplexF64,ComplexF32"))
 const SIZES = parse_ints(argopt("sizes", "512,2048"))
@@ -31,6 +32,7 @@ function run(io)
     for T in RUN_DTYPES, n in SIZES
         R = real(T)
         MRr, NRr, W = _derived_shape(target_profile(), R)
+        planar = _kernel_from_shape(_derived_shape(target_profile(), T), T, PlanarMethod())
         cases = (
             (
                 "CR", ComplexRealKernel(Val(MRr ÷ 2), Val(NRr), T, Val(W)),
@@ -44,7 +46,7 @@ function run(io)
         for (case, kernel, A, B, (Mr, Nr)) in cases
             C = zeros(T, n, n)
             tm = time_plan(C, A, B; kernel)
-            tp = time_plan(C, A, B)
+            tp = time_plan(C, A, B; kernel = planar)
             tr = time_plan(zeros(R, Mr, Nr), randn(rng, R, Mr, n), randn(rng, R, n, Nr))
             tag = "$(mr(kernel))x$(nr(kernel))/W$(lanewidth(kernel))"
             @printf(
