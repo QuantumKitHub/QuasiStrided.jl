@@ -234,7 +234,7 @@ end
     plan = _mm_plan(Cmat, Amat, Bmat; mc = 8, kc = 6, nc = 7)
     @test isconcretetype(typeof(plan))
     @test all(isconcretetype, fieldtypes(typeof(plan.workspace)))
-    @test typeof(plan.workspace) === QuasiStrided.ContractWorkspace{Float64, Vector{Float64}}
+    @test typeof(plan.workspace) === QuasiStrided.ContractWorkspace{Float64, Vector{Float64}, Vector{Float64}}
     plan_argtypes = (typeof(Cv), typeof(Av), NTuple{2, Int}, typeof(Bv), NTuple{2, Int}, NTuple{2, Int})
     @test isempty(_ws_nonconcrete_types(plan_contract, plan_argtypes))
     for f in (execute!, execute_tilewise!)

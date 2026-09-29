@@ -244,7 +244,7 @@ _panel_exit!(target::ContractPlan, plan::ContractPlan, ws, jc::Int, nblock::Int)
 # Columns `jc .+ (0:nblock-1)` of `target`'s C into (`load`) or out of the
 # panel, converting to the destination's eltype. Borrows the M/N offset
 # buffers, which the nest refills before reading them again.
-function _panel_copy!(target::ContractPlan, panel::Vector, ws, jc::Int, nblock::Int, load::Bool)
+function _panel_copy!(target::ContractPlan, panel::AbstractVector, ws, jc::Int, nblock::Int, load::Bool)
     C = target.Cstorage
     Qm = axis_length(target.mgroup)
     mc = target.blocking.mc

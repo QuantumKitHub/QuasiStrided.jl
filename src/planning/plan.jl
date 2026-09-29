@@ -13,7 +13,7 @@ after an M/N orientation swap the `A*` fields describe the original `B`.
 """
 struct ContractPlan{
         T, Kern, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
-        TA, TB, VT <: AbstractVector,
+        TA, TB, VT <: AbstractVector, PT <: AbstractVector,
     }
     kernel::Kern
     mgroup::GM
@@ -32,7 +32,7 @@ struct ContractPlan{
     atransform::TA
     btransform::TB
 
-    workspace::ContractWorkspace{T, VT}
+    workspace::ContractWorkspace{T, VT, PT}
 end
 
 """

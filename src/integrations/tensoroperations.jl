@@ -47,8 +47,8 @@ end
     ws = get(pool, T, nothing)
     # Both assertions are needed: without them the branches join to the abstract
     # `ContractWorkspace`, and the call into `_planned` boxes its arguments.
-    ws === nothing || return ws::ContractWorkspace{T, Vector{real(T)}}
-    return _qs_build_task_workspace!(pool, T)::ContractWorkspace{T, Vector{real(T)}}
+    ws === nothing || return ws::ContractWorkspace{T, Vector{real(T)}, Vector{T}}
+    return _qs_build_task_workspace!(pool, T)::ContractWorkspace{T, Vector{real(T)}, Vector{T}}
 end
 
 @noinline function _qs_build_task_workspace!(pool::Dict{DataType, ContractWorkspace}, ::Type{T}) where {T}
