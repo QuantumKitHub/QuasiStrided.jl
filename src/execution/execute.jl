@@ -94,6 +94,10 @@ end
     return Qk > (kc === nothing ? _resolved_defaults(T).real_row.kc : kc)
 end
 
+# The panel length at the plan's effective `blocking`, 0 if none is needed.
+@inline _c_panel_length(::Type{T}, Cstorage, Qm::Int, Qn::Int, Qk::Int, blocking::Blocking) where {T} =
+    _c_panel_needed(T, Cstorage, Qk, blocking.kc) ? Qm * min(blocking.nc, Qn) : 0
+
 # Run `path` behind a dynamic call. The plan crosses in the workspace slot
 # with its storages stripped; they cross as arguments.
 @inline function _execute_across_barrier!(plan::ContractPlan{T}, alphaT::T, betaT::T, path) where {T}
@@ -160,14 +164,25 @@ end
     return nothing
 end
 
-# The prediction differs from `_select_path(plan)` in two inputs only: the
-# kernel's unpacked-B eligibility (predicted from its method; folds) and the
-# dot path's workspace capacity (assumed).
-@inline _hint_holds(plan::ContractPlan, ::_NestPath) =
-    _unpacked_b_method_eligible(complex_method(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
+# The prediction differs from `_select_path(plan)` in three inputs only: the
+# kernel's unpacked-B eligibility (predicted from its method; folds), the
+# dot path's workspace capacity (assumed) and the panel decision (made at the
+# default `kc`; folds to `false` unless C is narrower than `T`).
+@inline _hint_holds(plan::ContractPlan, ::_NestPath) = _panel_holds(plan, false) && _unpacked_b_holds(plan)
+@inline _hint_holds(plan::ContractPlan, ::_PanelPath) = _panel_holds(plan, true) && _unpacked_b_holds(plan)
 @inline _hint_holds(plan::ContractPlan, ::_DotPath) = _dot_capacity_ok(plan)
 @inline _hint_holds(plan::ContractPlan, ::_OuterPath) = true
-@inline _hint_holds(plan::ContractPlan, ::_PanelPath{P}) where {P} = _hint_holds(plan, P())
+
+@inline _unpacked_b_holds(plan::ContractPlan) =
+    _unpacked_b_method_eligible(complex_method(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
+
+@inline function _panel_holds(plan::ContractPlan{T}, panel::Bool) where {T}
+    n = _c_panel_length(
+        T, plan.Cstorage, axis_length(plan.mgroup), axis_length(plan.ngroup),
+        axis_length(plan.kgroup), plan.blocking
+    )
+    return panel ? n > 0 && length(plan.workspace.c_panel) >= n : n == 0
+end
 
 _execute_path!(plan::ContractPlan, alphaT, betaT, ::_DotPath{MATB, W}) where {MATB, W} =
     (_execute_dot!(plan, alphaT, betaT, MATB, Val(W)); nothing)

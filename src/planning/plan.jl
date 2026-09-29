@@ -337,7 +337,7 @@ function _plan_contract(
     nc_eff = Qn == 0 ? NRk : min(_roundup(requested.nc, NRk), _roundup(Qn, NRk))
     kc_eff = Qk == 0 ? 1 : min(requested.kc, Qk)
     blocking = Blocking(mc_eff, kc_eff, nc_eff)
-    panel = _c_panel_needed(T, req.Cstorage, Qk, kc_eff) ? Qm * min(nc_eff, Qn) : 0
+    panel = _c_panel_length(T, req.Cstorage, Qm, Qn, Qk, blocking)
     ws = _resolve_workspace(T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel)
 
     plan = ContractPlan(
