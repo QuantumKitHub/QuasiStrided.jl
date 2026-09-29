@@ -46,7 +46,6 @@ struct RealComplexKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR,
             descriptor::ComplexKernelDescriptor{MR, NR, T, RealFormat, InterleavedFormat},
             inner::KI
         ) where {MR, NR, T, W, KI <: SIMDKernel}
-        _check_vector_shape("RealComplexKernel", MR, W)
         KI === SIMDKernel{MR, 2 * NR, real(T), W} || throw(
             ArgumentError("RealComplexKernel's inner kernel must be SIMDKernel{$MR,$(2 * NR),$(real(T)),$W}, got $KI")
         )
@@ -57,31 +56,21 @@ end
 const _MixedKernel = Union{ComplexRealKernel, RealComplexKernel}
 
 function ComplexRealKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W}
-    T <: Complex ||
-        throw(ArgumentError("ComplexRealKernel requires a complex element type, got $T"))
     descriptor = ComplexKernelDescriptor(Val(MR), Val(NR), T, InterleavedFormat(), RealFormat())
     inner = SIMDKernel(Val(2 * MR), Val(NR), real(T), Val(W))
     return ComplexRealKernel{MR, NR, T, W, typeof(inner)}(descriptor, inner)
 end
 
 function RealComplexKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W}
-    T <: Complex ||
-        throw(ArgumentError("RealComplexKernel requires a complex element type, got $T"))
     descriptor = ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), InterleavedFormat())
     inner = SIMDKernel(Val(MR), Val(2 * NR), real(T), Val(W))
     return RealComplexKernel{MR, NR, T, W, typeof(inner)}(descriptor, inner)
 end
 
-function ComplexRealKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T}
-    T <: Complex ||
-        throw(ArgumentError("ComplexRealKernel requires a complex element type, got $T"))
-    return ComplexRealKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
-end
-function RealComplexKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T}
-    T <: Complex ||
-        throw(ArgumentError("RealComplexKernel requires a complex element type, got $T"))
-    return RealComplexKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
-end
+ComplexRealKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
+    ComplexRealKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
+RealComplexKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
+    RealComplexKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
 
 complex_method(::ComplexRealKernel) = ComplexRealMethod()
 complex_method(::RealComplexKernel) = RealComplexMethod()
