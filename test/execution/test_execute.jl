@@ -243,8 +243,9 @@ end
     @test isconcretetype(only(Base.return_types(execute!, (typeof(plan), Float64, Float64))))
 end
 
-# Line-by-line packing. intensli_7, C[e,c,b,f,a] = A[a,b,c,d,e] * B[d,f], splits A;
-# C[a1,au,f1,f2] = A[au,k,a1] * B[f2,k,f1] splits both operands.
+# Line-by-line packing. intensli_7, C[e,c,b,f,a] = A[a,b,c,d,e] * B[d,f], splits A
+# (K steps of a page or more, every eltype); C[a1,au,f1,f2] = A[au,k,a1] * B[f2,k,f1]
+# splits both operands (K steps within a page, real only).
 const _SP_I7 = ((1, 2, 3, 4, 5), (4, 6), (5, 3, 2, 6, 1))
 const _SP_BOTH = ((2, 3, 1), (5, 3, 4), (1, 2, 4, 5))
 
@@ -278,9 +279,10 @@ end
 @testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
     kernels = T === ComplexF64 ? (nothing, OneMKernel(Val(4), Val(4), T), FMAddSubKernel(Val(8), Val(4), T)) : (nothing,)
     for (ind, ext, mc) in (
-                (_SP_I7, (8, 3, 5, 7, 12, 5), nothing), (_SP_I7, (6, 4, 3, 5, 10, 7), 48),
+                (_SP_I7, (8, 8, 8, 3, 6, 5), nothing), (_SP_I7, (6, 8, 11, 5, 10, 7), 48),
                 (_SP_BOTH, (20, 16, 9, 20, 8), nothing), (_SP_BOTH, (13, 12, 5, 11, 12), 64),
             ), kernel in kernels, conjB in (T <: Complex ? (false, true) : (false,)), beta in (0, 0.7)
+        T <: Complex && ind === _SP_BOTH && continue  # K steps within a page: complex never splits
         Cv, Av, iA, Bv, iB, iC = _sp_views(T, ind, ext)
         iszero(beta) && fill!(Cv, NaN)
         Cref = _lo_reference(iszero(beta) ? zero(Array(Cv)) : Array(Cv), Av, iA, Bv, iB, iC; conjB, alpha = 1.3, beta)
@@ -289,7 +291,7 @@ end
         execute!(plan, 1.3, beta)
         @test Array(Cv) ≈ Cref rtol = 100 * eps(real(T))
     end
-    plan = _sp_forced_plan(_sp_views(T, _SP_BOTH, (20, 16, 9, 20, 8))...)
+    plan = _sp_forced_plan(_sp_views(T, T <: Complex ? _SP_I7 : _SP_BOTH, (20, 16, 9, 20, 8, 5))...)
     execute!(plan, 1, 0)
     @test (@allocated execute!(plan, 1, 0)) == 0 skip = (VERSION < v"1.11")
 end

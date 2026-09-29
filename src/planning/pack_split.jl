@@ -33,7 +33,7 @@ _is_split(s::PackSplit) = s.L != 0
 # extent it needs, or `(eff, _NO_SPLIT)`. `eff` is the plan's extent, `rounded`
 # the requested one rounded to `R`; a split block may take the budget the
 # blocking reserved for the requested `kc_req` when the K extent clamps `kc`.
-# `l2bytes = nothing`: the core's L2 share, doubled for complex, whose block
+# `l2bytes = nothing`: `_split_capacity`, doubled for complex, whose block
 # walk costs more per element.
 @inline function _pack_split(
         g::AxisGroup{D}, kg::AxisGroup, kmap::Int, R::Int, S::Int, complex::Bool, kc::Int,
@@ -63,23 +63,37 @@ end
     L = _largest_divisor_upto(g.lengths[dj], max(1, line ÷ S))
     L >= 2 || return (eff, _NO_SPLIT)
 
-    # A line of `dj` is reused `psi` coordinates later; while the lines touched
-    # meanwhile fit L2, the per-sliver walk is already cache-friendly.
-    psi = 1
-    for d in d1:(dj - 1)
-        psi *= g.lengths[d]
-    end
     ks = 0
     for d in 1:DK
         kg.lengths[d] > 1 && (ks = abs(kg.strides[kmap][d]); break)
     end
-    klines = ks * S >= line ? kc : cld(kc * ks * S, line)
-    l2 = something(l2bytes, _l2_core_bytes(target_profile()) << complex)
-    widemul(psi, max(1, klines) * line) > l2 || return (eff, _NO_SPLIT)
-    # K innermost when K steps stay within a page: each coordinate's lines are
-    # then a short-stride stream the prefetchers follow.
+    # K steps within a page make each sliver element's lines a stream the
+    # prefetchers follow; a split then only saves refetching those lines, which
+    # does not pay for the block walk's costlier complex scatter.
     kinner = ks * S < _K_WALK_FAR_BYTES
+    kinner && complex && return (eff, _NO_SPLIT)
+
+    # A line of `dj` is reused `psi` coordinates later; while the lines touched
+    # meanwhile fit the cache, the per-sliver walk is already cache-friendly.
+    psi = 1
+    for d in d1:(dj - 1)
+        psi *= g.lengths[d]
+    end
+    klines = ks * S >= line ? kc : cld(kc * ks * S, line)
+    aliased = abs(g.strides[1][d1]) * S % _K_WALK_FAR_BYTES == 0
+    cap = something(l2bytes, _split_capacity(target_profile(), aliased) << complex)
+    widemul(psi, max(1, klines) * line) > cap || return (eff, _NO_SPLIT)
     return _pack_split_dynamic(g.lengths, d1, dj, L, psi, R, eff, rounded, kc, kc_req, kinner)
+end
+
+# The cache that can hold the per-sliver walk's reuse window: the core's L2
+# share, plus its L3 share unless the sliver steps a whole number of pages,
+# which folds the lines it gathers into a few sets of every level.
+function _split_capacity(profile::TargetProfile, aliased::Bool)
+    l2 = _l2_core_bytes(profile)
+    l3 = profile.l3
+    (aliased || l3.bytes <= 0) && return l2
+    return l2 + l3.bytes ÷ max(1, l3.sharing ÷ max(1, profile.l1d.sharing))
 end
 
 # Past the tests above the plan is for a large contraction; a dynamic call keeps
