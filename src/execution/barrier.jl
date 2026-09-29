@@ -40,36 +40,43 @@ end
 # The five-loop nest. `UNPACKED_B`: B read in place instead of packed. `AFF`:
 # per map, in the order M-in-A, M-in-C, N-in-B, N-in-C, K-in-A, K-in-B,
 # whether it is an affine ramp, so that its sliver axes are statically
-# `AffineAxis` and the `PtrScatterAxis` arm is never compiled.
-struct _NestPath{UNPACKED_B, AFF} end
+# `AffineAxis` and the `PtrScatterAxis` arm is never compiled. `SPLIT`: whether
+# A and B are packed line by line (`plan.mpack`/`plan.npack`).
+struct _NestPath{UNPACKED_B, AFF, SPLIT} end
 
 @inline _is_ramp_map(g::AxisGroup, p::Int) = _map_ramp_step(g, p) !== nothing
 
 # N's B flag stays `false` when B is read in place: that path builds no B
-# sliver axis, so the flag would only split specialisations.
-@inline _nest_path(unpacked_b::Bool, mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup) =
-    _nest_path_from_flags(
-    unpacked_b,
-    _is_ramp_map(mgroup, 1), _is_ramp_map(mgroup, 2),
-    !unpacked_b && _is_ramp_map(ngroup, 1), _is_ramp_map(ngroup, 2),
-    _is_ramp_map(kgroup, 1), _is_ramp_map(kgroup, 2)
-)
+# sliver axis, so the flag would only split specialisations. A split group is
+# enumerated in another order, so its ramp flags are `false`.
+@inline function _nest_path(
+        unpacked_b::Bool, mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup,
+        split_a::Bool, split_b::Bool
+    )
+    split_b &= !unpacked_b
+    return _nest_path_from_flags(
+        unpacked_b,
+        !split_a && _is_ramp_map(mgroup, 1), !split_a && _is_ramp_map(mgroup, 2),
+        !unpacked_b && !split_b && _is_ramp_map(ngroup, 1), !split_b && _is_ramp_map(ngroup, 2),
+        _is_ramp_map(kgroup, 1), _is_ramp_map(kgroup, 2), split_a, split_b
+    )
+end
 
-# Table lookup rather than `_NestPath{u, aff}()` built at runtime (a dynamic
-# type application) or a 128-leaf branch tree (slow to infer).
-@inline function _nest_path_from_flags(flags::Vararg{Bool, 7})
+# Table lookup rather than `_NestPath{u, aff, split}()` built at runtime (a
+# dynamic type application) or a 512-leaf branch tree (slow to infer).
+@inline function _nest_path_from_flags(flags::Vararg{Bool, 9})
     index = 1
-    for i in 1:7
+    for i in 1:9
         index += flags[i] << (i - 1)
     end
     return @inbounds _NEST_PATHS[index]
 end
 
 const _NEST_PATHS = let
-    table = Vector{Any}(undef, 128)
-    for index in 1:128
-        bits = ntuple(i -> ((index - 1) >> (i - 1)) & 1 == 1, 7)
-        table[index] = _NestPath{bits[1], bits[2:end]}()
+    table = Vector{Any}(undef, 512)
+    for index in 1:512
+        bits = ntuple(i -> ((index - 1) >> (i - 1)) & 1 == 1, 9)
+        table[index] = _NestPath{bits[1], bits[2:7], bits[8:9]}()
     end
     table
 end

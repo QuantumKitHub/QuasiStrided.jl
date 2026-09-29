@@ -187,7 +187,7 @@ end
         ContractPlan(
             p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
             p.Astorage, p.Abase, p.Bstorage, p.Bbase, p.Cstorage, p.Cbase,
-            conj, conj, p.workspace,
+            conj, conj, p.workspace, p.mpack, p.npack,
         ),
     )
     @test parent(StridedView(Cmat)) isa DenseVector{Float64}
@@ -241,4 +241,63 @@ end
         @test isempty(_ws_nonconcrete_types(f, (typeof(plan), Float64, Float64)))
     end
     @test isconcretetype(only(Base.return_types(execute!, (typeof(plan), Float64, Float64))))
+end
+
+# Line-by-line packing. intensli_7, C[e,c,b,f,a] = A[a,b,c,d,e] * B[d,f], splits A
+# (K steps of a page or more, every eltype); C[a1,au,f1,f2] = A[au,k,a1] * B[f2,k,f1]
+# splits both operands (K steps within a page, real only).
+const _SP_I7 = ((1, 2, 3, 4, 5), (4, 6), (5, 3, 2, 6, 1))
+const _SP_BOTH = ((2, 3, 1), (5, 3, 4), (1, 2, 4, 5))
+
+function _sp_views(T, (iA, iB, iC), ext)
+    arr(I) = StridedView(randn(T, map(l -> ext[l], I)))
+    return (arr(iC), arr(iA), iA, arr(iB), iB, iC)
+end
+
+# The plan with every structurally eligible group split, whatever this host's L2:
+# the planner's decision at a zero L2 threshold, replanned at its block extents.
+function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
+    p = plan_contract(Cv, Av, iA, Bv, iB, iC; kw...)
+    k, kc, d, T = p.kernel, p.blocking.kc, default_blocking(p.kernel), eltype(Cv)
+    split(g, map, R, eff, req) = _pack_split(g, p.kgroup, map, R, sizeof(T), T <: Complex, kc, eff, cld(req, R) * R, d.kc, 0)
+    (mc, ms) = split(p.mgroup, 1, mr(k), p.blocking.mc, something(get(kw, :mc, nothing), d.mc))
+    (nc, ns) = split(p.ngroup, 2, nr(k), p.blocking.nc, d.nc)
+    q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, mc, nc)
+    @assert q.mgroup == p.mgroup && q.ngroup == p.ngroup
+    return ContractPlan(
+        k, q.mgroup, q.ngroup, q.kgroup, q.blocking, q.Astorage, q.Abase,
+        q.Bstorage, q.Bbase, q.Cstorage, q.Cbase, q.atransform, q.btransform, q.workspace, ms, ns
+    )
+end
+
+@testset "line-by-line packing: the planner splits A of intensli_7 past the cache" begin
+    plan_of(d) = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...)
+    p = plan_of(16)
+    k, b = p.kernel, p.blocking
+    splits(cap) = QuasiStrided._is_split(_pack_split(p.mgroup, p.kgroup, 1, mr(k), 8, false, b.kc, b.mc, b.mc, default_blocking(k).kc, cap)[2])
+    @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
+    host = splits(QuasiStrided._split_capacity(target_profile(), true))
+    @test QuasiStrided._is_split(p.mpack) == host
+    host && @test _path_of(p) isa _NestPath{false, <:Any, (true, false)}
+    @test _path_of(plan_of(4)) isa _NestPath{<:Any, <:Any, (false, false)}
+end
+
+@testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
+    kernels = T === ComplexF64 ? (nothing, OneMKernel(Val(4), Val(4), T), FMAddSubKernel(Val(8), Val(4), T)) : (nothing,)
+    for (ind, ext, mc) in (
+                (_SP_I7, (8, 8, 8, 3, 6, 5), nothing), (_SP_I7, (6, 8, 11, 5, 10, 7), 48),
+                (_SP_BOTH, (20, 16, 9, 20, 8), nothing), (_SP_BOTH, (13, 12, 5, 11, 12), 64),
+            ), kernel in kernels, conjB in (T <: Complex ? (false, true) : (false,)), beta in (0, 0.7)
+        T <: Complex && ind === _SP_BOTH && continue  # K steps within a page: complex never splits
+        Cv, Av, iA, Bv, iB, iC = _sp_views(T, ind, ext)
+        iszero(beta) && fill!(Cv, NaN)
+        Cref = _lo_reference(iszero(beta) ? zero(Array(Cv)) : Array(Cv), Av, iA, Bv, iB, iC; conjB, alpha = 1.3, beta)
+        plan = _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; conjB, mc, kernel)
+        @test _path_of(plan) isa _NestPath{false, <:Any, (true, ind === _SP_BOTH)}
+        execute!(plan, 1.3, beta)
+        @test Array(Cv) ≈ Cref rtol = 100 * eps(real(T))
+    end
+    plan = _sp_forced_plan(_sp_views(T, T <: Complex ? _SP_I7 : _SP_BOTH, (20, 16, 9, 20, 8, 5))...)
+    execute!(plan, 1, 0)
+    @test (@allocated execute!(plan, 1, 0)) == 0 skip = (VERSION < v"1.11")
 end

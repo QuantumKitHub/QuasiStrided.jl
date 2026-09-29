@@ -214,7 +214,7 @@ Base.IndexStyle(::Type{<:CountingStorage}) = IndexLinear()
     p = _pcf_Plan(
         base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
         astore, 0, bstore, 0, cstore, 0,
-        base.atransform, base.btransform, base.workspace,
+        base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
     )
     astore.n = 0; bstore.n = 0; cstore.n = 0
     _pcf_exec(p, 1.0, 0.0)
@@ -249,7 +249,7 @@ end
         return _pcf_Plan(
             base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
             Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
-            base.atransform, base.btransform, base.workspace,
+            base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
         )
     end
 
@@ -311,7 +311,7 @@ end
     pshort = _pcf_Plan(
         base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
         base.Astorage, base.Abase, base.Bstorage, base.Bbase, short_C, base.Cbase,
-        base.atransform, base.btransform, base.workspace,
+        base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
     )
     @test_throws BoundsError _pcf_exec(pshort, 1.0, 0.0)
     @test all(iszero, short_C)                            # nothing written before the throw
@@ -341,7 +341,7 @@ end
         base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
         base.Astorage, base.Abase, base.Bstorage, base.Bbase,
         zeros(M * N1 * N2), base.Cbase - 1,
-        base.atransform, base.btransform, base.workspace,
+        base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
     )
     @test_throws BoundsError _pcf_exec(plow, 1.0, 0.0)
 end
