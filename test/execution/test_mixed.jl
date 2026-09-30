@@ -100,7 +100,7 @@ end
     )
     rng = MersenneTwister(3)
     Amat, Bmat, Cmat = randn(rng, TA, 64, K), randn(rng, TB, K, 40), zeros(TC, 64, 40)
-    plan = _mm_plan(Cmat, Amat, Bmat; accumulator = acc)
+    plan = _mm_plan(Cmat, Amat, Bmat; accumulator = acc, kc = 256)
     @test _path_of(plan) isa (TC === Float32 ? QuasiStrided._PanelPath : QuasiStrided._NestPath)
     @test _steady_allocs!(execute!, plan, Cmat) == 0 skip = (VERSION < v"1.11")
 end
