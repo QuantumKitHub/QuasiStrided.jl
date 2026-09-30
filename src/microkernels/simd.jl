@@ -89,11 +89,11 @@ end
     return acc
 end
 
-# Vector store eligibility: unit-stride rows into rank-1 dense storage of `T`,
+# Vector store eligibility: unit-stride rows into rank-1 dense real storage,
 # exactly what SIMD.jl's array `vload`/`vstore` accept. Must admit `Memory{T}`:
 # that is the `parent` of an Array-backed `StridedView` on Julia >= 1.11.
 @inline _vector_store_eligible(tile::QSTile, ::Type{T}) where {T} =
-    _unit_stride_rows(tile.rows) && tile.storage isa DenseVector{T}
+    _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T)
 
 @generated function _store_tile_scattered!(
         destination::QSTile, acc::NTuple{NV, Vec{W, T}},
@@ -134,6 +134,8 @@ end
         m::Int, n::Int
     ) where {S, MR, NR, T, W, NV}
     NVECA = MR ÷ W
+    RC = eltype(S)
+    old = :(convert(Vec{$W, $T}, vload(Vec{$W, $RC}, storage, at)))
     blocks = Any[]
     for j in 0:(NR - 1)
         vblocks = Any[]
@@ -145,9 +147,12 @@ end
                     if $((v + 1) * W) <= m
                         at = colbase + $(v * W) + 1
                         vstore(
-                            iszero(beta) ? alpha * vec :
-                                isone(beta) ? muladd(alpha, vec, vload(Vec{$W, $T}, storage, at)) :
-                                muladd(alpha, vec, beta * vload(Vec{$W, $T}, storage, at)),
+                            convert(
+                                Vec{$W, $RC},
+                                iszero(beta) ? alpha * vec :
+                                    isone(beta) ? muladd(alpha, vec, $old) :
+                                    muladd(alpha, vec, beta * $old)
+                            ),
                             storage, at
                         )
                     elseif $(v * W) < m

@@ -48,28 +48,32 @@ struct _NestPath{UNPACKED_B, AFF, SPLIT} end
 
 # N's B flag stays `false` when B is read in place: that path builds no B
 # sliver axis, so the flag would only split specialisations. A split group is
-# enumerated in another order, so its ramp flags are `false`.
+# enumerated in another order, so its ramp flags are `false`. `panel`: C is
+# `_PanelPath`'s dense panel, whose M and N maps are ramps.
 @inline function _nest_path(
         unpacked_b::Bool, mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup,
-        split_a::Bool, split_b::Bool
+        split_a::Bool, split_b::Bool, panel::Bool = false
     )
     split_b &= !unpacked_b
     return _nest_path_from_flags(
-        unpacked_b,
-        !split_a && _is_ramp_map(mgroup, 1), !split_a && _is_ramp_map(mgroup, 2),
-        !unpacked_b && !split_b && _is_ramp_map(ngroup, 1), !split_b && _is_ramp_map(ngroup, 2),
+        panel ? _PANEL_PATHS : _NEST_PATHS, unpacked_b,
+        !split_a && _is_ramp_map(mgroup, 1), !split_a && (panel || _is_ramp_map(mgroup, 2)),
+        !unpacked_b && !split_b && _is_ramp_map(ngroup, 1), !split_b && (panel || _is_ramp_map(ngroup, 2)),
         _is_ramp_map(kgroup, 1), _is_ramp_map(kgroup, 2), split_a, split_b
     )
 end
 
+# The nest run against a dense panel of C in the compute type.
+struct _PanelPath{P <: _NestPath} end
+
 # Table lookup rather than `_NestPath{u, aff, split}()` built at runtime (a
 # dynamic type application) or a 512-leaf branch tree (slow to infer).
-@inline function _nest_path_from_flags(flags::Vararg{Bool, 9})
+@inline function _nest_path_from_flags(table::Vector{Any}, flags::Vararg{Bool, 9})
     index = 1
     for i in 1:9
         index += flags[i] << (i - 1)
     end
-    return @inbounds _NEST_PATHS[index]
+    return @inbounds table[index]
 end
 
 const _NEST_PATHS = let
@@ -80,6 +84,8 @@ const _NEST_PATHS = let
     end
     table
 end
+
+const _PANEL_PATHS = Any[_PanelPath{typeof(p)}() for p in _NEST_PATHS]
 
 # The dot path at lane width `W`; `MATB`: the matrix operand is B (`Qm == 1`).
 struct _DotPath{MATB, W} end

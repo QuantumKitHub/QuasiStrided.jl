@@ -20,6 +20,8 @@ struct RealMethod <: ComplexMethod end      # what a real kernel reports
 struct PlanarMethod <: ComplexMethod end    # split re/im planes, 4 real FMAs per MAC
 struct OneMMethod <: ComplexMethod end      # Van Zee's 1m: a real 2mr x nr kernel
 struct FMAddSubMethod <: ComplexMethod end  # interleaved A, x86 `vfmaddsub`
+struct ComplexRealMethod <: ComplexMethod end  # complex A, real B: the real kernel on 2MR rows
+struct RealComplexMethod <: ComplexMethod end  # real A, complex B: the real kernel on 2NR columns
 
 # Reals per packed A / B element. Blocking divides the real `mc`/`nc` by these,
 # so every method gets the same packed byte budget.
@@ -31,12 +33,18 @@ a_reals(::OneMMethod) = 4
 b_reals(::OneMMethod) = 2
 a_reals(::FMAddSubMethod) = 2
 b_reals(::FMAddSubMethod) = 2
+a_reals(::ComplexRealMethod) = 2
+b_reals(::ComplexRealMethod) = 1
+a_reals(::RealComplexMethod) = 1
+b_reals(::RealComplexMethod) = 2
 
 # Accumulator planes held live: planar keeps separate re/im planes.
 accumulator_planes(::RealMethod) = 1
 accumulator_planes(::PlanarMethod) = 2
 accumulator_planes(::OneMMethod) = 1
 accumulator_planes(::FMAddSubMethod) = 1
+accumulator_planes(::ComplexRealMethod) = 1
+accumulator_planes(::RealComplexMethod) = 1
 
 complex_method(::Any) = RealMethod()
 
@@ -118,24 +126,24 @@ function scale_tile!(destination::QSTile, beta::T) where {T}
         end
     else
         @inbounds for j in 0:(n - 1), i in 0:(m - 1)
-            tile_store!(destination, i, j, tile_load(destination, i, j) * beta)
+            tile_store!(destination, i, j, convert(T, tile_load(destination, i, j)) * beta)
         end
     end
     return destination
 end
 
 # `C = alpha*r + beta*C` at one element. Ternaries, so `beta == 0` never reads C.
-@inline _axpby_tile!(dest, i::Int, j::Int, alpha, r, beta) = tile_store!(
+@inline _axpby_tile!(dest, i::Int, j::Int, alpha, r, beta::T) where {T} = tile_store!(
     dest, i, j,
     iszero(beta) ? alpha * r :
-        isone(beta) ? muladd(alpha, r, tile_load(dest, i, j)) :
-        muladd(alpha, r, beta * tile_load(dest, i, j))
+        isone(beta) ? muladd(alpha, r, convert(T, tile_load(dest, i, j))) :
+        muladd(alpha, r, beta * convert(T, tile_load(dest, i, j)))
 )
 
-@inline _axpby_at!(storage, idx::Int, alpha, r, beta) = @inbounds storage[idx] =
+@inline _axpby_at!(storage, idx::Int, alpha, r, beta::T) where {T} = @inbounds storage[idx] =
     iszero(beta) ? alpha * r :
-    isone(beta) ? muladd(alpha, r, storage[idx]) :
-    muladd(alpha, r, beta * storage[idx])
+    isone(beta) ? muladd(alpha, r, convert(T, storage[idx])) :
+    muladd(alpha, r, beta * convert(T, storage[idx]))
 
 # The `(m, n)` to store over, or `(0, 0)` when already done (empty destination,
 # or `alpha == 0` handled by `scale_tile!`).

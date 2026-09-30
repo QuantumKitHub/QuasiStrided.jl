@@ -54,6 +54,9 @@ mk_alphabeta(T) = T <: Complex ?
 # The storage the driver hands `store_tile!`: `Memory{T}` on Julia >= 1.11.
 mk_dense(v::AbstractVector{T}) where {T} = copyto!(parent(StridedView(zeros(T, length(v)))), v)
 
+# Element types of the test operands A and B; the mixed-domain kernels differ.
+mk_optypes(k) = (scalartype(k), scalartype(k))
+
 mk_run_acc(k, pa, pb, kc) = accumulate(k, zero_accumulator(k), pa, pb, kc)
 mk_run_exec(k, dst, pa, pb, kc, alpha, beta) = (execute_tile!(k, dst, pa, pb, kc, alpha, beta); nothing)
 
@@ -68,11 +71,12 @@ end
 
 function mk_contract_light(k)
     T = scalartype(k)
+    TA, TB = mk_optypes(k)
     MR, NR = mr(k), nr(k)
     rng = MersenneTwister(100MR + NR)
     kc = 5
-    A = rand(rng, T, MR, kc)
-    B = rand(rng, T, kc, NR)
+    A = rand(rng, TA, MR, kc)
+    B = rand(rng, TB, kc, NR)
     pa, pb = mk_pack(k, A, B)
     @test (length(pa), length(pb)) == (packed_a_length(k, kc), packed_b_length(k, kc))
     acc = mk_run_acc(k, pa, pb, kc)
@@ -99,13 +103,14 @@ end
 
 function mk_contract_full(k)
     T = scalartype(k)
+    TA, TB = mk_optypes(k)
     R = real(T)
     MR, NR = mr(k), nr(k)
     rng = MersenneTwister(100MR + NR + 1)
     m = max(1, MR - 1)
     kc = 5
-    A = rand(rng, T, MR, kc)
-    B = rand(rng, T, kc, NR)
+    A = rand(rng, TA, MR, kc)
+    B = rand(rng, TB, kc, NR)
     pa, pb = mk_pack(k, A, B)
     acc = mk_run_acc(k, pa, pb, kc)
 
@@ -126,8 +131,8 @@ function mk_contract_full(k)
     pad, sentinel = 2, T(-77)
     extents = unique(((MR, NR), (1, 1), (m, NR), (MR, max(1, NR - 1)), (MR ÷ 2 + 1, min(2, NR)), (0, 0)))
     for kc in (0, 1, 5), (alpha, beta) in mk_alphabeta(T), (m, n) in extents, scattered in (false, true)
-        A = rand(rng, T, MR, kc)
-        B = rand(rng, T, kc, NR)
+        A = rand(rng, TA, MR, kc)
+        B = rand(rng, TB, kc, NR)
         pa, pb = kc == 0 ? (R[], R[]) : mk_pack(k, A, B)
         Cold = iszero(beta) ? fill(mk_nan(T), m * n) : rand(rng, T, m * n)
         storage = [fill(sentinel, pad); Cold; fill(sentinel, pad)]
@@ -142,10 +147,10 @@ function mk_contract_full(k)
 
     # Nonfinite padding lanes (rows >= m, columns >= n) never reach C.
     m, n = max(1, MR - 1), max(1, NR - 1)
-    A = rand(rng, T, MR, 2)
-    B = rand(rng, T, 2, NR)
-    A[(m + 1):end, :] .= mk_inf(T)
-    B[:, (n + 1):end] .= mk_inf(T)
+    A = rand(rng, TA, MR, 2)
+    B = rand(rng, TB, 2, NR)
+    A[(m + 1):end, :] .= mk_inf(TA)
+    B[:, (n + 1):end] .= mk_inf(TB)
     pa, pb = mk_pack(k, A, B)
     acc = mk_run_acc(k, pa, pb, 2)
     @test any(!isfinite(mk_read(k, acc, i, j)) for i in 0:(MR - 1), j in 0:(NR - 1))
@@ -174,8 +179,8 @@ function mk_contract_full(k)
     @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa, pb[1:(end - 1)], 2, one(T), zero(T))
 
     # Destination layouts: each lands on exactly its own addresses.
-    A = rand(rng, T, MR, kc)
-    B = rand(rng, T, kc, NR)
+    A = rand(rng, TA, MR, kc)
+    B = rand(rng, TB, kc, NR)
     pa, pb = mk_pack(k, A, B)
     AB = A * B
     ld = m + 3

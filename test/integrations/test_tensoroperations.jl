@@ -139,13 +139,11 @@ end
 
 @testset "hard-reject: ineligible eltypes and non-strided operands" begin
     pA, pB, pAB = _MATMUL_PAB
-    # (eltype A, eltype B, eltype C): types outside the four, and mixtures of
-    # eligible ones (promotion is TO's `promote_contract` job).
+    # (eltype A, eltype B, eltype C): types outside the four, and complex into real.
     for (TA, TB, TC) in (
             (Float16, Float16, Float16), (Complex{Float16}, Complex{Float16}, Complex{Float16}),
             (Complex{Int}, Complex{Int}, Complex{Int}), (Complex{BigFloat}, Complex{BigFloat}, Complex{BigFloat}),
-            (Float32, Float64, Float64), (ComplexF32, ComplexF64, ComplexF64),
-            (Float64, ComplexF64, ComplexF64), (ComplexF64, Float64, ComplexF64),
+            (Float64, Float32, Float16), (ComplexF64, Float64, Float64),
         )
         A, B, C = ones(TA, (3, 4)), ones(TB, (4, 5)), zeros(TC, (3, 5))
         @test_throws ArgumentError tensorcontract!(C, A, pA, false, B, pB, false, pAB, 1, 0, qsbackend)
@@ -153,6 +151,28 @@ end
     D4, D5 = Diagonal(randn(4)), Diagonal(randn(5))
     @test_throws ArgumentError tensorcontract!(zeros(4, 5), D4, pA, false, randn(4, 5), pB, false, pAB, 1, 0, qsbackend)
     @test_throws ArgumentError tensorcontract!(zeros(4, 5), randn(4, 5), pA, false, D5, pB, false, pAB, 1, 0, qsbackend)
+    @test_throws ArgumentError QuasiStrided.QuasiStridedBackend(accumulator = Float16)
+    @test_throws ArgumentError tensorcontract!(
+        zeros(4, 5), randn(4, 4), pA, false, randn(4, 5), pB, false, pAB, 1, 0,
+        QuasiStrided.QuasiStridedBackend{Float16}()
+    )
+end
+
+@testset "@tensor with mixed eltypes and an accumulator" begin
+    Random.seed!(4321)
+    A32, B64, Bc = randn(Float32, 6, 7, 5), randn(7, 8), randn(ComplexF64, 7, 8)
+    A64 = Float64.(A32)
+    @tensor backend = qsbackend D[a, b, c] := A32[a, k, c] * B64[k, b]
+    @tensor Dref[a, b, c] := A64[a, k, c] * B64[k, b]
+    @test eltype(D) === Float64 && D ≈ Dref
+    @tensor backend = qsbackend E[a, b, c] := conj(A32[a, k, c]) * Bc[k, b]
+    @tensor Eref[a, b, c] := A64[a, k, c] * Bc[k, b]
+    @test eltype(E) === ComplexF64 && E ≈ Eref
+    B32 = randn(Float32, 7, 8)
+    @tensor backend = QuasiStrided.QuasiStridedBackend(accumulator = Float64) F[a, b, c] := A32[a, k, c] * B32[k, b]
+    B32w = Float64.(B32)
+    @tensor Fref[a, b, c] := A64[a, k, c] * B32w[k, b]
+    @test eltype(F) === Float32 && all(abs.(F .- Float32.(Fref)) .<= eps.(Float32.(Fref)))
 end
 
 @testset "hard-reject: C aliasing an input (eltype = $T)" for T in (Float64, ComplexF64)

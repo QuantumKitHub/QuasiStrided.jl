@@ -13,7 +13,7 @@ after an M/N orientation swap the `A*` fields describe the original `B`.
 """
 struct ContractPlan{
         T, Kern, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
-        TA, TB, VT <: AbstractVector,
+        TA, TB, VT <: AbstractVector, PT <: AbstractVector,
     }
     kernel::Kern
     mgroup::GM
@@ -32,7 +32,7 @@ struct ContractPlan{
     atransform::TA
     btransform::TB
 
-    workspace::ContractWorkspace{T, VT}
+    workspace::ContractWorkspace{T, VT, PT}
 
     # Line-by-line packing of A (`mpack`) and B (`npack`); the groups above keep
     # their natural order, and the nest path enumerates the split ones.
@@ -49,7 +49,7 @@ end
                   mc = nothing, kc = nothing, nc = nothing,
                   workspace = nothing,
                   allocator = TensorOperations.DefaultAllocator(),
-                  oracle = true) -> ContractPlan
+                  oracle = true, accumulator = nothing) -> ContractPlan
 
 Plan `C[indC] = A[indA] * B[indB]` (every label in exactly two operands):
 resolve the labels into M/N/K `AxisGroup`s, validate axis lengths and eltypes,
@@ -57,12 +57,21 @@ choose the kernel and blocking, and preallocate every buffer
 [`execute!`](@ref) needs. Throws `ArgumentError`/`DimensionMismatch` on
 invalid input.
 
+  * Each operand's eltype is one of `Float32`, `Float64`, `ComplexF32`,
+    `ComplexF64`; a complex `A` or `B` needs a complex `C`. The compute type
+    `T` is `promote_type` of the three, or, for `accumulator = Float32` or
+    `Float64`, that precision in the domain (real or complex) of the promoted
+    type. Operands are converted to `T` on load and `alpha*AB + beta*C` is
+    evaluated in `T`, rounding to `eltype(C)` once. For an `eltype(C)` of
+    lower precision than `T`, a K longer than `kc` accumulates in a panel of
+    `T` in the workspace, of `M * min(N, nc)` elements.
   * `kernel = nothing` picks one from the hardware profile and the extents: a
-    [`SIMDKernel`](@ref) for a real type, a [`PlanarKernel`](@ref) for a
-    complex one (an [`FMAddSubKernel`](@ref) for a short M on AVX-512).
-    [`OneMKernel`](@ref) is used only when named.
+    [`SIMDKernel`](@ref) for a real `T`, a [`PlanarKernel`](@ref) for a
+    complex one (an [`FMAddSubKernel`](@ref) for a short M on AVX-512), a
+    [`ComplexRealKernel`](@ref)/[`RealComplexKernel`](@ref) for a complex `T`
+    with a real `B`/`A`. [`OneMKernel`](@ref) is used only when named.
   * Labels within the M and N composites are ordered by their stride in `C`;
-    the K order follows a cost model of the two packs. For a real type the
+    the K order follows a cost model of the two packs. For a real `T` the
     operand roles are swapped (B feeds M) when only the N side gives `C` a
     unit-stride run long enough for the kernel's register tile; the result is
     the same either way.
@@ -73,10 +82,10 @@ invalid input.
     with the lines' other elements needed only after more lines than fit L2,
     is packed line by line (`PackSplit`); its `mc` (or `nc`) then becomes a
     whole number of line groups, up to `requested kc / kc` times the request.
-  * `workspace` reuses an existing [`ContractWorkspace`](@ref), grown by
-    [`reserve!`](@ref) as needed. A non-default TensorOperations `allocator`
-    sizes the buffers once via `tensoralloc`, forbids `workspace`, and leaves
-    [`release!`](@ref) to the caller.
+  * `workspace` reuses an existing [`ContractWorkspace`](@ref) for compute
+    type `T`, grown by [`reserve!`](@ref) as needed. A non-default
+    TensorOperations `allocator` sizes the buffers once via `tensoralloc`,
+    forbids `workspace`, and leaves [`release!`](@ref) to the caller.
   * `oracle = false` skips `execute_tilewise!`'s buffers.
   * `conjA`/`conjB` conjugate A's/B's elements (never `alpha`/`beta`) and
     compose by XOR with a view's own `conj`/`adjoint` `op`. A conjugated `C`
@@ -94,17 +103,18 @@ function plan_contract(
         nc::Union{Int, Nothing} = nothing,
         workspace::Union{Nothing, ContractWorkspace} = nothing,
         allocator = TO.DefaultAllocator(),
-        oracle::Bool = true
+        oracle::Bool = true,
+        accumulator::Union{Nothing, Type{Float32}, Type{Float64}} = nothing
     ) where {NA, NB, NC}
     return _planned(
         identity, C, A, indA, B, indB, indC,
-        kernel, conjA, conjB, mc, kc, nc, workspace, allocator, oracle
+        kernel, conjA, conjB, mc, kc, nc, workspace, allocator, oracle, accumulator
     )
 end
 
 # Everything `_plan_contract` needs that is concretely typed before the kernel
 # is known (`run` is the chosen M composite's unit-stride run in C), as one
-# value that crosses the kernel barrier. `T` is the phantom eltype.
+# value that crosses the kernel barrier. `T` is the phantom compute type.
 struct _PlanRequest{
         T, F, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
         WS <: Union{Nothing, ContractWorkspace}, AL,
@@ -147,13 +157,12 @@ function _planned(
         B::StridedView, indB::NTuple{NB, Int}, indC::NTuple{NC, Int},
         kernel, conjA::Bool, conjB::Bool,
         mc::Union{Int, Nothing}, kc::Union{Int, Nothing}, nc::Union{Int, Nothing},
-        workspace::Union{Nothing, ContractWorkspace}, allocator, oracle::Bool
-    ) where {F, NA, NB, NC}
-    T = eltype(C)
-    eltype(A) === T ||
-        throw(ArgumentError("eltype(A) = $(eltype(A)) does not match eltype(C) = $T"))
-    eltype(B) === T ||
-        throw(ArgumentError("eltype(B) = $(eltype(B)) does not match eltype(C) = $T"))
+        workspace::Union{Nothing, ContractWorkspace}, allocator, oracle::Bool,
+        accumulator::AC
+    ) where {F, NA, NB, NC, AC}
+    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    method = _default_method(T, eltype(A), eltype(B))
+    _check_kernel_domain(kernel, eltype(A), eltype(B))
 
     # GUARDRAIL: a conjugated `C` is rejected; the engine writes through to
     # its parent, so there is nowhere to absorb its `op`.
@@ -171,8 +180,8 @@ function _planned(
     morder = _order_free_labels(mlabels, indC, C)
     norder = _order_free_labels(nlabels, indC, C)
 
-    # Only real `T` swaps or run-demotes; `0` is a placeholder.
-    run_m = T <: Real ? _leading_unit_run(morder, indC, C) : 0
+    # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
+    run_m = T <: Real || method isa _MixedMethod ? _leading_unit_run(morder, indC, C) : 0
     run_n = T <: Real ? _leading_unit_run(norder, indC, C) : 0
 
     mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
@@ -186,7 +195,7 @@ function _planned(
 
     Qk = axis_length(kgroup)
 
-    mr_asis, mr_swapped = _candidate_mrs(T, kernel, Qm, Qn, run_m, run_n)
+    mr_asis, mr_swapped = _candidate_mrs(T, method, kernel, Qm, Qn, run_m, run_n)
 
     if T <: Real && _prefer_swap(run_m, run_n, mr_asis, mr_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
@@ -197,24 +206,57 @@ function _planned(
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
             run_n, mc, kc, nc, workspace, allocator, oracle
         )
-        return _plan_with_kernel(kernel, btransform, atransform, req_swapped)
+        return _plan_with_kernel(kernel, method, btransform, atransform, req_swapped)
     end
     req = _plan_request(
         T, f, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
         run_m, mc, kc, nc, workspace, allocator, oracle
     )
-    return _plan_with_kernel(kernel, atransform, btransform, req)
+    return _plan_with_kernel(kernel, method, atransform, btransform, req)
 end
+
+const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
+
+# A named mixed-domain kernel's `RealFormat` side packs a real operand only.
+@inline _check_kernel_domain(kernel, ::Type, ::Type) = nothing
+@inline _check_kernel_domain(kernel::ComplexRealKernel, ::Type, ::Type{TB}) where {TB} =
+    TB <: Real || _throw_kernel_domain(kernel, "B", TB)
+@inline _check_kernel_domain(kernel::RealComplexKernel, ::Type{TA}, ::Type) where {TA} =
+    TA <: Real || _throw_kernel_domain(kernel, "A", TA)
+
+@noinline _throw_kernel_domain(kernel, side, T) = throw(
+    ArgumentError("plan_contract: $(typeof(kernel)) needs a real $side, got eltype $T")
+)
+
+# Fold to the compute type, or a throw, at compile time.
+@inline function _compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Nothing) where {TA, TB, TC}
+    (TA in _QS_ELTYPES && TB in _QS_ELTYPES && TC in _QS_ELTYPES) ||
+        _throw_eltypes(TA, TB, TC)
+    (TC <: Real && !(TA <: Real && TB <: Real)) && _throw_complex_into_real(TA, TB, TC)
+    return promote_type(TA, TB, TC)
+end
+@inline _compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Type{R}) where {TA, TB, TC, R <: Union{Float32, Float64}} =
+    _compute_type(TA, TB, TC, nothing) <: Complex ? Complex{R} : R
+
+@noinline _throw_eltypes(TA, TB, TC) = throw(
+    ArgumentError(
+        "plan_contract: eltypes (A, B, C) = ($TA, $TB, $TC); each must be one of " *
+            "Float32, Float64, ComplexF32, ComplexF64"
+    )
+)
+@noinline _throw_complex_into_real(TA, TB, TC) = throw(
+    ArgumentError("plan_contract: a complex operand (A: $TA, B: $TB) needs a complex C, got $TC")
+)
 
 # `mr` of the kernel each orientation would run, for the swap decision: a named
 # kernel either way, else `_default_shape`'s pick at that orientation's extents
 # and C run.
-@inline _candidate_mrs(::Type{T}, kernel, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T} =
+@inline _candidate_mrs(::Type{T}, method, kernel, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T} =
     (mr(kernel), mr(kernel))
-@inline function _candidate_mrs(::Type{T}, ::Nothing, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T}
-    mr_asis = _default_shape(T, Qm, Qn, run_m)[1][1]
-    mr_swapped = T <: Real ? _default_shape(T, Qn, Qm, run_n)[1][1] : mr_asis
+@inline function _candidate_mrs(::Type{T}, method, ::Nothing, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T}
+    mr_asis = _default_shape(T, method, Qm, Qn, run_m)[1][1]
+    mr_swapped = T <: Real ? _default_shape(T, method, Qn, Qm, run_n)[1][1] : mr_asis
     return mr_asis, mr_swapped
 end
 
@@ -224,11 +266,11 @@ end
 # kernel's code is compiled (holding the menu-wide kernel Union would box the
 # request; a static ladder would compile every menu kernel). All barrier
 # arguments are singletons or heap objects: 0 B, one method-cache hit.
-@inline _plan_with_kernel(kernel, atransform, btransform, req::_PlanRequest) =
+@inline _plan_with_kernel(kernel, method, atransform, btransform, req::_PlanRequest) =
     _plan_contract(kernel, atransform, btransform, req, nothing)
-@inline function _plan_with_kernel(::Nothing, atransform, btransform, req::_PlanRequest{T}) where {T}
+@inline function _plan_with_kernel(::Nothing, method, atransform, btransform, req::_PlanRequest{T}) where {T}
     Qm = axis_length(req.mgroup)
-    shape, method = _default_shape(T, Qm, axis_length(req.ngroup), req.run)
+    shape, method = _default_shape(T, method, Qm, axis_length(req.ngroup), req.run)
     shape = _demote_shape_for_run(T, shape, method, req.run, Qm, axis_length(req.kgroup))
     vshape = _menu_val(shape, T, method)
     # The execution path, predicted so the callee is specialised on it. Only a
@@ -273,7 +315,7 @@ function _plan_contract(
         kernel::K, atransform::TA, btransform::TB, req::_PlanRequest{T}, hint::H
     ) where {K, TA, TB, T, H}
     scalartype(kernel) === T ||
-        throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match eltype(C) = $T"))
+        throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match the compute type $T"))
 
     Qm = axis_length(req.mgroup)
     Qn = axis_length(req.ngroup)
@@ -296,13 +338,28 @@ function _plan_contract(
     mc_eff = Qm == 0 ? MRk : min(mc_rounded, _roundup(Qm, MRk))
     nc_eff = Qn == 0 ? NRk : min(nc_rounded, _roundup(Qn, NRk))
     kc_eff = Qk == 0 ? 1 : min(requested.kc, Qk)
+    panel = _c_panel_needed(T, req.Cstorage, Qk, kc_eff)
     mpack = npack = _NO_SPLIT
+    # Cache lines hold each operand's storage eltype, and the block walk costs
+    # what its packed format's scatter does. B is not split under a panel of C:
+    # the panel holds `jc` blocks in C's own N order, which a split N group does
+    # not enumerate contiguously.
     if Qm > 0 && Qn > 0 && Qk > 0
-        mc_eff, mpack = _pack_split(req.mgroup, req.kgroup, 1, MRk, sizeof(T), T <: Complex, kc_eff, mc_eff, mc_rounded, requested.kc)
-        nc_eff, npack = _pack_split(req.ngroup, req.kgroup, 2, NRk, sizeof(T), T <: Complex, kc_eff, nc_eff, nc_rounded, requested.kc)
+        mc_eff, mpack = _pack_split(
+            req.mgroup, req.kgroup, 1, MRk, sizeof(eltype(req.Astorage)),
+            !(a_format(kernel) isa RealFormat), kc_eff, mc_eff, mc_rounded, requested.kc
+        )
+        if !panel
+            nc_eff, npack = _pack_split(
+                req.ngroup, req.kgroup, 2, NRk, sizeof(eltype(req.Bstorage)),
+                !(b_format(kernel) isa RealFormat), kc_eff, nc_eff, nc_rounded, requested.kc
+            )
+        end
     end
     blocking = Blocking(mc_eff, kc_eff, nc_eff)
-    ws = _resolve_workspace(T, req.workspace, kernel, blocking, req.oracle, req.allocator)
+    ws = _resolve_workspace(
+        T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel ? Qm * min(nc_eff, Qn) : 0
+    )
 
     plan = ContractPlan(
         kernel, req.mgroup, req.ngroup, req.kgroup, blocking,

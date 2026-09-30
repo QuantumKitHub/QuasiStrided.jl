@@ -229,6 +229,41 @@ end
     end
 end
 
+@testset "mixed-domain selection: the real default of real(T), mapped" begin
+    CR, RC = QuasiStrided.ComplexRealMethod(), QuasiStrided.RealComplexMethod()
+    mapped(m, (MR, NR, W)) = m === CR ? (MR ÷ 2, NR, W) : (MR, NR ÷ 2, W)
+    dmethod = QuasiStrided._default_method
+    for T in (ComplexF64, ComplexF32)
+        R = real(T)
+        @test all(((MR, NR, W),) -> iseven(NR) && iseven(W), kernel_shapes(R))
+        for m in (CR, RC)
+            @test kernel_shapes(T, m) === map(s -> mapped(m, s), kernel_shapes(R))
+            for shape in kernel_shapes(T, m)
+                k = QuasiStrided._kernel_from_shape(shape, T, m)
+                @test complex_method(k) === m && (mr(k), nr(k), lanewidth(k)) === shape
+            end
+        end
+        @test dmethod(T, T, R) === dmethod(T, ComplexF32, Float64) === CR
+        @test dmethod(T, R, T) === dmethod(T, Float32, ComplexF64) === RC
+        @test dmethod(T, R, R) === dmethod(T, T, T) === dmethod(T, ComplexF32, T) === PlanarMethod()
+        @test dmethod(R, Float32, Float64) === RealMethod()
+    end
+    # The real extent, store and small-M demotions carry over.
+    saved = QuasiStrided._TARGET[]
+    try
+        for (key, vb, nreg) in ((:avx512, 64, 32), (:avx2, 32, 16), (:neon, 16, 32))
+            QuasiStrided._TARGET[] = synthetic(key, vb; nregisters = nreg)
+            for T in (ComplexF64, ComplexF32), m in (CR, RC), Qm in (1, 3, 17, 40, 4096), run in (0, 1, 8, Qm)
+                real_problem = m === CR ? (2 * Qm, 50, 2 * run) : (Qm, 100, run)
+                @test QuasiStrided._default_shape(T, m, Qm, 50, run) ===
+                    (mapped(m, QuasiStrided._default_shape(real(T), real_problem...)[1]), m)
+            end
+        end
+    finally
+        QuasiStrided._TARGET[] = saved
+    end
+end
+
 @testset "_derived_shape is always a constructible member of the method's menu" begin
     methods = (
         (Float64, RealMethod()), (Float32, RealMethod()), (ComplexF64, PlanarMethod()),

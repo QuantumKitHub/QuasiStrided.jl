@@ -26,11 +26,12 @@ Base.length(u::UnpackedBView) = u.per_k * axis_length(u.ksteps)
     return u.transform(z)
 end
 
-@inline _b_step_load(u::UnpackedBView, kernel, j::Int, p::Int) = _unpacked_b_element(u, j, p)
+@inline _b_step_load(u::UnpackedBView, kernel, j::Int, p::Int) =
+    convert(scalartype(kernel), _unpacked_b_element(u, j, p))
 
 # Complex kernels: the planar `(re, im)` pair.
 @inline function _b_step_load2(u::UnpackedBView, kernel, j::Int, p::Int)
-    z = _unpacked_b_element(u, j, p)
+    z = convert(scalartype(kernel), _unpacked_b_element(u, j, p))
     return (real(z), imag(z))
 end
 
@@ -39,10 +40,11 @@ end
 @inline _unpacked_b_kernel_eligible(::SIMDKernel) = true
 @inline _unpacked_b_kernel_eligible(::PlanarKernel) = true
 @inline _unpacked_b_kernel_eligible(::FMAddSubKernel) = true
+@inline _unpacked_b_kernel_eligible(::ComplexRealKernel) = true
 @inline _unpacked_b_kernel_eligible(::Any) = false
 
 # The same by method, to predict the path before the kernel exists.
-@inline _unpacked_b_method_eligible(::Union{RealMethod, PlanarMethod, FMAddSubMethod}) = true
+@inline _unpacked_b_method_eligible(::Union{RealMethod, PlanarMethod, FMAddSubMethod, ComplexRealMethod}) = true
 @inline _unpacked_b_method_eligible(::Any) = false
 
 # `:always`/`:never` override the rule below, for benchmarks and tests.

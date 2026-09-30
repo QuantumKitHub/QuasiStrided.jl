@@ -134,10 +134,19 @@ function Base.accumulate(
     return acc
 end
 
+# Generator-time accumulator indices of the re/im vectors of block `v`, column
+# `j`: planar's two planes, or `RealComplexKernel`'s column pairs. A `<:` test
+# rather than dispatch, as `RealComplexKernel` is defined after this file.
+function _planar_acc_index(kernel::Type, MV::Int, NR::Int, v::Int, j::Int)
+    kernel <: PlanarKernel && return (v + MV * j + 1, MV * NR + v + MV * j + 1)
+    kernel <: RealComplexKernel && return (v + MV * 2j + 1, v + MV * (2j + 1) + 1)
+    throw(ArgumentError("_planar_acc_index: no planar accumulator layout for $kernel"))
+end
+
 # Scalar fallback store, for every destination the vector store cannot take.
 @generated function _store_tile_planar!(
         destination::QSTile, acc::NTuple{NA, Vec{W, R}},
-        alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W},
+        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {MR, NR, T, W, R, NA}
     MV = MR ÷ W
@@ -146,12 +155,12 @@ end
 
     blocks = Any[]
     for j in 0:(NR - 1), v in 0:(MV - 1)
-        idx = v + MV * j + 1
+        ire, iim = _planar_acc_index(kernel, MV, NR, v, j)
         push!(
             blocks, quote
                 if $j < n
-                    revec = acc[$idx]
-                    imvec = acc[$(NV + idx)]
+                    revec = acc[$ire]
+                    imvec = acc[$iim]
                     for lane in 1:$W
                         i = $(v * W) + lane - 1
                         i < m || break
@@ -176,7 +185,7 @@ end
 # storage can be reinterpreted as `2W` consecutive reals per `W` rows), on an
 # ISA the complex fast paths ship for (shared with the complex pack fast path).
 @inline _complex_vector_eligible(tile::QSTile, ::Type{T}) where {T} =
-    _unit_stride_rows(tile.rows) && tile.storage isa DenseVector{T} &&
+    _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T) &&
     _complex_fastpath_isa_eligible()
 
 # Shuffle patterns built from `W` at specialization time, never hardcoded to
@@ -206,15 +215,15 @@ end
 # `beta == 0/1` and ~1 ULP otherwise, because LLVM contracts Base's scalar
 # complex `muladd` depending on inlining context.
 @inline function _planar_store_block!(
-        sp::Ptr{R}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
+        sp::Ptr{RC}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
         ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
         beta::Complex{R}, ::Val{W}
-    ) where {R, W}
+    ) where {RC, R, W}
     if iszero(beta)
         newre = ar * rev - ai * imv
         newim = ar * imv + ai * rev
     else
-        old = vload(Vec{2 * W, R}, sp + sizeof(R) * at)
+        old = convert(Vec{2 * W, R}, vload(Vec{2 * W, RC}, sp + sizeof(RC) * at))
         orv = _deinterleave_re(old, Val(W))
         oiv = _deinterleave_im(old, Val(W))
         if isone(beta)
@@ -226,7 +235,7 @@ end
         newre = muladd(ar, rev, -muladd(ai, imv, -xr))
         newim = muladd(ar, imv, muladd(ai, rev, xi))
     end
-    vstore(_interleave_planes(newre, newim, Val(W)), sp + sizeof(R) * at)
+    vstore(convert(Vec{2 * W, RC}, _interleave_planes(newre, newim, Val(W))), sp + sizeof(RC) * at)
     return nothing
 end
 
@@ -234,12 +243,13 @@ end
 # block of `2W` reals. The raw pointer is only dereferenced inside `GC.@preserve`.
 @generated function _store_tile_planar_vector!(
         destination::QSTile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
-        alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W},
+        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NA}
-    # The pointer reinterpretation is only sound on dense rank-1 storage of `T`.
-    S <: DenseVector{T} ||
-        throw(ArgumentError("_store_tile_planar_vector!: storage $S is not a DenseVector{$T}"))
+    # The pointer reinterpretation is only sound on dense rank-1 complex storage.
+    S <: DenseVector && _lane_convertible(eltype(S), T) ||
+        throw(ArgumentError("_store_tile_planar_vector!: storage $S is not a dense vector convertible to $T"))
+    RC = real(eltype(S))
     MV = MR ÷ W
     NV = MV * NR
     _check_acc(:_store_tile_planar_vector!, R, T, NA, 2NV)
@@ -248,11 +258,11 @@ end
     for j in 0:(NR - 1)
         vblocks = Any[]
         for v in 0:(MV - 1)
-            idx = v + MV * j + 1
+            ire, iim = _planar_acc_index(kernel, MV, NR, v, j)
             push!(
                 vblocks, quote
-                    revec = acc[$idx]
-                    imvec = acc[$(NV + idx)]
+                    revec = acc[$ire]
+                    imvec = acc[$iim]
                     if $((v + 1) * W) <= m
                         _planar_store_block!(
                             sp, 2 * (colbase + $(v * W)), revec, imvec,
@@ -291,7 +301,7 @@ end
         br = Vec{$W, $R}(real(beta))
         bi = Vec{$W, $R}(imag(beta))
         GC.@preserve storage begin
-            sp = reinterpret(Ptr{$R}, pointer(storage))
+            sp = reinterpret(Ptr{$RC}, pointer(storage))
             @inbounds begin
                 $(blocks...)
             end

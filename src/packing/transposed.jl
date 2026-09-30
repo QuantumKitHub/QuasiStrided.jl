@@ -48,6 +48,6 @@ end
     ) where {PO, FMT, PK, DS, R}
     r, t = divrem(i, R)
     po = (plane, idx, pp) -> r * panel + plane_offset(descriptor, plane, idx, pp)
-    _pack_emit!(buffer, format, po, t, p, convert(scalartype(descriptor), x))
+    _pack_emit!(buffer, format, po, t, p, convert(_element_type(format, scalartype(descriptor)), x))
     return nothing
 end

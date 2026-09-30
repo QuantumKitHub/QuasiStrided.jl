@@ -234,7 +234,7 @@ end
     plan = _mm_plan(Cmat, Amat, Bmat; mc = 8, kc = 6, nc = 7)
     @test isconcretetype(typeof(plan))
     @test all(isconcretetype, fieldtypes(typeof(plan.workspace)))
-    @test typeof(plan.workspace) === QuasiStrided.ContractWorkspace{Float64, Vector{Float64}}
+    @test typeof(plan.workspace) === QuasiStrided.ContractWorkspace{Float64, Vector{Float64}, Vector{Float64}}
     plan_argtypes = (typeof(Cv), typeof(Av), NTuple{2, Int}, typeof(Bv), NTuple{2, Int}, NTuple{2, Int})
     @test isempty(_ws_nonconcrete_types(plan_contract, plan_argtypes))
     for f in (execute!, execute_tilewise!)
@@ -249,9 +249,9 @@ end
 const _SP_I7 = ((1, 2, 3, 4, 5), (4, 6), (5, 3, 2, 6, 1))
 const _SP_BOTH = ((2, 3, 1), (5, 3, 4), (1, 2, 4, 5))
 
-function _sp_views(T, (iA, iB, iC), ext)
-    arr(I) = StridedView(randn(T, map(l -> ext[l], I)))
-    return (arr(iC), arr(iA), iA, arr(iB), iB, iC)
+function _sp_views(T, (iA, iB, iC), ext, TA = T)
+    arr(S, I) = StridedView(randn(S, map(l -> ext[l], I)))
+    return (arr(T, iC), arr(TA, iA), iA, arr(T, iB), iB, iC)
 end
 
 # The plan with every structurally eligible group split, whatever this host's L2:

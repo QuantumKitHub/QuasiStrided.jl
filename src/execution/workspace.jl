@@ -8,17 +8,18 @@ end
 _SlotCache() = _SlotCache(nothing, IdDict{Any, Any}())
 
 """
-    ContractWorkspace{T,VT<:AbstractVector}
+    ContractWorkspace{T,VT<:AbstractVector,PT<:AbstractVector}
 
 The buffers [`execute!`](@ref) needs. Pass one back as
 `plan_contract(...; workspace = ws)` to reuse (and grow) it across
 contractions; one from a non-default allocator is single-use and must be
-[`release!`](@ref)d. `T` is the storage element type; the packed panels (`VT`)
-hold `real(T)`. Field layout is an implementation detail.
+[`release!`](@ref)d. `T` is the plan's compute type; the packed panels (`VT`)
+hold `real(T)`, the panel of C (`PT`) holds `T`. Field layout is an
+implementation detail.
 """
 # A `mutable struct` with `const` fields so a plan and a barrier slot hold one
-# pointer to it instead of copying twenty-one GC-tracked fields.
-mutable struct ContractWorkspace{T, VT <: AbstractVector}
+# pointer to it instead of copying twenty-two GC-tracked fields.
+mutable struct ContractWorkspace{T, VT <: AbstractVector, PT <: AbstractVector}
     # Macro-block offset buffers and their per-sliver descriptors.
     const m_buf_A::Vector{Int}
     const m_buf_C::Vector{Int}
@@ -31,7 +32,7 @@ mutable struct ContractWorkspace{T, VT <: AbstractVector}
     const n_desc_B::Vector{BlockDescriptor}
     const n_desc_C::Vector{BlockDescriptor}
 
-    # Packed macro panels: the only allocator-routed buffers.
+    # Packed macro panels and the panel of C: the only allocator-routed buffers.
     const packed_a::VT
     const packed_b::VT
 
@@ -50,8 +51,12 @@ mutable struct ContractWorkspace{T, VT <: AbstractVector}
 
     const slots::_SlotCache
 
+    # The compute-type panel of C for an eltype of C narrower than `T` (see
+    # `_PanelPath`); empty otherwise.
+    const c_panel::PT
+
     # GUARDRAIL: the packed panels hold `real(T)`, never `T`.
-    function ContractWorkspace{T, VT}(
+    function ContractWorkspace{T, VT, PT}(
             m_buf_A::Vector{Int}, m_buf_C::Vector{Int},
             n_buf_B::Vector{Int}, n_buf_C::Vector{Int},
             k_buf_A::Vector{Int}, k_buf_B::Vector{Int},
@@ -61,20 +66,20 @@ mutable struct ContractWorkspace{T, VT <: AbstractVector}
             tile_m_buf_A::Vector{Int}, tile_m_buf_C::Vector{Int},
             tile_n_buf_B::Vector{Int}, tile_n_buf_C::Vector{Int},
             tw_k_buf_A::Vector{Int}, tw_k_buf_B::Vector{Int},
-            tw_packed_a::VT, tw_packed_b::VT
-        ) where {T, VT <: AbstractVector}
+            tw_packed_a::VT, tw_packed_b::VT, c_panel::PT
+        ) where {T, VT <: AbstractVector, PT <: AbstractVector}
         eltype(VT) === real(T) || throw(
             ArgumentError(
                 "ContractWorkspace{$T,$VT}: the packed panels must hold $(real(T)) " *
-                    "(the real type of the storage element type $T), got $(eltype(VT))"
+                    "(the real type of the compute type $T), got $(eltype(VT))"
             )
         )
-        return new{T, VT}(
+        return new{T, VT, PT}(
             m_buf_A, m_buf_C, n_buf_B, n_buf_C, k_buf_A, k_buf_B,
             m_desc_A, m_desc_C, n_desc_B, n_desc_C,
             packed_a, packed_b,
             tile_m_buf_A, tile_m_buf_C, tile_n_buf_B, tile_n_buf_C,
-            tw_k_buf_A, tw_k_buf_B, tw_packed_a, tw_packed_b, _SlotCache(),
+            tw_k_buf_A, tw_k_buf_B, tw_packed_a, tw_packed_b, _SlotCache(), c_panel,
         )
     end
 end
@@ -114,9 +119,9 @@ end
 
 @inline function _build_workspace(
         ::Type{T}, s, ntw::Int, ints::F,
-        packed_a::VT, packed_b::VT, tw_packed_a::VT, tw_packed_b::VT
-    ) where {T, F, VT <: AbstractVector}
-    return ContractWorkspace{T, VT}(
+        packed_a::VT, packed_b::VT, tw_packed_a::VT, tw_packed_b::VT, c_panel::PT
+    ) where {T, F, VT <: AbstractVector, PT <: AbstractVector}
+    return ContractWorkspace{T, VT, PT}(
         ints(s.mc), ints(s.mc),
         ints(s.nc), ints(s.nc),
         ints(s.kc), ints(s.kc),
@@ -126,21 +131,25 @@ end
         ints(s.mr), ints(s.mr),
         ints(s.nr), ints(s.nr),
         ints(ntw), ints(ntw),
-        tw_packed_a, tw_packed_b,
+        tw_packed_a, tw_packed_b, c_panel,
     )
 end
 
 """
     ContractWorkspace(T, kernel, blocking::Blocking;
-                      oracle = true, allocator = TensorOperations.DefaultAllocator())
+                      oracle = true, allocator = TensorOperations.DefaultAllocator(),
+                      panel = 0)
 
-A workspace for storage type `T`, `kernel` and an effective `blocking`.
-`oracle = false` leaves the `execute_tilewise!` buffers empty. Under a
-non-default `allocator` the packed panels come from `tensoralloc`, are never
-resized, and must be handed back with [`release!`](@ref).
+A workspace for compute type `T`, `kernel` and an effective `blocking`.
+`oracle = false` leaves the `execute_tilewise!` buffers empty. `panel` is the
+length of the compute-type panel of C (see [`plan_contract`](@ref)). Under a
+non-default `allocator` the packed panels and the panel of C come from
+`tensoralloc`, are never resized, and must be handed back with
+[`release!`](@ref).
 """
 function ContractWorkspace(
-        ::Type{T}, kernel, blocking::Blocking, oracle::Bool, ::TO.DefaultAllocator
+        ::Type{T}, kernel, blocking::Blocking, oracle::Bool, ::TO.DefaultAllocator,
+        panel::Int = 0
     ) where {T}
     s = _workspace_sizes(kernel, blocking)
     R = realtype(kernel)
@@ -148,12 +157,12 @@ function ContractWorkspace(
         T, s, oracle ? s.kc : 0, n -> Vector{Int}(undef, n),
         Vector{R}(undef, s.packed_a), Vector{R}(undef, s.packed_b),
         Vector{R}(undef, oracle ? s.tw_packed_a : 0),
-        Vector{R}(undef, oracle ? s.tw_packed_b : 0),
+        Vector{R}(undef, oracle ? s.tw_packed_b : 0), Vector{T}(undef, panel),
     )
 end
 
 function ContractWorkspace(
-        ::Type{T}, kernel, blocking::Blocking, oracle::Bool, allocator
+        ::Type{T}, kernel, blocking::Blocking, oracle::Bool, allocator, panel::Int = 0
     ) where {T}
     s = _workspace_sizes(kernel, blocking)
     R = realtype(kernel)
@@ -163,25 +172,27 @@ function ContractWorkspace(
     packed_b = _alloc_temp(R, s.packed_b, allocator)
     tw_packed_a = _alloc_temp(R, oracle ? s.tw_packed_a : 0, allocator)
     tw_packed_b = _alloc_temp(R, oracle ? s.tw_packed_b : 0, allocator)
+    c_panel = _alloc_temp(T, panel, allocator)
 
     return _build_workspace(
         T, s, oracle ? s.kc : 0, n -> _alloc_offsets(n, allocator),
-        packed_a, packed_b, tw_packed_a, tw_packed_b
+        packed_a, packed_b, tw_packed_a, tw_packed_b, c_panel
     )
 end
 
 function ContractWorkspace(
         ::Type{T}, kernel, blocking::Blocking;
-        oracle::Bool = true, allocator = TO.DefaultAllocator()
+        oracle::Bool = true, allocator = TO.DefaultAllocator(), panel::Int = 0
     ) where {T}
-    return ContractWorkspace(T, kernel, blocking, oracle, allocator)
+    return ContractWorkspace(T, kernel, blocking, oracle, allocator, panel)
 end
 
 # Grow `ws` in place (never shrink, never reallocate what is large enough)
 # for `kernel` at `blocking`. Only for the GC-owned path: an allocator's
 # temporaries must never be resized.
 function reserve!(
-        ws::ContractWorkspace{T, Vector{R}}, kernel, blocking::Blocking, oracle::Bool
+        ws::ContractWorkspace{T, Vector{R}, Vector{T}}, kernel, blocking::Blocking,
+        oracle::Bool, panel::Int = 0
     ) where {T, R}
     s = _workspace_sizes(kernel, blocking)
 
@@ -204,6 +215,7 @@ function reserve!(
     _grow!(ws.tile_m_buf_C, s.mr)
     _grow!(ws.tile_n_buf_B, s.nr)
     _grow!(ws.tile_n_buf_C, s.nr)
+    _grow!(ws.c_panel, panel)
 
     if oracle
         _grow!(ws.tw_k_buf_A, s.kc)
@@ -223,11 +235,12 @@ end
 """
     release!(ws::ContractWorkspace, allocator)
 
-Hand `ws`'s packed panels back to `allocator` (`TensorOperations.tensorfree!`)
-in reverse acquisition order; `ws` must not be used afterwards. Correct for
-every allocator.
+Hand `ws`'s packed panels and panel of C back to `allocator`
+(`TensorOperations.tensorfree!`) in reverse acquisition order; `ws` must not be
+used afterwards. Correct for every allocator.
 """
 function release!(ws::ContractWorkspace, allocator)
+    TO.tensorfree!(ws.c_panel, allocator)
     TO.tensorfree!(ws.tw_packed_b, allocator)
     TO.tensorfree!(ws.tw_packed_a, allocator)
     TO.tensorfree!(ws.packed_b, allocator)
@@ -238,16 +251,17 @@ end
 # Build or reuse the plan's workspace, dispatching on the allocator type.
 function _resolve_workspace(
         ::Type{T}, workspace, kernel, blocking::Blocking, oracle::Bool,
-        allocator::TO.DefaultAllocator
+        allocator::TO.DefaultAllocator, panel::Int
     ) where {T}
     workspace === nothing &&
-        return ContractWorkspace(T, kernel, blocking, oracle, allocator)
-    return _reuse_workspace(T, workspace, kernel, blocking, oracle)
+        return ContractWorkspace(T, kernel, blocking, oracle, allocator, panel)
+    return _reuse_workspace(T, workspace, kernel, blocking, oracle, panel)
 end
 
 # Explicit allocator: sized once, never reused; the caller owns `release!`.
 function _resolve_workspace(
-        ::Type{T}, workspace, kernel, blocking::Blocking, oracle::Bool, allocator
+        ::Type{T}, workspace, kernel, blocking::Blocking, oracle::Bool, allocator,
+        panel::Int
     ) where {T}
     workspace === nothing || throw(
         ArgumentError(
@@ -256,17 +270,17 @@ function _resolve_workspace(
                 "sized once at construction and must not be resized or reused"
         )
     )
-    return ContractWorkspace(T, kernel, blocking, oracle, allocator)
+    return ContractWorkspace(T, kernel, blocking, oracle, allocator, panel)
 end
 
-# The pool is keyed by `eltype(C)` alone, so also check the packed type
+# The pool is keyed by the compute type alone, so also check the packed type
 # (folds at compile time).
 @inline function _reuse_workspace(
-        ::Type{T}, ws::ContractWorkspace{T, Vector{R}}, kernel, blocking::Blocking,
-        oracle::Bool
+        ::Type{T}, ws::ContractWorkspace{T, Vector{R}, Vector{T}}, kernel, blocking::Blocking,
+        oracle::Bool, panel::Int
     ) where {T, R}
     R === realtype(kernel) || _throw_packed_eltype_mismatch(T, ws, kernel)
-    return reserve!(ws, kernel, blocking, oracle)
+    return reserve!(ws, kernel, blocking, oracle, panel)
 end
 
 @noinline function _throw_packed_eltype_mismatch(::Type{T}, ws, kernel) where {T}
@@ -279,13 +293,14 @@ end
 end
 
 @noinline function _reuse_workspace(
-        ::Type{T}, ws::ContractWorkspace, kernel, blocking::Blocking, oracle::Bool
+        ::Type{T}, ws::ContractWorkspace, kernel, blocking::Blocking, oracle::Bool,
+        panel::Int
     ) where {T}
     throw(
         ArgumentError(
-            "plan_contract: cannot reuse a $(typeof(ws)) for an eltype-$T contraction " *
-                "on the default allocator; only a " *
-                "ContractWorkspace{$T,Vector{$(realtype(kernel))}} -- storage element " *
+            "plan_contract: cannot reuse a $(typeof(ws)) for a contraction of compute " *
+                "type $T on the default allocator; only a " *
+                "ContractWorkspace{$T,Vector{$(realtype(kernel))},Vector{$T}} -- compute " *
                 "type $T, packed panels of $(realtype(kernel)) -- is `reserve!`-able"
         )
     )

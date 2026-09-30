@@ -23,8 +23,9 @@ const FAST_A_CASES = [
 const FAST_B_NRS = (1, 3, 7, 8)
 
 # Packs into a `PackedPanel` (the only destination the gate admits).
-function check_panel(side, kernel, T, PD, fmt, lane, step, f)
-    storage = complex_storage(T, 40000)
+# `S` is the storage eltype; a mixed one holds values `T` must round.
+function check_panel(side, kernel, T, PD, fmt, lane, step, f; S = T)
+    storage = S === T ? complex_storage(T, 40000) : S.(complex_storage(ComplexF64, 40000) ./ 3)
     src, g = pack_fixture(side, storage, 17, lane, step)
     pack! = side === :a ? pack_a! : pack_b!
     len = _ref_rpe(fmt) * PD * axis_length(step)
@@ -36,8 +37,8 @@ end
 
 @testset "complex pack fast path: A panel, $T / $(typeof(fa)) / MR=$MR" for (T, fa, MR) in FAST_A_CASES
     kernel = ComplexKernelDescriptor(Val(MR), Val(3), T, fa, PlanarFormat())
-    for f in (identity, conj)
-        storage, src = check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), AffineAxis(0, 997, 5), f)
+    for f in (identity, conj), S in (T, T === ComplexF64 ? ComplexF32 : ComplexF64)
+        storage, src = check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), AffineAxis(0, 997, 5), f; S)
         pp = packed_panel(zeros(real(T), 1), 1, 1)
         @test QS._pack_complex_contiguous_eligible(pp, storage, src.rows, f, fa, MR, Val(MR), T) ==
             FASTPATH_ON
@@ -46,8 +47,8 @@ end
 
 @testset "complex pack fast path: B panel, $T / NR=$NR" for T in (ComplexF64, ComplexF32), NR in FAST_B_NRS
     kernel = ComplexKernelDescriptor(Val(4), Val(NR), T, PlanarFormat(), PlanarFormat())
-    for f in (identity, conj)
-        storage, src = check_panel(:b, kernel, T, NR, PlanarFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, 5), f)
+    for f in (identity, conj), S in (T, T === ComplexF64 ? ComplexF32 : ComplexF64)
+        storage, src = check_panel(:b, kernel, T, NR, PlanarFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, 5), f; S)
         pp = packed_panel(zeros(real(T), 1), 1, 1)
         @test QS._pack_complex_contiguous_eligible(pp, storage, src.cols, f, PlanarFormat(), NR, Val(NR), T) ==
             FASTPATH_ON
@@ -90,6 +91,8 @@ end
         @test !elig(packed = packed_panel(Float32[0.0f0], 1, 1))      # wrong real type
         @test !elig(store = view(storage, 1:100))                      # not a DenseVector
         @test !elig(store = collect(reshape(storage, 40, 100)))        # rank 2
+        @test elig(store = ComplexF32.(storage)) == FASTPATH_ON         # converted lanes
+        @test !elig(store = real.(storage))                            # real storage
         @test !elig(ax = AffineAxis(0, 2, MR))
         @test !elig(ax = AffineAxis(0, -1, MR))
         @test !elig(ax = ScatterAxis(offs, MR))

@@ -30,6 +30,7 @@ end
     @test packed_b_length(planar, 7) == 2NR * 7
 
     @test_throws ArgumentError ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), PlanarFormat())
+    @test packed_b_per_k(ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), InterleavedFormat())) == 2NR
     @test_throws ArgumentError ComplexKernelDescriptor(Val(MR), Val(NR), Float64, PlanarFormat(), PlanarFormat())
     @test_throws ArgumentError ComplexKernelDescriptor(Val(0), Val(NR), T, PlanarFormat(), PlanarFormat())
 end

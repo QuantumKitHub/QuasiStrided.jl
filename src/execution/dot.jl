@@ -174,7 +174,7 @@ end
         gptr::Ptr{T}, vstorage::SV, vbase::Int, vkbuf::Vector{Int}, kblock::Int, transform::F
     ) where {T, SV, F}
     @inbounds for t in 0:(kblock - 1)
-        z = transform(vstorage[vbase + vkbuf[t + 1] + 1])::T
+        z = convert(T, transform(vstorage[vbase + vkbuf[t + 1] + 1]))
         unsafe_store!(gptr + sizeof(T) * t, z)
         if T <: Complex
             unsafe_store!(gptr + sizeof(T) * (kblock + t), Complex(imag(z), real(z)))
