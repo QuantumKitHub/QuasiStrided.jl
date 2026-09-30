@@ -116,7 +116,7 @@ canaries = [run_canary(crng, "start")]
 for T in DTYPES
     kernel = _default_kernel(T)
     rows = named_rows(T)
-    println("\n$T kernel $(tile_size(kernel)[1])x$(tile_size(kernel)[2])/W$(lanewidth(kernel))  ", rows)
+    println("\n$T kernel $(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))  ", rows)
     rows.model === nothing && @warn "no cache geometry detected: model undefined"
     grid = [("wide", c) for c in thin(WIDE[T])]
     for spec in thin(GRID_SHAPES)
@@ -133,7 +133,7 @@ end
 for T in CDTYPES
     kernel = _default_kernel(T)
     rows = map(v -> v === nothing ? nothing : _scale_blocking(v, complex_method(kernel)), named_rows(real(T)))
-    println("\n$T kernel $(tile_size(kernel)[1])x$(tile_size(kernel)[2])/W$(lanewidth(kernel))  ", rows)
+    println("\n$T kernel $(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))  ", rows)
     for spec in thin(MAIN_SHAPES)
         sweep_shape!(raw, kernel, T, spec, named_points(rows))
     end

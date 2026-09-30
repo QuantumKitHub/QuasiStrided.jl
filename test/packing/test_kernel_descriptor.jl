@@ -1,5 +1,5 @@
 using QuasiStrided: ComplexKernelDescriptor, RealFormat, PlanarFormat, OneEFormat,
-    InterleavedFormat, realtype, sliver_widths
+    InterleavedFormat, realtype, sliver_width
 
 @testset "KernelDescriptor" begin
     k = KernelDescriptor(Val(8), Val(6), Float64)
@@ -23,14 +23,14 @@ end
     onem = ComplexKernelDescriptor(Val(MR), Val(NR), T, OneEFormat(), PlanarFormat())
     fmas = ComplexKernelDescriptor(Val(MR), Val(NR), T, InterleavedFormat(), PlanarFormat())
     @test realtype(planar) === real(T)
-    @test (sliver_widths(planar)[1], sliver_widths(onem)[1], sliver_widths(fmas)[1]) ==
+    @test (sliver_width(planar, 1), sliver_width(onem, 1), sliver_width(fmas, 1)) ==
         (2MR, 4MR, 2MR)
-    @test sliver_widths(planar)[2] == sliver_widths(onem)[2] == sliver_widths(fmas)[2] == 2NR
+    @test sliver_width(planar, 2) == sliver_width(onem, 2) == sliver_width(fmas, 2) == 2NR
     @test packed_a_length(onem, 7) == 4MR * 7
     @test packed_b_length(planar, 7) == 2NR * 7
 
     @test_throws ArgumentError ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), PlanarFormat())
-    @test sliver_widths(ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), InterleavedFormat()))[2] == 2NR
+    @test sliver_width(ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), InterleavedFormat()))[2] == 2NR
     @test_throws ArgumentError ComplexKernelDescriptor(Val(MR), Val(NR), Float64, PlanarFormat(), PlanarFormat())
     @test_throws ArgumentError ComplexKernelDescriptor(Val(0), Val(NR), T, PlanarFormat(), PlanarFormat())
 end

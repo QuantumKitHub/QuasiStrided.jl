@@ -35,7 +35,7 @@ const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "bench_kernels.csv")
 const SUMMARY_PATH = joinpath(OUTDIR, "summary_kernels.txt")
 
-tag(k) = "$(tile_size(k)[1])x$(tile_size(k)[2])/W$(lanewidth(k))"
+tag(k) = "$(tile_size(k, 1))x$(tile_size(k, 2))/W$(lanewidth(k))"
 menu_methods(::Type{T}) where {T} = T <: Complex ? (PlanarMethod(), OneMMethod(), FMAddSubMethod()) : (RealMethod(),)
 
 csv = open(CSV_PATH, "w")
@@ -60,7 +60,7 @@ function kernel_hot!(kernel, C, apack, bpack, k_block, reps)
     GC.@preserve apack bpack begin
         ap = packed_panel(apack, 1, length(apack))
         bp = packed_panel(bpack, 1, length(bpack))
-        dest = DestinationTile(C, 0, AffineAxis(0, 1, tile_size(kernel)[1]), AffineAxis(0, tile_size(kernel)...))
+        dest = DestinationTile(C, 0, AffineAxis(0, 1, tile_size(kernel, 1)), AffineAxis(0, tile_size(kernel)...))
         for _ in 1:reps
             unsafe_execute_tile!(kernel, dest, ap, bp, k_block, one(eltype(C)), one(eltype(C)))
         end

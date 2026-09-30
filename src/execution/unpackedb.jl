@@ -79,7 +79,7 @@ const _UNPACKED_B_MMAX = 256
         off = d.regular ? d.base + jj * d.stride : (@inbounds buf[n_tile_start + jj + 1])
         base + off
     end
-    return UnpackedBView(storage, colbase, ksteps, sliver_widths(kernel)[2], transform)
+    return UnpackedBView(storage, colbase, ksteps, sliver_width(kernel, 2), transform)
 end
 
 # The tile loops of `_execute_nest!` with B read in place. A barrier over the K

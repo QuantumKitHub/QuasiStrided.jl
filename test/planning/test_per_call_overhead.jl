@@ -203,8 +203,8 @@ Base.IndexStyle(::Type{<:CountingStorage}) = IndexLinear()
 
     # One (N, K, M) block, so the hoisted checks run once.
     @test base.blocking.m_block >= Ma && base.blocking.n_block >= Na && base.blocking.k_block >= Ka
-    m_tiles = cld(Ma, tile_size(kernel)[1])
-    n_tiles = cld(Na, tile_size(kernel)[2])
+    m_tiles = cld(Ma, tile_size(kernel, 1))
+    n_tiles = cld(Na, tile_size(kernel, 2))
     ntiles = m_tiles * n_tiles
     @test ntiles >= 20   # a per-tile check would be at least this many calls
 
@@ -289,15 +289,15 @@ end
     n_length = axis_length(base.ngroup)
     @test n_length == N1 * N2
     @test base.blocking.n_block >= n_length                         # one N block, so 7 slivers
-    nsliv = cld(n_length, tile_size(kernel)[2])
+    nsliv = cld(n_length, tile_size(kernel, 2))
     @test nsliv == 7
 
     noffs = [offsets(base.ngroup, q)[2] for q in 0:(n_length - 1)]
     binding = argmax(noffs) - 1                          # zero-based logical coordinate
     @test binding == N1 - 1
-    @test 0 < binding ÷ tile_size(kernel)[2] < nsliv - 1           # a strictly interior sliver
-    @test maximum(noffs[1:tile_size(kernel)[2]]) < noffs[binding + 1]                 # not the first
-    @test maximum(noffs[(1 + (nsliv - 1) * tile_size(kernel)[2]):end]) < noffs[binding + 1]  # not the last
+    @test 0 < binding ÷ tile_size(kernel, 2) < nsliv - 1           # a strictly interior sliver
+    @test maximum(noffs[1:tile_size(kernel, 2)]) < noffs[binding + 1]                 # not the first
+    @test maximum(noffs[(1 + (nsliv - 1) * tile_size(kernel, 2)):end]) < noffs[binding + 1]  # not the last
 
     _pcf_exec(base, 1.0, 0.0)
     ref = zeros(M, N1, N2)
@@ -319,7 +319,7 @@ end
     # A first- or last-sliver-only range would accept it.
     moffs = [offsets(base.mgroup, q)[2] for q in 0:(axis_length(base.mgroup) - 1)]
     mrange = (minimum(moffs), maximum(moffs))
-    NR = tile_size(kernel)[2]
+    NR = tile_size(kernel, 2)
     truerange = (minimum(noffs), maximum(noffs))
     firstonly = (minimum(noffs[1:NR]), maximum(noffs[1:NR]))
     lastonly = let tail = noffs[(1 + (nsliv - 1) * NR):end]

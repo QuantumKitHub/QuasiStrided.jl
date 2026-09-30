@@ -119,9 +119,9 @@ end
 end
 
 @testset "macro driver: several blocks at the default blocking ($(nameof(typeof(k))){$T})" for T in (ComplexF64, ComplexF32), k in _macro_kernels(T)
-    QuasiStrided.tile_size(k)[1] == 8 || continue
+    QuasiStrided.tile_size(k, 1) == 8 || continue
     b = QuasiStrided.default_blocking(k)
-    Ma, Ka, Na = b.m_block + QuasiStrided.tile_size(k)[1], b.k_block + 1, b.n_block + QuasiStrided.tile_size(k)[2]
+    Ma, Ka, Na = b.m_block + QuasiStrided.tile_size(k, 1), b.k_block + 1, b.n_block + QuasiStrided.tile_size(k, 2)
     Amat, Bmat = randn(MersenneTwister(1), T, Ma, Ka), randn(MersenneTwister(2), T, Ka, Na)
     Cstart = randn(MersenneTwister(3), T, Ma, Na)
     C = copy(Cstart)

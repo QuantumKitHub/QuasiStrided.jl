@@ -15,7 +15,7 @@ end
 # Out of line so the packers carry no string formatting (and no GC frame).
 @noinline _throw_pack_extent(which::Symbol, name::Symbol, got::Int, limit::Int) = throw(
     ArgumentError(
-        "$(which)!: source $(name) count $got must satisfy 0 <= $got <= tile_size(kernel)[$(which === :pack_a ? 1 : 2)]=$limit"
+        "$(which)!: source $(name) count $got must satisfy 0 <= $got <= tile_size(kernel, $(which === :pack_a ? 1 : 2))=$limit"
     )
 )
 @noinline _throw_pack_short(which::Symbol, got::Int, need::Int, k_block_length::Int) = throw(

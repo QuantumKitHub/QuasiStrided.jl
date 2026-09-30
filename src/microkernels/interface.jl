@@ -50,7 +50,7 @@ accumulator_planes(::RealComplexMethod) = 1
 complex_method(::Any) = RealMethod()
 
 realtype(k::DescriptorKernel) = realtype(k.descriptor)
-sliver_widths(k::DescriptorKernel) = sliver_widths(k.descriptor)
+sliver_width(k::DescriptorKernel) = sliver_width(k.descriptor)
 a_format(k::DescriptorKernel) = a_format(k.descriptor)
 b_format(k::DescriptorKernel) = b_format(k.descriptor)
 tile_size(k::DescriptorKernel) = tile_size(k.descriptor)
@@ -169,7 +169,7 @@ end
 )
 @noinline _throw_tile_extent(which::Symbol, got::Int, limit::Int) = throw(
     ArgumentError(
-        "destination valid $which extent $got exceeds tile_size(kernel)[$(which === :row ? 1 : 2)] = $limit"
+        "destination valid $which extent $got exceeds tile_size(kernel, $(which === :row ? 1 : 2)) = $limit"
     )
 )
 @noinline _throw_negative_k_block_length(where::Symbol, k_block_length::Int) =

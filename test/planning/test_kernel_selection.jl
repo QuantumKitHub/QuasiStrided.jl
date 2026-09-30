@@ -55,7 +55,7 @@ using StridedViews: StridedView
             k = SIMDKernel(Val(MR), Val(NR), T, Val(W))
             @test (tile_size(k)..., lanewidth(k)) == (MR, NR, W)
             @test (MR ÷ W) * NR + (MR ÷ W) <= 32
-            @test sliver_widths(k) === (MR, NR)
+            @test sliver_width(k) === (MR, NR)
             @test realtype(k) === T === scalartype(k)
             @test complex_method(k) === RealMethod()
             @test packed_a_length(k, 7) === MR * 7 && packed_b_length(k, 7) === NR * 7
@@ -82,11 +82,11 @@ using StridedViews: StridedView
 
     @testset "extent demotion when M cannot fill a register tile" begin
         for T in (Float64, Float32)
-            MR = tile_size(_default_kernel(T))[1]
-            @test tile_size(_default_kernel(T, 4 * MR, 256))[1] == MR
+            MR = tile_size(_default_kernel(T), 1)
+            @test tile_size(_default_kernel(T, 4 * MR, 256), 1) == MR
             small = _default_kernel(T, 1, 256)
             @test (tile_size(small)..., lanewidth(small)) === _fallback_shape(T)
-            @test tile_size(_default_kernel(T, 0, 256))[1] == MR        # empty must not demote
+            @test tile_size(_default_kernel(T, 0, 256), 1) == MR        # empty must not demote
         end
     end
 
@@ -111,9 +111,9 @@ using StridedViews: StridedView
             # Through `_default_kernel`, where the host's shape is the tall one.
             if _derived_shape(target_profile(), T) === tall
                 @test tile_size(_default_kernel(T, MR + W, 256)) == (2 * W, NR)
-                @test tile_size(_default_kernel(T, 2 * W, 256))[1] == 2 * W
-                @test tile_size(_default_kernel(T, 2 * W - 1, 256))[1] == _fallback_shape(T)[1]
-                @test tile_size(_default_kernel(T, 2 * MR, 256))[1] == MR
+                @test tile_size(_default_kernel(T, 2 * W, 256), 1) == 2 * W
+                @test tile_size(_default_kernel(T, 2 * W - 1, 256), 1) == _fallback_shape(T)[1]
+                @test tile_size(_default_kernel(T, 2 * MR, 256), 1) == MR
             end
         end
     end
@@ -159,7 +159,7 @@ using StridedViews: StridedView
                 StridedView(zeros(T, d, d, d, d, d, d)), StridedView(randn(T, d, d, d, d)),
                 (i, j, m, b), Bv, (m, k, a, c), (a, b, c, i, j, k); oracle = false
             )
-            @test tile_size(plan.kernel)[1] == 16
+            @test tile_size(plan.kernel, 1) == 16
             @test plan.Astorage === parent(Bv)
             q, r, s = -1, 3, 4
             B2 = StridedView(randn(T, d, d, d, d))
@@ -167,7 +167,7 @@ using StridedViews: StridedView
                 StridedView(zeros(T, d, d, d, d)), StridedView(randn(T, d, d)), (q, b),
                 B2, (a, q, r, s), (a, b, r, s); oracle = false
             )
-            @test tile_size(plan2.kernel)[1] == 16
+            @test tile_size(plan2.kernel, 1) == 16
             @test plan2.Astorage === parent(B2)
             @test axis_length(plan2.mgroup) == d^3
         end

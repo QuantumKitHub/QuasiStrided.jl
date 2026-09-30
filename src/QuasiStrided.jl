@@ -70,7 +70,7 @@ end
     eval(
         Expr(
             :public, :contract!, :plan_contract, :execute!, :ContractPlan,
-            :ContractWorkspace, :Blocking, :default_blocking, :tile_size, :sliver_widths,
+            :ContractWorkspace, :Blocking, :default_blocking, :tile_size, :sliver_width,
             :ScalarKernel, :SIMDKernel, :PlanarKernel, :OneMKernel, :FMAddSubKernel,
             :ComplexRealKernel, :RealComplexKernel,
             :target_profile, :cache_topology,

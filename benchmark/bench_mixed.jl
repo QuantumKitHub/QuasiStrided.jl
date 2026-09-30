@@ -46,7 +46,7 @@ function run(io)
             tm = time_plan(C, A, B; kernel)
             tp = time_plan(C, A, B; kernel = planar)
             tr = time_plan(zeros(R, Mr, Nr), randn(rng, R, Mr, n), randn(rng, R, n, Nr))
-            tag = "$(tile_size(kernel)[1])x$(tile_size(kernel)[2])/W$(lanewidth(kernel))"
+            tag = "$(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))"
             @printf(
                 "%-10s %s %5d  %-10s mixed %8.4f s  promoted %8.4f s  real %8.4f s  promoted/mixed %.2f  real/mixed %.2f\n",
                 T, case, n, tag, tm, tp, tr, tp / tm, tr / tm

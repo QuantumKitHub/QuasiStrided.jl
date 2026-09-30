@@ -45,9 +45,9 @@ Pattern `<m|n|k>_<level>_<what>`; M/N/K stay the organizing letters.
 | `mc, kc, nc` (`Blocking` fields, `plan_contract` kwargs) | `m_block, k_block, n_block` |
 | `ic, pc, jc` | `m_block_start, k_block_start, n_block_start` |
 | `mblock, kblock, nblock`, `kc_len` | `m_block_length, k_block_length, n_block_length` |
-| `mr(k), nr(k)` | `tile_size(k) -> (m_tile, n_tile)` |
+| `mr(k), nr(k)` | `tile_size(k) -> (m_tile, n_tile)`, `tile_size(k, i)` (like `size`) |
 | `MRk, NRk` | `m_tile, n_tile` |
-| `packed_a_per_k(k), packed_b_per_k(k)` | `sliver_widths(k) -> (a_sliver_width, b_sliver_width)` |
+| `packed_a_per_k(k), packed_b_per_k(k)` | `sliver_width(k) -> (a_sliver_width, b_sliver_width)`, `sliver_width(k, i)` |
 | `MRp, NRp` | `a_sliver_width, b_sliver_width` |
 | `m_slivers, n_slivers` | `m_tiles, n_tiles` |
 | `r, s`, `rfirst, sfirst` | `m_tile_index, n_tile_index`, `m_tile_start, n_tile_start` |

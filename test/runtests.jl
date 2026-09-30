@@ -12,7 +12,7 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     target_profile, cache_topology, unknown_target, _detect_isa, _detect_target,
     _derived_shape, _fallback_shape, _shape_override, _kernel_for, _default_kernel,
     _fallback_blocking, kernel_shapes, _parse_size, _count_cpu_list, NR_DEFAULT,
-    _rule_applies, _isa_nregisters, sliver_widths, realtype,
+    _rule_applies, _isa_nregisters, sliver_width, realtype,
     complex_method, RealMethod, PlanarMethod, OneMMethod, accumulator_planes, a_reals,
     b_reals, FMAddSubMethod, _modelled_blocking, _scale_blocking, _real_blocking_row,
     _planar_pressure, _pack_split, _NestPath

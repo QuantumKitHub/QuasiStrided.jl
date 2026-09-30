@@ -57,7 +57,7 @@ end
     kernels = T <: Real ? (k0, SIMDKernel(Val(8), Val(6), T)) :
         (k0, QuasiStrided.PlanarKernel(Val(W), Val(5), T, Val(W)), QuasiStrided.FMAddSubKernel(Val(W), Val(5), T, Val(W)))
     for k in kernels, (m_block, k_block, n_block) in ((8, 3, 6), (40, 1, 100))
-        _ub_check(_mm_maker(T, 2 * tile_size(k)[1] + 1, 13, 2 * tile_size(k)[2] + 1, 3), 1.5, 0.5; kernel = k, m_block, k_block, n_block)
+        _ub_check(_mm_maker(T, 2 * tile_size(k, 1) + 1, 13, 2 * tile_size(k, 2) + 1, 3), 1.5, 0.5; kernel = k, m_block, k_block, n_block)
     end
     # beta = 0 never reads a NaN C.
     _ub_check(_mm_maker(T, 10, 6, 7, 3; Cfill = NaN), 2.0, 0.0)

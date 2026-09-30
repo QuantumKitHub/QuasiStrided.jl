@@ -360,7 +360,7 @@ end
             plan = plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel)
             swapped = plan.Astorage === parent(Bv)
             @test swapped == expect_swap
-            @test swapped == _lo_swap(msorted, nsorted, indC, Cv, tile_size(kernel)[1])
+            @test swapped == _lo_swap(msorted, nsorted, indC, Cv, tile_size(kernel, 1))
             if swapped
                 # B feeds M: mgroup's maps are (B, C) over the sorted N labels.
                 @test plan.mgroup.strides[2] == Tuple(cstride(l) for l in nsorted)
@@ -383,7 +383,7 @@ end
 
         # Default kernel: the same rule at this machine's `m_tile`.
         plan = plan_contract(Cv, Av, indA, Bv, indB, indC)
-        m_tile = tile_size(plan.kernel)[1]
+        m_tile = tile_size(plan.kernel, 1)
         @test (plan.Astorage === parent(Bv)) == (mrun < m_tile && nrun >= m_tile)
     end
 end
@@ -416,7 +416,7 @@ end
         @test plan.Astorage === parent(Av)
 
         default_kernel = QuasiStrided._default_kernel(T, m_length, n_length)
-        default_m_tile = tile_size(default_kernel)[1]
+        default_m_tile = tile_size(default_kernel, 1)
         if m_length == run || run % default_m_tile == 0
             @test plan.kernel === default_kernel
         else
@@ -424,8 +424,8 @@ end
             if isempty(candidates)
                 @test plan.kernel === default_kernel
             else
-                @test run % tile_size(plan.kernel)[1] == 0
-                @test tile_size(plan.kernel)[1] == maximum(candidates)
+                @test run % tile_size(plan.kernel, 1) == 0
+                @test tile_size(plan.kernel, 1) == maximum(candidates)
             end
         end
 
@@ -497,19 +497,19 @@ end
         mlab, = QuasiStrided._classify_labels(indA, indB, indC)
         msorted = _lo_order(mlab, indC, Cv2)
         run = _lo_run(msorted, indC, Cv2)
-        if m_length == run || run % tile_size(default_kernel)[1] == 0
+        if m_length == run || run % tile_size(default_kernel, 1) == 0
             @test plan_shallow.kernel === default_kernel
         else
             @test plan_shallow.kernel !== default_kernel
             @test typeof(plan_shallow.kernel) !== typeof(default_kernel)
-            @test run % tile_size(plan_shallow.kernel)[1] == 0
+            @test run % tile_size(plan_shallow.kernel, 1) == 0
         end
 
         # The guard is `k_length > kmax`: `k_length == kmax` may still demote.
         Cv_b, Av_b, Bv_b = _run_demote_fixture(T, a, kmax_of(T))
         plan_b = plan_contract(Cv_b, Av_b, indA, Bv_b, indB, indC)
         run_b = _lo_run(msorted, indC, Cv_b)  # same M order at every m in this fixture
-        if m_length == run_b || run_b % tile_size(default_kernel)[1] == 0
+        if m_length == run_b || run_b % tile_size(default_kernel, 1) == 0
             @test plan_b.kernel === default_kernel
         else
             @test plan_b.kernel !== default_kernel
@@ -598,7 +598,7 @@ end
     for T in (ComplexF64, ComplexF32)
         W = QuasiStrided._default_lanewidth(real(T))
         kernel = QuasiStrided.PlanarKernel(Val(W), Val(8), T, Val(W))
-        @test tile_size(kernel)[1] <= 16
+        @test tile_size(kernel, 1) <= 16
         (indA, indB, indC), _ = _lo_labels(_LO_CASES[3][2], _LO_CASES[3][3])
         A = randn(T, d, d, d, d)
         B = randn(T, d, d, d, d)

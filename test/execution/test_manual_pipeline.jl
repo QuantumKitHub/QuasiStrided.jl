@@ -20,7 +20,7 @@
     Cstorage = zeros(length(Cref))
     destination = DestinationTile(Cstorage, 0, row_C, col_C)
     @test (nrows(destination), ncols(destination)) == (6, 4)
-    packed_a, packed_b = zeros(tile_size(kernel)[1] * 5), zeros(tile_size(kernel)[2] * 5)
+    packed_a, packed_b = zeros(tile_size(kernel, 1) * 5), zeros(tile_size(kernel, 2) * 5)
 
     Cstart = rand(MersenneTwister(1234), size(Cref)...)
     # One panel covering K, then panels of 2, 2, 1 with nontrivial alpha/beta.

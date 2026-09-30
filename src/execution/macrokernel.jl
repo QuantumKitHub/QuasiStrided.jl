@@ -61,10 +61,10 @@ end
 
 # Sliver `tile_index` of a packed panel at the current block's depth
 # `k_block_length`, shared by the packing and the consuming step so the two
-# cannot disagree. GUARDRAIL: `sliver_width` counts reals per K step
-# (`sliver_widths`), not the tile size; they differ for complex kernels.
-@inline function _sliver_panel(buffer, sliver_width::Int, k_block_length::Int, tile_index::Int)
-    stride = sliver_width * k_block_length
+# cannot disagree. GUARDRAIL: `width` counts reals per K step
+# (`sliver_width`), not the tile size; they differ for complex kernels.
+@inline function _sliver_panel(buffer, width::Int, k_block_length::Int, tile_index::Int)
+    stride = width * k_block_length
     return packed_panel(buffer, tile_index * stride + 1, stride)
 end
 

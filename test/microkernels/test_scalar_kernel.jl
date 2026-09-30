@@ -28,17 +28,17 @@ mk_pack(k, A, B) = (mk_pack_a(k, A), mk_pack_b(k, B))
 mk_read(::ScalarKernel, acc, i, j) = acc[i + 1, j + 1]
 function mk_read(k::SIMDKernel, acc, i, j)
     W = lanewidth(k)
-    return acc[i ÷ W + (tile_size(k)[1] ÷ W) * j + 1][i % W + 1]
+    return acc[i ÷ W + (tile_size(k, 1) ÷ W) * j + 1][i % W + 1]
 end
 function mk_read(k::PlanarKernel, acc, i, j)
     W = lanewidth(k)
-    idx = i ÷ W + (tile_size(k)[1] ÷ W) * j + 1
+    idx = i ÷ W + (tile_size(k, 1) ÷ W) * j + 1
     return Complex(acc[idx][i % W + 1], acc[length(acc) ÷ 2 + idx][i % W + 1])
 end
 function mk_read(k::Union{OneMKernel, FMAddSubKernel}, acc, i, j)
     W = lanewidth(k)
     v, u = divrem(i, W ÷ 2)
-    vec = acc[v + (2 * tile_size(k)[1] ÷ W) * j + 1]
+    vec = acc[v + (2 * tile_size(k, 1) ÷ W) * j + 1]
     return Complex(vec[2u + 1], vec[2u + 2])
 end
 
@@ -63,7 +63,7 @@ mk_run_exec(k, dst, pa, pb, k_block_length, alpha, beta) = (execute_tile!(k, dst
 # `full = false` checks only accumulate against the reference and allocations.
 # Separate functions, so the light check does not compile the full one.
 function mk_contract(k; full::Bool = true)
-    return @testset "$(nameof(typeof(k))){$(tile_size(k)[1]),$(tile_size(k)[2]),$(scalartype(k))}" begin
+    return @testset "$(nameof(typeof(k))){$(tile_size(k, 1)),$(tile_size(k, 2)),$(scalartype(k))}" begin
         mk_contract_light(k)
         full && mk_contract_full(k)
     end

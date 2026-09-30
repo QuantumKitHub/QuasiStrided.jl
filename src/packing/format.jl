@@ -72,6 +72,7 @@ function _check_descriptor(MR, NR, T, FA, FB)
 end
 
 tile_size(::Descriptor{MR, NR}) where {MR, NR} = (MR, NR)
+tile_size(k, i::Int) = tile_size(k)[i]
 scalartype(::Descriptor{MR, NR, T}) where {MR, NR, T} = T
 a_format(::Descriptor{MR, NR, T, FA, FB}) where {MR, NR, T, FA, FB} = FA()
 b_format(::Descriptor{MR, NR, T, FA, FB}) where {MR, NR, T, FA, FB} = FB()
@@ -79,18 +80,19 @@ b_format(::Descriptor{MR, NR, T, FA, FB}) where {MR, NR, T, FA, FB} = FB()
 realtype(::Descriptor{MR, NR, T}) where {MR, NR, T} = real(T)
 
 # Reals per A / B sliver per logical K step.
-sliver_widths(d::Descriptor{MR, NR}) where {MR, NR} =
+sliver_width(d::Descriptor{MR, NR}) where {MR, NR} =
     (MR * reals_per_element(a_format(d)), NR * reals_per_element(b_format(d)))
+sliver_width(k, i::Int) = sliver_width(k)[i]
 
-packed_a_length(d::Descriptor, k_block_length::Int) = sliver_widths(d)[1] * k_block_length
-packed_b_length(d::Descriptor, k_block_length::Int) = sliver_widths(d)[2] * k_block_length
+packed_a_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 1) * k_block_length
+packed_b_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 2) * k_block_length
 
 # Zero-based offsets, in reals. For 1e and interleaved, `i`/`j` runs over reals
 # (0:2MR-1) and 1e's second region is `plane == 2`.
 @inline packed_a_plane_offset(d::Descriptor{MR}, plane::Int, i::Int, p::Int) where {MR} =
-    p * sliver_widths(d)[1] + plane * MR + i
+    p * sliver_width(d, 1) + plane * MR + i
 @inline packed_b_plane_offset(d::Descriptor{MR, NR}, plane::Int, j::Int, p::Int) where {MR, NR} =
-    p * sliver_widths(d)[2] + plane * NR + j
+    p * sliver_width(d, 2) + plane * NR + j
 
 # Real descriptors only: a complex element has no single offset.
 packed_a_offset(kernel::KernelDescriptor{MR}, i::Int, p::Int) where {MR} = i + MR * p

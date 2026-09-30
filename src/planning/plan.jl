@@ -254,7 +254,7 @@ end
 # named kernel either way, else `_default_shape`'s pick at that orientation's
 # extents and C run.
 @inline _candidate_m_tiles(::Type{T}, method, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
-    (tile_size(kernel)[1], tile_size(kernel)[1])
+    (tile_size(kernel, 1), tile_size(kernel, 1))
 @inline function _candidate_m_tiles(::Type{T}, method, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T}
     m_tile_asis = _default_shape(T, method, m_length, n_length, run_m)[1][1]
     m_tile_swapped = T <: Real ? _default_shape(T, method, n_length, m_length, run_n)[1][1] : m_tile_asis

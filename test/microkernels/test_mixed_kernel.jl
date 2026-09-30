@@ -9,12 +9,12 @@ mk_pack_b(::RealComplexKernel, B) = mk_cols(c -> mk_ilv(real(c), imag(c)), permu
 function mk_read(k::ComplexRealKernel, acc, i, j)
     W = lanewidth(k)
     v, u = divrem(i, W ÷ 2)
-    vec = acc[v + (2 * tile_size(k)[1] ÷ W) * j + 1]
+    vec = acc[v + (2 * tile_size(k, 1) ÷ W) * j + 1]
     return Complex(vec[2u + 1], vec[2u + 2])
 end
 function mk_read(k::RealComplexKernel, acc, i, j)
     W = lanewidth(k)
-    MV = tile_size(k)[1] ÷ W
+    MV = tile_size(k, 1) ÷ W
     v, u = divrem(i, W)
     return Complex(acc[v + MV * 2j + 1][u + 1], acc[v + MV * (2j + 1) + 1][u + 1])
 end
@@ -35,7 +35,7 @@ end
         rc = RealComplexKernel(Val(8), Val(4), ComplexF64)
         @test cr.inner isa SIMDKernel{16, 4, Float32, 8}
         @test rc.inner isa SIMDKernel{8, 8, Float64, 4}
-        @test (sliver_widths(cr)..., sliver_widths(rc)...) == (16, 4, 8, 8)
+        @test (sliver_width(cr)..., sliver_width(rc)...) == (16, 4, 8, 8)
         @test_throws ArgumentError ComplexRealKernel(Val(3), Val(4), ComplexF64, Val(3))  # odd W
         @test_throws ArgumentError RealComplexKernel(Val(6), Val(4), ComplexF64, Val(4))
         @test_throws ArgumentError ComplexRealKernel(Val(8), Val(4), Float64)
