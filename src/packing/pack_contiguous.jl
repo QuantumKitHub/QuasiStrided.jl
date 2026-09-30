@@ -63,7 +63,7 @@ end
         packed isa PackedPanel{real(T)} && _dense_lanes(storage, T) &&
         _complex_pack_transform_eligible(transform) &&
         valid == PD && _unit_stride_rows(lane_axis) &&
-        _complex_fastpath_isa_eligible()
+        complex_fastpath_isa_eligible()
 end
 
 # The shuffles read `re` lanes from `src` and `im` lanes from `alt`, so the

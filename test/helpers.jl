@@ -45,10 +45,7 @@ const _INDC = (1, 4, 3)
 using QuasiStrided: TargetProfile, CacheLevel
 
 const VALID_ISAS = (:avx512, :avx2, :neon, :unknown)
-synthetic(isakey, vb; nregisters::Int = 32) = TargetProfile(
-    isakey, Sys.ARCH, "synthetic", vb, nregisters,
-    CacheLevel(), CacheLevel(), CacheLevel()
-)
+synthetic(isakey) = TargetProfile(isakey, "synthetic", CacheLevel(), CacheLevel(), CacheLevel())
 
 # Permuted A (with a zero-stride axis), negative-stride B, offset sliced C.
 function scattered_fixture(::Type{T}, a_n = 32, k_n = 32, b_n = 8, n_n = 32) where {T}

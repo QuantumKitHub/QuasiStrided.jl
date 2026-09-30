@@ -186,7 +186,7 @@ end
 # ISA the complex fast paths ship for (shared with the complex pack fast path).
 @inline _complex_vector_eligible(tile::QSTile, ::Type{T}) where {T} =
     _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T) &&
-    _complex_fastpath_isa_eligible()
+    complex_fastpath_isa_eligible()
 
 # Shuffle patterns built from `W` at specialization time, never hardcoded to
 # one ISA. `v` holds `W` complex values `[re_0, im_0, ..., re_{W-1}, im_{W-1}]`.

@@ -158,10 +158,8 @@ const _K_LINE_BYTES = 64
 
 # The core's private L2 share, or 1 MB when undetected.
 function _l2_core_bytes(profile::TargetProfile)
-    l2 = profile.l2
-    l2.bytes > 0 || return 1 << 20
-    smt = max(1, profile.l1d.sharing)
-    return l2.bytes ÷ max(1, l2.sharing ÷ smt)
+    profile.l2.bytes > 0 || return 1 << 20
+    return core_bytes(profile, profile.l2)
 end
 
 # Through the per-eltype cache; an eltype without a slot fails later in planning.

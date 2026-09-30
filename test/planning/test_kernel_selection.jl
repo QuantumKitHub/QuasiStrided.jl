@@ -22,7 +22,7 @@ using StridedViews: StridedView
     @testset "rule: MR = MV*W, NR = 6; MV = 4 on Intel :avx512, 2 on :avx2 and AMD" begin
         for (isakey, vb, MV) in ((:avx512, 64, 4), (:avx2, 32, 2)), T in (Float64, Float32)
             W = vb ÷ sizeof(T)
-            @test _derived_shape(synthetic(isakey, vb), T) === (MV * W, NR_DEFAULT, W)
+            @test _derived_shape(synthetic(isakey), T) === (MV * W, NR_DEFAULT, W)
             @test QuasiStrided._rule_mv(Val(isakey), RealMethod()) == MV
             @test QuasiStrided._rule_shape(vb, T, MV) === (MV * W, NR_DEFAULT, W)
         end
@@ -31,16 +31,16 @@ using StridedViews: StridedView
         end
         for (cpu, MV) in (("znver4", 2), ("znver5", 2), ("icelake-server", 4), ("cascadelake", 4)),
                 T in (Float64, Float32)
-            p = TargetProfile(:avx512, Sys.ARCH, cpu, 64, 32, CacheLevel(), CacheLevel(), CacheLevel())
+            p = TargetProfile(:avx512, cpu, CacheLevel(), CacheLevel(), CacheLevel())
             W = 64 ÷ sizeof(T)
             @test _derived_shape(p, T) === (MV * W, NR_DEFAULT, W)
-            @test _derived_shape(p, ComplexF64) === _derived_shape(synthetic(:avx512, 64), ComplexF64)
+            @test _derived_shape(p, ComplexF64) === _derived_shape(synthetic(:avx512), ComplexF64)
         end
-        @test _derived_shape(synthetic(:avx2, 32), Float64) === _fallback_shape(Float64)
+        @test _derived_shape(synthetic(:avx2), Float64) === _fallback_shape(Float64)
         # ISAs without a rule get the fallback shape, whatever their width.
-        for T in (Float64, Float32), vb in (0, 16, 32, 64)
-            @test _derived_shape(synthetic(:neon, vb), T) === _fallback_shape(T)
-            @test _derived_shape(synthetic(:unknown, vb), T) === _fallback_shape(T)
+        for T in (Float64, Float32)
+            @test _derived_shape(synthetic(:neon), T) === _fallback_shape(T)
+            @test _derived_shape(synthetic(:unknown), T) === _fallback_shape(T)
         end
         # No real override row on any ISA: the rule is the optimum.
         for T in (Float64, Float32), key in VALID_ISAS
@@ -93,7 +93,7 @@ using StridedViews: StridedView
     @testset "_extent_shape: MV = 4 steps down to MV = 2 where it pads less" begin
         ext(shape, T, m_length) = QuasiStrided._extent_shape(shape, T, RealMethod(), m_length)
         for T in (Float64, Float32)
-            tall = _derived_shape(synthetic(:avx512, 64), T)
+            tall = _derived_shape(synthetic(:avx512), T)
             MR, NR, W = tall
             half = (2 * W, NR, W)
             @test ext(tall, T, 0) === tall
@@ -104,9 +104,9 @@ using StridedViews: StridedView
                 @test ext(tall, T, m_length) === tall
             end
             # Never below MV = 2, and complex methods are untouched.
-            avx2 = _derived_shape(synthetic(:avx2, 32), T)
+            avx2 = _derived_shape(synthetic(:avx2), T)
             @test ext(avx2, T, 3) === avx2
-            cs = _derived_shape(synthetic(:avx512, 64), ComplexF64)
+            cs = _derived_shape(synthetic(:avx512), ComplexF64)
             @test QuasiStrided._extent_shape(cs, ComplexF64, PlanarMethod(), 3) === cs
             # Through `_default_kernel`, where the host's shape is the tall one.
             if _derived_shape(target_profile(), T) === tall
@@ -121,7 +121,7 @@ using StridedViews: StridedView
     @testset "_store_shape: MV = 4 steps down where C's run breaks its slivers" begin
         st = QuasiStrided._store_shape
         for T in (Float64, Float32)
-            tall = _derived_shape(synthetic(:avx512, 64), T)
+            tall = _derived_shape(synthetic(:avx512), T)
             MR, NR, W = tall
             half = (2 * W, NR, W)
             m_length = 64 * MR
@@ -137,7 +137,7 @@ using StridedViews: StridedView
             end
             @test st(half, T, RealMethod(), m_length, 3 * W) === half
             @test st(_fallback_shape(T), T, RealMethod(), m_length, 3 * W) === _fallback_shape(T)
-            cs = _derived_shape(synthetic(:avx512, 64), ComplexF64)
+            cs = _derived_shape(synthetic(:avx512), ComplexF64)
             @test st(cs, ComplexF64, PlanarMethod(), m_length, 3 * W) === cs
             if _derived_shape(target_profile(), T) === tall
                 @test QuasiStrided._default_shape(T, m_length, 256, 2 * W)[1] === half
@@ -179,7 +179,7 @@ end
         # W counts REAL lanes; the AVX-512 override replaces the spilling rule shape.
         @test QuasiStrided._rule_shape(64, T, 2) === (2 * W, NR_DEFAULT, W)
         @test _shape_override(Val(:avx512), T) === swept
-        @test _derived_shape(synthetic(:avx512, 64), T) === swept === first(kernel_shapes(T, PlanarMethod()))
+        @test _derived_shape(synthetic(:avx512), T) === swept === first(kernel_shapes(T, PlanarMethod()))
         @test Set(kernel_shapes(T, PlanarMethod())) == Set(
             (
                 (2 * W, NR_DEFAULT, W), swept, (W, 8, W), _shape_override(Val(:avx2), T),
@@ -195,24 +195,20 @@ end
         @test _fallback_shape(T) === (8, NR_DEFAULT, _fallback_shape(real(T))[3])
         # Off :avx512 an override row wins whatever the width; without a row
         # the shape is fitted to the register budget.
-        for key in (:avx2, :neon), vb in (0, 16, 32, 64), nreg in (0, 16, 32)
+        for key in (:avx2, :neon)
             @test !_rule_applies(Val(key), PlanarMethod())
-            @test _derived_shape(synthetic(key, vb; nregisters = nreg), T) === _shape_override(Val(key), T)
+            @test _derived_shape(synthetic(key), T) === _shape_override(Val(key), T)
         end
-        for key in (:unknown, :somethingelse), vb in (0, 16, 32, 64), nreg in (0, 16, 32)
-            @test !_rule_applies(Val(key), PlanarMethod())
-            @test _shape_override(Val(key), T) === nothing
-            shape = _derived_shape(synthetic(key, vb; nregisters = nreg), T)
-            @test _planar_pressure(shape...) <= (nreg > 0 ? nreg : 16)
-        end
-        @test _derived_shape(synthetic(:avx512, 0), T) in kernel_shapes(T, PlanarMethod())
+        @test !_rule_applies(Val(:unknown), PlanarMethod())
+        @test _shape_override(Val(:unknown), T) === nothing
+        @test _planar_pressure(_derived_shape(synthetic(:unknown), T)...) <= 16
     end
     @test _rule_applies(Val(:avx512), PlanarMethod())
     @test _planar_pressure(_fallback_shape(ComplexF64)...) == 30
     @test _planar_pressure(_fallback_shape(ComplexF32)...) == 16
 
     # Complex menus fit AVX-512 and stay bounded.
-    nreg = _isa_nregisters(Val(:avx512))
+    nreg = isa_nregisters(:avx512)
     target_profile().isa === :avx512 && @test target_profile().nregisters == nreg
     for T in (ComplexF64, ComplexF32), m in (PlanarMethod(), OneMMethod())
         planes = accumulator_planes(m)
@@ -249,10 +245,10 @@ end
         @test dmethod(R, Float32, Float64) === RealMethod()
     end
     # The real extent, store and small-M demotions carry over.
-    saved = QuasiStrided._TARGET[]
+    saved = QuasiStrided.TARGET[]
     try
-        for (key, vb, nreg) in ((:avx512, 64, 32), (:avx2, 32, 16), (:neon, 16, 32))
-            QuasiStrided._TARGET[] = synthetic(key, vb; nregisters = nreg)
+        for key in (:avx512, :avx2, :neon)
+            QuasiStrided.TARGET[] = synthetic(key)
             for T in (ComplexF64, ComplexF32), m in (CR, RC), m_length in (1, 3, 17, 40, 4096), run in (0, 1, 8, m_length)
                 real_problem = m === CR ? (2 * m_length, 50, 2 * run) : (m_length, 100, run)
                 @test QuasiStrided._default_shape(T, m, m_length, 50, run) ===
@@ -260,7 +256,7 @@ end
             end
         end
     finally
-        QuasiStrided._TARGET[] = saved
+        QuasiStrided.TARGET[] = saved
     end
 end
 
@@ -269,9 +265,8 @@ end
         (Float64, RealMethod()), (Float32, RealMethod()), (ComplexF64, PlanarMethod()),
         (ComplexF32, PlanarMethod()), (ComplexF64, OneMMethod()), (ComplexF32, OneMMethod()),
     )
-    for (T, m) in methods, isakey in (VALID_ISAS..., :somethingelse),
-            vb in (0, 16, 32, 64, 128), nreg in (0, 16, 32)
-        shape = _derived_shape(synthetic(isakey, vb; nregisters = nreg), T, m)
+    for (T, m) in methods, isakey in VALID_ISAS
+        shape = _derived_shape(synthetic(isakey), T, m)
         @test shape in kernel_shapes(T, m)
         k = QuasiStrided._kernel_from_shape(shape, T, m)
         @test (tile_size(k)..., lanewidth(k)) === shape
@@ -282,12 +277,12 @@ end
     KiB, MiB = 1024, 1024^2
     # No SMT with an L3 shared by 4 cores; SMT 2 with an L3 shared by 8 cores.
     nosmt = TargetProfile(
-        :avx2, :x86_64, "znver2", 32, 16, CacheLevel(32KiB, 8, 64, 1),
-        CacheLevel(512KiB, 8, 64, 1), CacheLevel(16MiB, 16, 64, 4)
+        :avx2, "znver2", CacheLevel(32KiB, 64, 1),
+        CacheLevel(512KiB, 64, 1), CacheLevel(16MiB, 64, 4)
     )
     smt2 = TargetProfile(
-        :avx512, :x86_64, "cascadelake", 64, 32, CacheLevel(32KiB, 8, 64, 2),
-        CacheLevel(1MiB, 16, 64, 2), CacheLevel(25952256, 11, 64, 16)
+        :avx512, "cascadelake", CacheLevel(32KiB, 64, 2),
+        CacheLevel(1MiB, 64, 2), CacheLevel(25952256, 64, 16)
     )
     @test _modelled_blocking(nosmt, Float64, 8, 6) === Blocking(96, 341, 1728)
     @test _modelled_blocking(nosmt, Float32, 16, 6) === Blocking(96, 682, 1728)
@@ -302,17 +297,17 @@ end
     end
     # No L3: the B panel is budgeted from the L2 alone.
     nol3 = TargetProfile(
-        :neon, :aarch64, "", 16, 32, CacheLevel(64KiB, 4, 64, 1),
-        CacheLevel(4MiB, 16, 64, 4), CacheLevel()
+        :neon, "", CacheLevel(64KiB, 64, 1),
+        CacheLevel(4MiB, 64, 4), CacheLevel()
     )
     @test _modelled_blocking(nol3, Float64, 4, 6).n_block == (1MiB ÷ (682 * 8)) ÷ 6 * 6
     tiny = TargetProfile(
-        :avx2, :x86_64, "", 32, 16, CacheLevel(64, 1, 64, 1), CacheLevel(64, 1, 64, 1), CacheLevel()
+        :avx2, "", CacheLevel(64, 64, 1), CacheLevel(64, 64, 1), CacheLevel()
     )
     @test _modelled_blocking(tiny, Float64, 8, 6) === Blocking(8, 1, 6)
     @test _modelled_blocking(unknown_target(), Float64, 8, 6) === nothing
     @test _modelled_blocking(
-        TargetProfile(:avx2, :x86_64, "", 32, 16, CacheLevel(32KiB, 8, 64, 1), CacheLevel(), CacheLevel()),
+        TargetProfile(:avx2, "", CacheLevel(32KiB, 64, 1), CacheLevel(), CacheLevel()),
         Float64, 8, 6
     ) === nothing
 end
@@ -375,7 +370,7 @@ end
 end
 
 @testset "_small_m_shape: AVX-512 complex small-M demotion to FMAddSub" begin
-    sms(T, m_length, p = synthetic(:avx512, 64)) =
+    sms(T, m_length, p = synthetic(:avx512)) =
         QuasiStrided._small_m_shape(QuasiStrided._small_m_candidates(Val(p.isa), p, T), m_length)
     # Least padded rows, then the larger tile.
     @test sms(ComplexF64, 12) === (12, 8, 8)
@@ -390,7 +385,7 @@ end
     end
     @test sms(Float64, 4) === nothing
     for isakey in (:avx2, :neon, :unknown), T in (ComplexF64, ComplexF32)
-        @test sms(T, 2, synthetic(isakey, 32)) === nothing
+        @test sms(T, 2, synthetic(isakey)) === nothing
     end
 end
 

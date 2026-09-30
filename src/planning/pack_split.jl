@@ -93,7 +93,7 @@ function _split_capacity(profile::TargetProfile, aliased::Bool)
     l2 = _l2_core_bytes(profile)
     l3 = profile.l3
     (aliased || l3.bytes <= 0) && return l2
-    return l2 + l3.bytes ÷ max(1, l3.sharing ÷ max(1, profile.l1d.sharing))
+    return l2 + core_bytes(profile, l3)
 end
 
 # Past the tests above the plan is for a large contraction; a dynamic call keeps

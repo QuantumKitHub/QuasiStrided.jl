@@ -62,7 +62,7 @@ export QuasiStridedBackend
 # Detect the hardware per process, not at precompile time: a cached .ji may be
 # loaded on a different CPU.
 function __init__()
-    _init_target!()
+    init_target!()
     return nothing
 end
 

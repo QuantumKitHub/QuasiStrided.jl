@@ -7,7 +7,7 @@ using QuasiStrided: target_profile, unknown_target, TargetProfile, CacheLevel,
     kernel_shapes, PlanarMethod, OneMMethod, FMAddSubMethod
 
 const QS = QuasiStrided
-const FASTPATH_ON = QS._complex_fastpath_isa_eligible()
+const FASTPATH_ON = QS.complex_fastpath_isa_eligible()
 
 # The extremes of each method's menu plus extents that are not multiples of any
 # lane width (interleaved shares 1e's shuffle); B is planar under every method.
@@ -104,11 +104,9 @@ end
 end
 
 @testset "complex pack fast path: ISA gate is a register-width question" begin
-    profile(key, vb, nreg) = TargetProfile(key, Sys.ARCH, "t", vb, nreg, CacheLevel(), CacheLevel(), CacheLevel())
-    @test QS._complex_fastpath_isa_eligible(profile(:avx512, 64, 32))
-    for (key, vb, nreg) in ((:avx2, 32, 16), (:neon, 16, 32), (:unknown, 0, 0))
-        @test !QS._complex_fastpath_isa_eligible(profile(key, vb, nreg))
+    @test QS.complex_fastpath_isa_eligible(synthetic(:avx512))
+    for key in (:avx2, :neon, :unknown)
+        @test !QS.complex_fastpath_isa_eligible(synthetic(key))
     end
-    @test !QS._complex_fastpath_isa_eligible(unknown_target())
-    @test FASTPATH_ON == (target_profile().vector_bytes == QS._isa_vector_bytes(Val(:avx512)))
+    @test FASTPATH_ON == (target_profile().isa === :avx512)
 end

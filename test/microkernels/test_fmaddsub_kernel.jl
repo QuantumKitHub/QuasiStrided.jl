@@ -135,7 +135,7 @@ const _QSF = QuasiStrided
                 pp = packed_panel(bufp, 1, length(bufp))
                 @test _QSF._pack_complex_contiguous_eligible(
                     pp, vals, src.rows, identity, InterleavedFormat(), MR, Val(MR), T
-                ) == _QSF._complex_fastpath_isa_eligible()
+                ) == _QSF.complex_fastpath_isa_eligible()
             end
         end
     end

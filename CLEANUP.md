@@ -13,7 +13,7 @@ TTFX when codegen is touched).
 | # | Chunk | Files | Status |
 |---|---|---|---|
 | 0 | Tour | `QuasiStrided.jl`, `plan.jl`, `execute.jl` call path | done |
-| 1 | Hardware | `hardware/target.jl` | |
+| 1 | Hardware | `hardware/target.jl` | done |
 | 2 | Axis groups | `layout/axis_group.jl`, `pair_group.jl` | |
 | 3 | Tiles | `layout/tiles.jl` | |
 | 4 | Packing formats | `packing/format.jl`, `panel.jl`, `transposed.jl` | |
@@ -35,7 +35,7 @@ TTFX when codegen is touched).
 
 ## Decisions
 
-### D1. Descriptive M/N/K names (applied up front, codebase-wide)
+### D1. Descriptive M/N/K names (applied: 564a740, 58b98e8)
 
 Pattern `<m|n|k>_<level>_<what>`; M/N/K stay the organizing letters.
 
@@ -81,8 +81,22 @@ Add a PrecompileTools workload for common cases (ranks ≤ 3, `Vector`
 storage, the four eltypes) on top of the barriers, not instead of them.
 Measure precompile time and pkgimage size first.
 
-## Open items noted in the tour (to revisit in their chunk)
+### D5. Hardware detection (chunk 1, applied)
 
+Own implementation kept: CPUSummary/HostCPUFeatures detect at precompile
+time, CpuId is x86-only without cache sharing, Hwloc needs a C library and
+~1 s per process. The ISA is the CPUID probe's (name table dropped);
+`CacheLevel` lost `ways`, `TargetProfile` lost `arch` and derives
+`vector_bytes`/`nregisters` from `isa`; `core_bytes(profile, level)` replaces
+three copies of the per-core share.
+
+## Open items (to revisit in their chunk)
+
+- Detected `l1d.line` is unused: `_K_LINE_BYTES = 64` in `labels.jl` (K-order
+  cost model) and `pack_split.jl`; thread the detected line size through
+  planning (chunks 9/11).
+- `complex_fastpath_isa_eligible` is policy, not detection: move it next to
+  its consumers (chunks 5/7).
 - 16-argument `ContractPlan(...)` spelled out five times, `_PlanRequest`
   twice more: one "copy with fields replaced" helper (chunk 13/14).
 - `execute.jl` mixes public API, barrier/hint machinery, the C-panel path and

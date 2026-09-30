@@ -49,10 +49,8 @@ _real_blocking_row(profile::TargetProfile, ::Type{T}) where {T <: Union{Float32,
 function _modelled_blocking(profile::TargetProfile, ::Type{T}, MR::Int, NR::Int) where {T}
     l1, l2, l3 = profile.l1d, profile.l2, profile.l3
     (l1.bytes > 0 && l2.bytes > 0) || return nothing
-    smt = max(1, l1.sharing)
-    core_share(c) = c.bytes ÷ max(1, c.sharing ÷ smt)
-    l2core = core_share(l2)
-    l3core = l3.bytes > 0 ? core_share(l3) : 0
+    l2core = core_bytes(profile, l2)
+    l3core = core_bytes(profile, l3)
     S = sizeof(T)
     k_block = max(1, (l1.bytes ÷ 2) ÷ (NR * S))
     m_block = max(MR, ((l2core ÷ 2) ÷ (k_block * S)) ÷ MR * MR)

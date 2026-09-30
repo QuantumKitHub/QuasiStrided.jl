@@ -14,7 +14,7 @@
 using QuasiStrided: PlanarKernel, FMAddSubKernel, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, PtrScatterAxis, TargetProfile, CacheLevel,
     target_profile, unknown_target, KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 
-const STORE_FASTPATH_ON = QuasiStrided._complex_fastpath_isa_eligible()
+const STORE_FASTPATH_ON = QuasiStrided.complex_fastpath_isa_eligible()
 
 # `@noinline` identity: keeps LLVM from contracting separately rounded products.
 @noinline barrier(x) = x
@@ -106,13 +106,11 @@ end
     end
 
     @testset "ISA gate: AVX-512 only" begin
-        profile(key, vb, nreg) = TargetProfile(key, Sys.ARCH, "t", vb, nreg, CacheLevel(), CacheLevel(), CacheLevel())
-        @test QuasiStrided._complex_fastpath_isa_eligible(profile(:avx512, 64, 32))
-        for (key, vb, nreg) in ((:avx2, 32, 16), (:neon, 16, 32), (:unknown, 0, 0))
-            @test !QuasiStrided._complex_fastpath_isa_eligible(profile(key, vb, nreg))
+        @test QuasiStrided.complex_fastpath_isa_eligible(synthetic(:avx512))
+        for key in (:avx2, :neon, :unknown)
+            @test !QuasiStrided.complex_fastpath_isa_eligible(synthetic(key))
         end
-        @test !QuasiStrided._complex_fastpath_isa_eligible(unknown_target())
-        @test STORE_FASTPATH_ON == (target_profile().vector_bytes == QuasiStrided._isa_vector_bytes(Val(:avx512)))
+        @test STORE_FASTPATH_ON == (target_profile().isa === :avx512)
     end
 end
 
