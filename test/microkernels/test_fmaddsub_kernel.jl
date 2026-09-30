@@ -113,24 +113,24 @@ const _QSF = QuasiStrided
         for T in (ComplexF64, ComplexF32), (MR, NR, W) in (kernel_shapes(T, FMAddSubMethod())..., (3, 2, 2))
             R = real(T)
             k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
-            kc, lda, base = 7, MR + 3, 2
-            vals = [T(10i + 1, -(10i + 2)) for i in 1:(lda * kc + 4)]
+            k_block_length, lda, base = 7, MR + 3, 2
+            vals = [T(10i + 1, -(10i + 2)) for i in 1:(lda * k_block_length + 4)]
             vals[5] = T(0, 0)
             vals[9] = T(R(-0.0), R(0))
             for f in (identity, conj), m in (MR, max(1, MR - 1))
-                src = SourceTile(vals, base, AffineAxis(0, 1, m), AffineAxis(0, lda, kc))
-                A = zeros(T, MR, kc)
-                A[1:m, :] = f.(reshape(vals[(base + 1):(base + lda * kc)], lda, kc)[1:m, :])
+                src = SourceTile(vals, base, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
+                A = zeros(T, MR, k_block_length)
+                A[1:m, :] = f.(reshape(vals[(base + 1):(base + lda * k_block_length)], lda, k_block_length)[1:m, :])
                 want = mk_pack_a(k, A)
-                bufv = fill(R(-777), packed_a_length(k, kc))  # a Vector: the scalar loop
+                bufv = fill(R(-777), packed_a_length(k, k_block_length))  # a Vector: the scalar loop
                 pack_a!(bufv, src, k, f)
                 @test isequal(bufv, want)
-                bufp = fill(R(-777), packed_a_length(k, kc))  # a PackedPanel: the fast path where gated in
+                bufp = fill(R(-777), packed_a_length(k, k_block_length))  # a PackedPanel: the fast path where gated in
                 GC.@preserve bufp pack_a!(packed_panel(bufp, 1, length(bufp)), src, k, f)
                 @test isequal(bufp, want)
             end
-            src = SourceTile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, kc))
-            bufp = zeros(R, packed_a_length(k, kc))
+            src = SourceTile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, k_block_length))
+            bufp = zeros(R, packed_a_length(k, k_block_length))
             GC.@preserve bufp begin
                 pp = packed_panel(bufp, 1, length(bufp))
                 @test _QSF._pack_complex_contiguous_eligible(
@@ -144,7 +144,7 @@ const _QSF = QuasiStrided
         for T in (ComplexF64, ComplexF32)
             bf = default_blocking(FMAddSubKernel(Val(8), Val(8), T, Val(8)))
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
-            @test (bf.mc, bf.kc, bf.nc) == (bp.mc, bp.kc, bp.nc)  # planar's packed reals
+            @test (bf.m_block, bf.k_block, bf.n_block) == (bp.m_block, bp.k_block, bp.n_block)  # planar's packed reals
             for s in kernel_shapes(T, FMAddSubMethod())
                 @test _kernel_from_shape(s, T, FMAddSubMethod()) isa FMAddSubKernel{s[1], s[2], T, s[3]}
             end

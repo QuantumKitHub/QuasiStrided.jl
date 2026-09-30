@@ -2,7 +2,7 @@
 # and the descriptor fixing a kernel's register tile, element type and panel
 # formats. Complex panels are "N planes of real(T)"; every format is addressed by
 #
-#     p * reg_tile * reals_per_element  +  plane * reg_tile  +  i
+#     p * MR * reals_per_element  +  plane * MR  +  i
 #
 # which at RealFormat (one real per element, plane 0) reduces to `i + MR*p`.
 
@@ -25,7 +25,7 @@ reals_per_element(::InterleavedFormat) = 2
 reals_per_element(::OneEFormat) = 4
 
 # `MR`/`NR` are logical extents (complex elements for a complex `T`); every
-# length and offset below takes the logical `kc` and counts reals.
+# length and offset below takes the logical `k_block_length` and counts reals.
 struct Descriptor{MR, NR, T, FA <: PackFormat, FB <: PackFormat}
     function Descriptor{MR, NR, T, FA, FB}() where {MR, NR, T, FA, FB}
         _check_descriptor(MR, NR, T, FA, FB)
@@ -71,8 +71,7 @@ function _check_descriptor(MR, NR, T, FA, FB)
     return nothing
 end
 
-mr(::Descriptor{MR}) where {MR} = MR
-nr(::Descriptor{MR, NR}) where {MR, NR} = NR
+tile_size(::Descriptor{MR, NR}) where {MR, NR} = (MR, NR)
 scalartype(::Descriptor{MR, NR, T}) where {MR, NR, T} = T
 a_format(::Descriptor{MR, NR, T, FA, FB}) where {MR, NR, T, FA, FB} = FA()
 b_format(::Descriptor{MR, NR, T, FA, FB}) where {MR, NR, T, FA, FB} = FB()
@@ -80,18 +79,18 @@ b_format(::Descriptor{MR, NR, T, FA, FB}) where {MR, NR, T, FA, FB} = FB()
 realtype(::Descriptor{MR, NR, T}) where {MR, NR, T} = real(T)
 
 # Reals per A / B sliver per logical K step.
-packed_a_per_k(d::Descriptor{MR}) where {MR} = MR * reals_per_element(a_format(d))
-packed_b_per_k(d::Descriptor{MR, NR}) where {MR, NR} = NR * reals_per_element(b_format(d))
+sliver_widths(d::Descriptor{MR, NR}) where {MR, NR} =
+    (MR * reals_per_element(a_format(d)), NR * reals_per_element(b_format(d)))
 
-packed_a_length(d::Descriptor, kc::Int) = packed_a_per_k(d) * kc
-packed_b_length(d::Descriptor, kc::Int) = packed_b_per_k(d) * kc
+packed_a_length(d::Descriptor, k_block_length::Int) = sliver_widths(d)[1] * k_block_length
+packed_b_length(d::Descriptor, k_block_length::Int) = sliver_widths(d)[2] * k_block_length
 
 # Zero-based offsets, in reals. For 1e and interleaved, `i`/`j` runs over reals
 # (0:2MR-1) and 1e's second region is `plane == 2`.
 @inline packed_a_plane_offset(d::Descriptor{MR}, plane::Int, i::Int, p::Int) where {MR} =
-    p * packed_a_per_k(d) + plane * MR + i
+    p * sliver_widths(d)[1] + plane * MR + i
 @inline packed_b_plane_offset(d::Descriptor{MR, NR}, plane::Int, j::Int, p::Int) where {MR, NR} =
-    p * packed_b_per_k(d) + plane * NR + j
+    p * sliver_widths(d)[2] + plane * NR + j
 
 # Real descriptors only: a complex element has no single offset.
 packed_a_offset(kernel::KernelDescriptor{MR}, i::Int, p::Int) where {MR} = i + MR * p

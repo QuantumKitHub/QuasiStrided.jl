@@ -10,10 +10,10 @@ _macro_rtol(::Type{T}, Ka::Integer) where {T} = 50 * max(Ka, 1) * eps(real(T))
 # Plan for C[m,n] = A[m,k] * B[k,n], with operands as `op`-carrying views. The
 # 5-argument constructor keeps `op` on the view instead of materializing.
 _macro_op_view(M::AbstractMatrix, op) = StridedView(M, size(M), strides(M), 0, op)
-function _macro_plan(Cmat, Amat, Bmat, kernel, mc, kc, nc; conjA = false, conjB = false, opA = identity, opB = identity)
+function _macro_plan(Cmat, Amat, Bmat, kernel, m_block, k_block, n_block; conjA = false, conjB = false, opA = identity, opB = identity)
     return QuasiStrided.plan_contract(
         StridedView(Cmat), _macro_op_view(Amat, opA), (1, 2), _macro_op_view(Bmat, opB), (2, 3), (1, 3);
-        kernel = kernel, conjA = conjA, conjB = conjB, mc = mc, kc = kc, nc = nc
+        kernel = kernel, conjA = conjA, conjB = conjB, m_block = m_block, k_block = k_block, n_block = n_block
     )
 end
 
@@ -57,7 +57,7 @@ end
     @test !isempty(kernels)
     for kernel in kernels, i in 1:(T <: Complex ? 12 : 5)
         Ma, Ka, Na = rand(rng, 1:37, 3)
-        mc, kc, nc = rand(rng, 1:13, 3)
+        m_block, k_block, n_block = rand(rng, 1:13, 3)
         conjA, conjB = rand(rng, Bool, 2)
         opA, opB = rand(rng, _MACRO_OPS, 2)
         alpha, beta = _macro_scalar(rng, T), _macro_scalar(rng, T)
@@ -71,11 +71,11 @@ end
         expected = iszero(beta) ? alpha .* (Aeff * Beff) : alpha .* (Aeff * Beff) .+ beta .* Cstart
 
         C = copy(Cstart)
-        QuasiStrided.execute!(_macro_plan(C, Amat, Bmat, kernel, mc, kc, nc; kw...), alpha, beta)
+        QuasiStrided.execute!(_macro_plan(C, Amat, Bmat, kernel, m_block, k_block, n_block; kw...), alpha, beta)
         Ctw = copy(Cstart)
-        QuasiStrided.execute_tilewise!(_macro_plan(Ctw, Amat, Bmat, kernel, mc, kc, nc; kw...), alpha, beta)
+        QuasiStrided.execute_tilewise!(_macro_plan(Ctw, Amat, Bmat, kernel, m_block, k_block, n_block; kw...), alpha, beta)
         ok = isapprox(C, expected; rtol = _macro_rtol(T, Ka)) && isapprox(C, Ctw; rtol = _macro_rtol(T, Ka))
-        ok || @error "macro driver case $i failed" kernel Ma Ka Na mc kc nc kw alpha beta
+        ok || @error "macro driver case $i failed" kernel Ma Ka Na m_block k_block n_block kw alpha beta
         @test ok
     end
 end
@@ -92,7 +92,7 @@ end
     Cref = _brute_ref(Array(Aperm), (2, 3, 1), Array(Bneg), (2, 4), Cstart, (1, 4, 3), 1.3, 0.6)
     plan = QuasiStrided.plan_contract(
         StridedView(Csub), Aperm, (2, 3, 1), Bneg, (2, 4), (1, 4, 3);
-        kernel = ScalarKernel(Val(4), Val(3), Float64), mc = 3, kc = 4, nc = 3
+        kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 3, k_block = 4, n_block = 3
     )
     QuasiStrided.execute!(plan, 1.3, 0.6)
     @test isapprox(Array(Csub), Cref; rtol = _macro_rtol(Float64, k_n))
@@ -111,7 +111,7 @@ end
         Csub .= Cstart
         plan = QuasiStrided.plan_contract(
             StridedView(Csub), StridedView(Amat), (1, 2, 3), StridedView(Bmat), (3, 4), (1, 2, 4);
-            kernel = ScalarKernel(Val(4), Val(3), Float64), mc = 8, kc = 5, nc = 3
+            kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 8, k_block = 5, n_block = 3
         )
         run!(plan, 1.7, -0.4)
         @test isapprox(Array(Csub), Cref; rtol = _macro_rtol(Float64, k_n))
@@ -119,16 +119,16 @@ end
 end
 
 @testset "macro driver: several blocks at the default blocking ($(nameof(typeof(k))){$T})" for T in (ComplexF64, ComplexF32), k in _macro_kernels(T)
-    QuasiStrided.mr(k) == 8 || continue
+    QuasiStrided.tile_size(k)[1] == 8 || continue
     b = QuasiStrided.default_blocking(k)
-    Ma, Ka, Na = b.mc + QuasiStrided.mr(k), b.kc + 1, b.nc + QuasiStrided.nr(k)
+    Ma, Ka, Na = b.m_block + QuasiStrided.tile_size(k)[1], b.k_block + 1, b.n_block + QuasiStrided.tile_size(k)[2]
     Amat, Bmat = randn(MersenneTwister(1), T, Ma, Ka), randn(MersenneTwister(2), T, Ka, Na)
     Cstart = randn(MersenneTwister(3), T, Ma, Na)
     C = copy(Cstart)
     alpha, beta = T(1.5, -0.25), T(-0.5, 0.75)
     # Conjugation from both sources: the flag on A, a conjugating op on B.
     plan = _macro_plan(C, Amat, Bmat, k, nothing, nothing, nothing; conjA = true, opB = adjoint)
-    @test plan.blocking.mc < Ma && plan.blocking.kc < Ka && plan.blocking.nc < Na
+    @test plan.blocking.m_block < Ma && plan.blocking.k_block < Ka && plan.blocking.n_block < Na
     QuasiStrided.execute!(plan, alpha, beta)
     @test isapprox(C, alpha .* (conj.(Amat) * conj.(Bmat)) .+ beta .* Cstart; rtol = _macro_rtol(T, Ka))
 end
@@ -158,7 +158,7 @@ end
         C = zeros(T, 9, 6)
         mkplan() = QuasiStrided.plan_contract(
             _macro_op_view(C, op), _macro_op_view(Amat, op), (1, 2), _macro_op_view(Bmat, op), (2, 3), (1, 3);
-            kernel = kernel, conjA = true, conjB = true, mc = 4, kc = 3, nc = 4
+            kernel = kernel, conjA = true, conjB = true, m_block = 4, k_block = 3, n_block = 4
         )
         if T <: Complex && _macro_op_conjugates(op)
             @test_throws ArgumentError mkplan()

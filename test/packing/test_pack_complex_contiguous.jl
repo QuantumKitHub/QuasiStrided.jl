@@ -56,16 +56,16 @@ end
 end
 
 @testset "complex pack fast path: scattered K steps, 1e B, ineligible shapes ($T)" for T in (ComplexF64, ComplexF32)
-    MR, NR, kc = 8, 6, 6
-    koffs = [((p * 5) % 7) * 1013 + 3p for p in 0:(kc - 1)]
+    MR, NR, k_block_length = 8, 6, 6
+    koffs = [((p * 5) % 7) * 1013 + 3p for p in 0:(k_block_length - 1)]
     for fa in (PlanarFormat(), OneEFormat(), InterleavedFormat()), f in (identity, conj)
         kernel = ComplexKernelDescriptor(Val(MR), Val(NR), T, fa, OneEFormat())
         # The lane axis must be unit-stride; the step axis may scatter.
-        check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), ScatterAxis(koffs, kc), f)
-        check_panel(:b, kernel, T, NR, OneEFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, kc), f)
+        check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), ScatterAxis(koffs, k_block_length), f)
+        check_panel(:b, kernel, T, NR, OneEFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, k_block_length), f)
         # Ineligible shapes fall back to the scalar loop, into the same panel.
         for lane in (AffineAxis(20, -1, MR), AffineAxis(0, 3, MR), AffineAxis(0, 1, MR - 3))
-            check_panel(:a, kernel, T, MR, fa, lane, AffineAxis(3000, -97, kc), f)
+            check_panel(:a, kernel, T, MR, fa, lane, AffineAxis(3000, -97, k_block_length), f)
         end
     end
 end

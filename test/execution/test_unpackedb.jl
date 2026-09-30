@@ -51,13 +51,13 @@ end
             (alpha, beta) in ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
         _ub_check(_mm_maker(T, M, K, N, 10 + idx; B), alpha, beta)
     end
-    # Several jc/pc/ic blocks with tails, explicit kernel shapes.
+    # Several N/K/M blocks with tails, explicit kernel shapes.
     k0 = plan_contract(_mm_maker(T, 64, 8, 8, 2)()...).kernel
     W = lanewidth(k0)
     kernels = T <: Real ? (k0, SIMDKernel(Val(8), Val(6), T)) :
         (k0, QuasiStrided.PlanarKernel(Val(W), Val(5), T, Val(W)), QuasiStrided.FMAddSubKernel(Val(W), Val(5), T, Val(W)))
-    for k in kernels, (mc, kc, nc) in ((8, 3, 6), (40, 1, 100))
-        _ub_check(_mm_maker(T, 2 * mr(k) + 1, 13, 2 * nr(k) + 1, 3), 1.5, 0.5; kernel = k, mc, kc, nc)
+    for k in kernels, (m_block, k_block, n_block) in ((8, 3, 6), (40, 1, 100))
+        _ub_check(_mm_maker(T, 2 * tile_size(k)[1] + 1, 13, 2 * tile_size(k)[2] + 1, 3), 1.5, 0.5; kernel = k, m_block, k_block, n_block)
     end
     # beta = 0 never reads a NaN C.
     _ub_check(_mm_maker(T, 10, 6, 7, 3; Cfill = NaN), 2.0, 0.0)
@@ -93,7 +93,7 @@ end
 
 @testset "unpacked B: allocation-free, and through the backend ($T)" for T in _UB_TYPES
     Amat, Bmat, Cmat = randn(T, 40, 50), randn(T, 50, 37), zeros(T, 40, 37)
-    plan = _mm_plan(Cmat, Amat, Bmat; kc = 16, nc = 12)
+    plan = _mm_plan(Cmat, Amat, Bmat; k_block = 16, n_block = 12)
     @test _ub_takes(plan)
     allocs = _steady_allocs!(execute!, plan, Cmat)
     @test allocs == 0 skip = (VERSION < v"1.11")

@@ -46,7 +46,7 @@ end
                   indC::NTuple{NC,Int};
                   kernel = nothing,
                   conjA = false, conjB = false,
-                  mc = nothing, kc = nothing, nc = nothing,
+                  m_block = nothing, k_block = nothing, n_block = nothing,
                   workspace = nothing,
                   allocator = TensorOperations.DefaultAllocator(),
                   oracle = true, accumulator = nothing) -> ContractPlan
@@ -63,8 +63,8 @@ invalid input.
     `Float64`, that precision in the domain (real or complex) of the promoted
     type. Operands are converted to `T` on load and `alpha*AB + beta*C` is
     evaluated in `T`, rounding to `eltype(C)` once. For an `eltype(C)` of
-    lower precision than `T`, a K longer than `kc` accumulates in a panel of
-    `T` in the workspace, of `M * min(N, nc)` elements.
+    lower precision than `T`, a K longer than `k_block` accumulates in a panel
+    of `T` in the workspace, of `M * min(N, n_block)` elements.
   * `kernel = nothing` picks one from the hardware profile and the extents: a
     [`SIMDKernel`](@ref) for a real `T`, a [`PlanarKernel`](@ref) for a
     complex one (an [`FMAddSubKernel`](@ref) for a short M on AVX-512), a
@@ -75,13 +75,14 @@ invalid input.
     operand roles are swapped (B feeds M) when only the N side gives `C` a
     unit-stride run long enough for the kernel's register tile; the result is
     the same either way.
-  * `mc`/`kc`/`nc` override the fields of `default_blocking(kernel)` (each
-    `>= 1`); `mc`/`nc` are rounded up to `mr`/`nr` multiples and all three are
-    clamped to the extents.
+  * `m_block`/`k_block`/`n_block` override the fields of
+    `default_blocking(kernel)` (each `>= 1`); `m_block`/`n_block` are rounded
+    up to multiples of the tile size and all three are clamped to the extents.
   * An operand whose register slivers would read one element per cache line,
     with the lines' other elements needed only after more lines than fit L2,
-    is packed line by line (`PackSplit`); its `mc` (or `nc`) then becomes a
-    whole number of line groups, up to `requested kc / kc` times the request.
+    is packed line by line (`PackSplit`); its `m_block` (or `n_block`) then
+    becomes a whole number of line groups, up to `requested k_block / k_block`
+    times the request.
   * `workspace` reuses an existing [`ContractWorkspace`](@ref) for compute
     type `T`, grown by [`reserve!`](@ref) as needed. A non-default
     TensorOperations `allocator` sizes the buffers once via `tensoralloc`,
@@ -98,9 +99,9 @@ function plan_contract(
         kernel = nothing,
         conjA::Bool = false,
         conjB::Bool = false,
-        mc::Union{Int, Nothing} = nothing,
-        kc::Union{Int, Nothing} = nothing,
-        nc::Union{Int, Nothing} = nothing,
+        m_block::Union{Int, Nothing} = nothing,
+        k_block::Union{Int, Nothing} = nothing,
+        n_block::Union{Int, Nothing} = nothing,
         workspace::Union{Nothing, ContractWorkspace} = nothing,
         allocator = TO.DefaultAllocator(),
         oracle::Bool = true,
@@ -108,7 +109,7 @@ function plan_contract(
     ) where {NA, NB, NC}
     return _planned(
         identity, C, A, indA, B, indB, indC,
-        kernel, conjA, conjB, mc, kc, nc, workspace, allocator, oracle, accumulator
+        kernel, conjA, conjB, m_block, k_block, n_block, workspace, allocator, oracle, accumulator
     )
 end
 
@@ -130,9 +131,9 @@ struct _PlanRequest{
     Cstorage::SC
     Cbase::Int
     run::Int
-    mc::Union{Int, Nothing}
-    kc::Union{Int, Nothing}
-    nc::Union{Int, Nothing}
+    m_block::Union{Int, Nothing}
+    k_block::Union{Int, Nothing}
+    n_block::Union{Int, Nothing}
     workspace::WS
     allocator::AL
     oracle::Bool
@@ -141,11 +142,11 @@ end
 @inline function _plan_request(
         ::Type{T}, f::F, mgroup::GM, ngroup::GN, kgroup::GK,
         Astorage::SA, Abase::Int, Bstorage::SB, Bbase::Int, Cstorage::SC, Cbase::Int,
-        run::Int, mc, kc, nc, workspace::WS, allocator::AL, oracle::Bool
+        run::Int, m_block, k_block, n_block, workspace::WS, allocator::AL, oracle::Bool
     ) where {T, F, GM, GN, GK, SA, SB, SC, WS, AL}
     return _PlanRequest{T, F, GM, GN, GK, SA, SB, SC, WS, AL}(
         f, mgroup, ngroup, kgroup, Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
-        run, mc, kc, nc, workspace, allocator, oracle
+        run, m_block, k_block, n_block, workspace, allocator, oracle
     )
 end
 
@@ -156,7 +157,7 @@ function _planned(
         f::F, C::StridedView, A::StridedView, indA::NTuple{NA, Int},
         B::StridedView, indB::NTuple{NB, Int}, indC::NTuple{NC, Int},
         kernel, conjA::Bool, conjB::Bool,
-        mc::Union{Int, Nothing}, kc::Union{Int, Nothing}, nc::Union{Int, Nothing},
+        m_block::Union{Int, Nothing}, k_block::Union{Int, Nothing}, n_block::Union{Int, Nothing},
         workspace::Union{Nothing, ContractWorkspace}, allocator, oracle::Bool,
         accumulator::AC
     ) where {F, NA, NB, NC, AC}
@@ -187,31 +188,31 @@ function _planned(
     mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
     ngroup = _build_pair_group(norder, indB, B, indC, C)  # maps: (B, C)
 
-    Qm = axis_length(mgroup)
-    Qn = axis_length(ngroup)
+    m_length = axis_length(mgroup)
+    n_length = axis_length(ngroup)
 
-    korder = _order_contract_labels(klabels, indA, A, morder, indB, B, norder, Qm, Qn)
+    korder = _order_contract_labels(klabels, indA, A, morder, indB, B, norder, m_length, n_length)
     kgroup = _build_pair_group(korder, indA, A, indB, B)  # maps: (A, B)
 
-    Qk = axis_length(kgroup)
+    k_length = axis_length(kgroup)
 
-    mr_asis, mr_swapped = _candidate_mrs(T, method, kernel, Qm, Qn, run_m, run_n)
+    m_tile_asis, m_tile_swapped = _candidate_m_tiles(T, method, kernel, m_length, n_length, run_m, run_n)
 
-    if T <: Real && _prefer_swap(run_m, run_n, mr_asis, mr_swapped)
+    if T <: Real && _prefer_swap(run_m, run_n, m_tile_asis, m_tile_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
         # together; the sum is unchanged.
         kgroup_swapped = _build_pair_group(korder, indB, B, indA, A)  # maps: (B, A)
         req_swapped = _plan_request(
             T, f, ngroup, mgroup, kgroup_swapped,
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
-            run_n, mc, kc, nc, workspace, allocator, oracle
+            run_n, m_block, k_block, n_block, workspace, allocator, oracle
         )
         return _plan_with_kernel(kernel, method, btransform, atransform, req_swapped)
     end
     req = _plan_request(
         T, f, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
-        run_m, mc, kc, nc, workspace, allocator, oracle
+        run_m, m_block, k_block, n_block, workspace, allocator, oracle
     )
     return _plan_with_kernel(kernel, method, atransform, btransform, req)
 end
@@ -249,15 +250,15 @@ end
     ArgumentError("plan_contract: a complex operand (A: $TA, B: $TB) needs a complex C, got $TC")
 )
 
-# `mr` of the kernel each orientation would run, for the swap decision: a named
-# kernel either way, else `_default_shape`'s pick at that orientation's extents
-# and C run.
-@inline _candidate_mrs(::Type{T}, method, kernel, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T} =
-    (mr(kernel), mr(kernel))
-@inline function _candidate_mrs(::Type{T}, method, ::Nothing, Qm::Int, Qn::Int, run_m::Int, run_n::Int) where {T}
-    mr_asis = _default_shape(T, method, Qm, Qn, run_m)[1][1]
-    mr_swapped = T <: Real ? _default_shape(T, method, Qn, Qm, run_n)[1][1] : mr_asis
-    return mr_asis, mr_swapped
+# `m_tile` of the kernel each orientation would run, for the swap decision: a
+# named kernel either way, else `_default_shape`'s pick at that orientation's
+# extents and C run.
+@inline _candidate_m_tiles(::Type{T}, method, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
+    (tile_size(kernel)[1], tile_size(kernel)[1])
+@inline function _candidate_m_tiles(::Type{T}, method, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T}
+    m_tile_asis = _default_shape(T, method, m_length, n_length, run_m)[1][1]
+    m_tile_swapped = T <: Real ? _default_shape(T, method, n_length, m_length, run_n)[1][1] : m_tile_asis
+    return m_tile_asis, m_tile_swapped
 end
 
 # Kernel resolution. A named kernel goes straight through, never demoted. An
@@ -269,9 +270,9 @@ end
 @inline _plan_with_kernel(kernel, method, atransform, btransform, req::_PlanRequest) =
     _plan_contract(kernel, atransform, btransform, req, nothing)
 @inline function _plan_with_kernel(::Nothing, method, atransform, btransform, req::_PlanRequest{T}) where {T}
-    Qm = axis_length(req.mgroup)
-    shape, method = _default_shape(T, method, Qm, axis_length(req.ngroup), req.run)
-    shape = _demote_shape_for_run(T, shape, method, req.run, Qm, axis_length(req.kgroup))
+    m_length = axis_length(req.mgroup)
+    shape, method = _default_shape(T, method, m_length, axis_length(req.ngroup), req.run)
+    shape = _demote_shape_for_run(T, shape, method, req.run, m_length, axis_length(req.kgroup))
     vshape = _menu_val(shape, T, method)
     # The execution path, predicted so the callee is specialised on it. Only a
     # `Bool` crosses: a call union-split on `method` is emitted out of line and
@@ -298,12 +299,12 @@ end
 @inline _strip_storage(req::_PlanRequest{T}) where {T} = _plan_request(
     T, req.f, req.mgroup, req.ngroup, req.kgroup,
     nothing, req.Abase, nothing, req.Bbase, nothing, req.Cbase,
-    req.run, req.mc, req.kc, req.nc, req.workspace, req.allocator, req.oracle
+    req.run, req.m_block, req.k_block, req.n_block, req.workspace, req.allocator, req.oracle
 )
 @inline _with_storage(req::_PlanRequest{T}, Astorage, Bstorage, Cstorage) where {T} = _plan_request(
     T, req.f, req.mgroup, req.ngroup, req.kgroup,
     Astorage, req.Abase, Bstorage, req.Bbase, Cstorage, req.Cbase,
-    req.run, req.mc, req.kc, req.nc, req.workspace, req.allocator, req.oracle
+    req.run, req.m_block, req.k_block, req.n_block, req.workspace, req.allocator, req.oracle
 )
 
 # `nothing` for a continuation that does not execute (see src/execution/execute.jl).
@@ -317,48 +318,46 @@ function _plan_contract(
     scalartype(kernel) === T ||
         throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match the compute type $T"))
 
-    Qm = axis_length(req.mgroup)
-    Qn = axis_length(req.ngroup)
-    Qk = axis_length(req.kgroup)
+    m_length = axis_length(req.mgroup)
+    n_length = axis_length(req.ngroup)
+    k_length = axis_length(req.kgroup)
 
     defaults = default_blocking(kernel)
-    mc, kc, nc = req.mc, req.kc, req.nc
     requested = Blocking(
-        mc === nothing ? defaults.mc : mc,
-        kc === nothing ? defaults.kc : kc,
-        nc === nothing ? defaults.nc : nc
+        req.m_block === nothing ? defaults.m_block : req.m_block,
+        req.k_block === nothing ? defaults.k_block : req.k_block,
+        req.n_block === nothing ? defaults.n_block : req.n_block
     )
 
-    MRk = mr(kernel)
-    NRk = nr(kernel)
+    m_tile, n_tile = tile_size(kernel)
 
     # Empty extents: the drivers never read these; the floors keep them valid.
-    mc_rounded = _roundup(requested.mc, MRk)
-    nc_rounded = _roundup(requested.nc, NRk)
-    mc_eff = Qm == 0 ? MRk : min(mc_rounded, _roundup(Qm, MRk))
-    nc_eff = Qn == 0 ? NRk : min(nc_rounded, _roundup(Qn, NRk))
-    kc_eff = Qk == 0 ? 1 : min(requested.kc, Qk)
-    panel = _c_panel_needed(T, req.Cstorage, Qk, kc_eff)
+    m_block_rounded = _roundup(requested.m_block, m_tile)
+    n_block_rounded = _roundup(requested.n_block, n_tile)
+    m_block = m_length == 0 ? m_tile : min(m_block_rounded, _roundup(m_length, m_tile))
+    n_block = n_length == 0 ? n_tile : min(n_block_rounded, _roundup(n_length, n_tile))
+    k_block = k_length == 0 ? 1 : min(requested.k_block, k_length)
+    panel = _c_panel_needed(T, req.Cstorage, k_length, k_block)
     mpack = npack = _NO_SPLIT
     # Cache lines hold each operand's storage eltype, and the block walk costs
     # what its packed format's scatter does. B is not split under a panel of C:
-    # the panel holds `jc` blocks in C's own N order, which a split N group does
+    # the panel holds N blocks in C's own N order, which a split N group does
     # not enumerate contiguously.
-    if Qm > 0 && Qn > 0 && Qk > 0
-        mc_eff, mpack = _pack_split(
-            req.mgroup, req.kgroup, 1, MRk, sizeof(eltype(req.Astorage)),
-            !(a_format(kernel) isa RealFormat), kc_eff, mc_eff, mc_rounded, requested.kc
+    if m_length > 0 && n_length > 0 && k_length > 0
+        m_block, mpack = _pack_split(
+            req.mgroup, req.kgroup, 1, m_tile, sizeof(eltype(req.Astorage)),
+            !(a_format(kernel) isa RealFormat), k_block, m_block, m_block_rounded, requested.k_block
         )
         if !panel
-            nc_eff, npack = _pack_split(
-                req.ngroup, req.kgroup, 2, NRk, sizeof(eltype(req.Bstorage)),
-                !(b_format(kernel) isa RealFormat), kc_eff, nc_eff, nc_rounded, requested.kc
+            n_block, npack = _pack_split(
+                req.ngroup, req.kgroup, 2, n_tile, sizeof(eltype(req.Bstorage)),
+                !(b_format(kernel) isa RealFormat), k_block, n_block, n_block_rounded, requested.k_block
             )
         end
     end
-    blocking = Blocking(mc_eff, kc_eff, nc_eff)
+    blocking = Blocking(m_block, k_block, n_block)
     ws = _resolve_workspace(
-        T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel ? Qm * min(nc_eff, Qn) : 0
+        T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel ? m_length * min(n_block, n_length) : 0
     )
 
     plan = ContractPlan(

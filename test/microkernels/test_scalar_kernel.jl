@@ -14,7 +14,7 @@ using StridedViews: StridedView
 mk_ilv(x, y) = vec(permutedims(hcat(x, y)))
 mk_cols(f, M) = reduce(vcat, [f(c) for c in eachcol(M)])
 
-# Packed A (MR x kc) and B (kc x NR), one K step after another.
+# Packed A (MR x k_block_length) and B (k_block_length x NR), one K step after another.
 mk_pack_a(::Union{ScalarKernel, SIMDKernel}, A) = vec(A)
 mk_pack_a(::PlanarKernel, A) = mk_cols(c -> [real(c); imag(c)], A)
 mk_pack_a(::OneMKernel, A) =
@@ -28,17 +28,17 @@ mk_pack(k, A, B) = (mk_pack_a(k, A), mk_pack_b(k, B))
 mk_read(::ScalarKernel, acc, i, j) = acc[i + 1, j + 1]
 function mk_read(k::SIMDKernel, acc, i, j)
     W = lanewidth(k)
-    return acc[i ÷ W + (mr(k) ÷ W) * j + 1][i % W + 1]
+    return acc[i ÷ W + (tile_size(k)[1] ÷ W) * j + 1][i % W + 1]
 end
 function mk_read(k::PlanarKernel, acc, i, j)
     W = lanewidth(k)
-    idx = i ÷ W + (mr(k) ÷ W) * j + 1
+    idx = i ÷ W + (tile_size(k)[1] ÷ W) * j + 1
     return Complex(acc[idx][i % W + 1], acc[length(acc) ÷ 2 + idx][i % W + 1])
 end
 function mk_read(k::Union{OneMKernel, FMAddSubKernel}, acc, i, j)
     W = lanewidth(k)
     v, u = divrem(i, W ÷ 2)
-    vec = acc[v + (2 * mr(k) ÷ W) * j + 1]
+    vec = acc[v + (2 * tile_size(k)[1] ÷ W) * j + 1]
     return Complex(vec[2u + 1], vec[2u + 2])
 end
 
@@ -57,13 +57,13 @@ mk_dense(v::AbstractVector{T}) where {T} = copyto!(parent(StridedView(zeros(T, l
 # Element types of the test operands A and B; the mixed-domain kernels differ.
 mk_optypes(k) = (scalartype(k), scalartype(k))
 
-mk_run_acc(k, pa, pb, kc) = accumulate(k, zero_accumulator(k), pa, pb, kc)
-mk_run_exec(k, dst, pa, pb, kc, alpha, beta) = (execute_tile!(k, dst, pa, pb, kc, alpha, beta); nothing)
+mk_run_acc(k, pa, pb, k_block_length) = accumulate(k, zero_accumulator(k), pa, pb, k_block_length)
+mk_run_exec(k, dst, pa, pb, k_block_length, alpha, beta) = (execute_tile!(k, dst, pa, pb, k_block_length, alpha, beta); nothing)
 
 # `full = false` checks only accumulate against the reference and allocations.
 # Separate functions, so the light check does not compile the full one.
 function mk_contract(k; full::Bool = true)
-    return @testset "$(nameof(typeof(k))){$(mr(k)),$(nr(k)),$(scalartype(k))}" begin
+    return @testset "$(nameof(typeof(k))){$(tile_size(k)[1]),$(tile_size(k)[2]),$(scalartype(k))}" begin
         mk_contract_light(k)
         full && mk_contract_full(k)
     end
@@ -72,14 +72,14 @@ end
 function mk_contract_light(k)
     T = scalartype(k)
     TA, TB = mk_optypes(k)
-    MR, NR = mr(k), nr(k)
+    MR, NR = tile_size(k)
     rng = MersenneTwister(100MR + NR)
-    kc = 5
-    A = rand(rng, TA, MR, kc)
-    B = rand(rng, TB, kc, NR)
+    k_block_length = 5
+    A = rand(rng, TA, MR, k_block_length)
+    B = rand(rng, TB, k_block_length, NR)
     pa, pb = mk_pack(k, A, B)
-    @test (length(pa), length(pb)) == (packed_a_length(k, kc), packed_b_length(k, kc))
-    acc = mk_run_acc(k, pa, pb, kc)
+    @test (length(pa), length(pb)) == (packed_a_length(k, k_block_length), packed_b_length(k, k_block_length))
+    acc = mk_run_acc(k, pa, pb, k_block_length)
     @test mk_close([mk_read(k, acc, i, j) for i in 0:(MR - 1), j in 0:(NR - 1)], A * B, T)
 
     # Allocation-free, including a scattered destination and a dense one
@@ -91,11 +91,11 @@ function mk_contract_light(k)
         ab = (T(2), T(0.5))
         scat = DestinationTile(zeros(T, MR * NR), 0, ScatterAxis(collect(0:(MR - 1)), MR), AffineAxis(0, MR, NR))
         part = DestinationTile(mk_dense(zeros(T, m * NR)), 0, AffineAxis(0, 1, m), AffineAxis(0, m, NR))
-        mk_run_acc(k, pa, pb, kc)
-        @test (@allocated mk_run_acc(k, pa, pb, kc)) == 0 skip = skip
+        mk_run_acc(k, pa, pb, k_block_length)
+        @test (@allocated mk_run_acc(k, pa, pb, k_block_length)) == 0 skip = skip
         for dst in (scat, part)
-            mk_run_exec(k, dst, pa, pb, kc, ab...)
-            @test (@allocated mk_run_exec(k, dst, pa, pb, kc, ab...)) == 0 skip = skip
+            mk_run_exec(k, dst, pa, pb, k_block_length, ab...)
+            @test (@allocated mk_run_exec(k, dst, pa, pb, k_block_length, ab...)) == 0 skip = skip
         end
     end
     return nothing
@@ -105,23 +105,23 @@ function mk_contract_full(k)
     T = scalartype(k)
     TA, TB = mk_optypes(k)
     R = real(T)
-    MR, NR = mr(k), nr(k)
+    MR, NR = tile_size(k)
     rng = MersenneTwister(100MR + NR + 1)
     m = max(1, MR - 1)
-    kc = 5
-    A = rand(rng, TA, MR, kc)
-    B = rand(rng, TB, kc, NR)
+    k_block_length = 5
+    A = rand(rng, TA, MR, k_block_length)
+    B = rand(rng, TB, k_block_length, NR)
     pa, pb = mk_pack(k, A, B)
-    acc = mk_run_acc(k, pa, pb, kc)
+    acc = mk_run_acc(k, pa, pb, k_block_length)
 
     acc0 = zero_accumulator(k)
     @test all(iszero(mk_read(k, acc0, i, j)) for i in 0:(MR - 1), j in 0:(NR - 1))
     @test accumulate(k, acc0, R[], R[], 0) === acc0
     @test_throws ArgumentError accumulate(k, acc0, R[], R[], -1)
-    # Splitting kc across calls composes.
-    la, lb = length(pa) ÷ kc, length(pb) ÷ kc
+    # Splitting k_block_length across calls composes.
+    la, lb = length(pa) ÷ k_block_length, length(pb) ÷ k_block_length
     accs = zero_accumulator(k)
-    for p in 0:(kc - 1)
+    for p in 0:(k_block_length - 1)
         accs = accumulate(k, accs, view(pa, (p * la + 1):((p + 1) * la)), view(pb, (p * lb + 1):((p + 1) * lb)), 1)
     end
     @test all(mk_read(k, accs, i, j) ≈ mk_read(k, acc, i, j) for i in 0:(MR - 1), j in 0:(NR - 1))
@@ -130,15 +130,15 @@ function mk_contract_full(k)
     # alpha/beta branch, partial tiles; old C is NaN whenever beta == 0.
     pad, sentinel = 2, T(-77)
     extents = unique(((MR, NR), (1, 1), (m, NR), (MR, max(1, NR - 1)), (MR ÷ 2 + 1, min(2, NR)), (0, 0)))
-    for kc in (0, 1, 5), (alpha, beta) in mk_alphabeta(T), (m, n) in extents, scattered in (false, true)
-        A = rand(rng, TA, MR, kc)
-        B = rand(rng, TB, kc, NR)
-        pa, pb = kc == 0 ? (R[], R[]) : mk_pack(k, A, B)
+    for k_block_length in (0, 1, 5), (alpha, beta) in mk_alphabeta(T), (m, n) in extents, scattered in (false, true)
+        A = rand(rng, TA, MR, k_block_length)
+        B = rand(rng, TB, k_block_length, NR)
+        pa, pb = k_block_length == 0 ? (R[], R[]) : mk_pack(k, A, B)
         Cold = iszero(beta) ? fill(mk_nan(T), m * n) : rand(rng, T, m * n)
         storage = [fill(sentinel, pad); Cold; fill(sentinel, pad)]
         scattered || (storage = mk_dense(storage))
         rows = scattered ? ScatterAxis(collect(0:(m - 1)), m) : AffineAxis(0, 1, m)
-        execute_tile!(k, DestinationTile(storage, pad, rows, AffineAxis(0, m, n)), pa, pb, kc, alpha, beta)
+        execute_tile!(k, DestinationTile(storage, pad, rows, AffineAxis(0, m, n)), pa, pb, k_block_length, alpha, beta)
         AB = (A * B)[1:m, 1:n]
         want = iszero(beta) ? alpha .* vec(AB) : alpha .* vec(AB) .+ beta .* Cold
         @test mk_close(storage[(pad + 1):(pad + m * n)], want, T)
@@ -159,7 +159,7 @@ function mk_contract_full(k)
         @test mk_close(storage, vec(A[1:m, :] * B[:, 1:n]), T)
     end
 
-    # alpha == 0 never reads acc or the panels; kc == 0 never reads the panels.
+    # alpha == 0 never reads acc or the panels; k_block_length == 0 never reads the panels.
     fulltile(s) = DestinationTile(s, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
     storage = mk_dense(fill(T(2), MR * NR))
     store_tile!(fulltile(storage), mk_fill_acc(k, R(NaN)), zero(T), T(3), k)
@@ -179,8 +179,8 @@ function mk_contract_full(k)
     @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa, pb[1:(end - 1)], 2, one(T), zero(T))
 
     # Destination layouts: each lands on exactly its own addresses.
-    A = rand(rng, TA, MR, kc)
-    B = rand(rng, TB, kc, NR)
+    A = rand(rng, TA, MR, k_block_length)
+    B = rand(rng, TB, k_block_length, NR)
     pa, pb = mk_pack(k, A, B)
     AB = A * B
     ld = m + 3
@@ -197,7 +197,7 @@ function mk_contract_full(k)
         (view(nanbuf(ld * n + 4), 3:(ld * n + 2)), 0, AffineAxis(0, 1, m), AffineAxis(0, ld, n), (i, j) -> i + ld * j),
     )
     for (storage, base, rows, cols, addr) in layouts
-        execute_tile!(k, DestinationTile(storage, base, rows, cols), pa, pb, kc, one(T), zero(T))
+        execute_tile!(k, DestinationTile(storage, base, rows, cols), pa, pb, k_block_length, one(T), zero(T))
         got = [storage[addr(i, j) + 1] for i in 0:(m - 1), j in 0:(n - 1)]
         @test mk_close(got, AB[1:m, 1:n], T)
         @test count(!isnan, storage) == m * n
@@ -220,7 +220,7 @@ function mk_e2e(T, kernel)
             C = copy(Cinit)
             plan = plan_contract(
                 StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
-                kernel, kc = 16, conjA = cA, conjB = cB
+                kernel, k_block = 16, conjA = cA, conjB = cB
             )
             execute!(plan, alpha, beta)
             want = alpha .* ((cA ? conj.(A) : A) * (cB ? conj.(B) : B)) .+ beta .* Cinit

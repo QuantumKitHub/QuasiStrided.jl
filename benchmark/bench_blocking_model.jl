@@ -1,13 +1,13 @@
-# (mc, kc, nc) plateau sweep: the analytical blocking model and the fallback
-# row against a log-spaced grid, at the engine's default kernel.
+# (m_block, k_block, n_block) plateau sweep: the analytical blocking model and
+# the fallback row against a log-spaced grid, at the engine's default kernel.
 #
 #   julia --project=benchmark benchmark/bench_blocking_model.jl [--reps 21] [--smoke] [--outdir DIR]
 #
 # Per real dtype: the named rows (`model` = `_modelled_blocking`, `fallback` =
 # `_fallback_blocking`) and the `wide` grid on every harness shape, plus 1-D
-# `nc` and `mc` slices through the model row on a 2048x256x2048 shape (the only
-# one large enough for `nc` to bind). Per complex dtype: the named rows scaled
-# by `_scale_blocking`. Every configuration of a shape is timed back to back.
+# `n_block` and `m_block` slices through the model row on a 2048x256x2048 shape
+# (the only one large enough for `n_block` to bind). Per complex dtype: the
+# named rows scaled by `_scale_blocking`. Every configuration of a shape is timed back to back.
 # The score of a configuration is the geomean over shapes of its time over the
 # best time at that shape. `--smoke` runs 1 rep on a few points.
 
@@ -34,27 +34,27 @@ const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "blocking_model.csv")
 const SUMMARY_PATH = joinpath(OUTDIR, "summary_blocking_model.txt")
 
-tup(b::Blocking) = (b.mc, b.kc, b.nc)
+tup(b::Blocking) = (b.m_block, b.k_block, b.n_block)
 named_points(rows) = [(string(k), tup(v)) for (k, v) in pairs(rows) if v !== nothing]
 named_rows(::Type{T}) where {T <: Real} = (model = _modelled_blocking(PROFILE, T), fallback = _fallback_blocking(T))
 
 csv = open(CSV_PATH, "w")
-println(csv, "set,dtype,shape,Ma,Ka,Na,mc,kc,nc,mc_eff,kc_eff,nc_eff,reps,median_seconds,gflops")
+println(csv, "set,dtype,shape,Ma,Ka,Na,m_block_requested,k_block_requested,n_block_requested,m_block,k_block,n_block,reps,median_seconds,gflops")
 
 function sweep_shape!(raw, kernel, ::Type{T}, spec, points) where {T}
     fx = build_plain(T, spec, MersenneTwister(0xB10C))
-    for (set, (mc, kc, nc)) in points
+    for (set, (m_block, k_block, n_block)) in points
         plan = plan_contract(
-            fx.Cv, fx.Av, fx.indA, fx.Bv, fx.indB, fx.indC; kernel = kernel, mc = mc, kc = kc, nc = nc
+            fx.Cv, fx.Av, fx.indA, fx.Bv, fx.indB, fx.indC; kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block
         )
         t = median_time_s(() -> execute!(plan, one(T), zero(T)); reps = REPS)
         b = plan.blocking
         println(
-            csv, "$set,$T,$(spec.name),$(spec.Ma),$(spec.Ka),$(spec.Na),$mc,$kc,$nc,$(b.mc),$(b.kc),$(b.nc),$REPS,",
+            csv, "$set,$T,$(spec.name),$(spec.Ma),$(spec.Ka),$(spec.Na),$m_block,$k_block,$n_block,$(b.m_block),$(b.k_block),$(b.n_block),$REPS,",
             @sprintf("%.9f,%.4f", t, gflops(T, spec.Ma, spec.Ka, spec.Na, t))
         )
         flush(csv)
-        push!(raw, (; set, dtype = T, shape = spec.name, mc, kc, nc, t))
+        push!(raw, (; set, dtype = T, shape = spec.name, m_block, k_block, n_block, t))
     end
     return nothing
 end
@@ -81,7 +81,7 @@ function summarize(io, raw, canaries)
     grid_names = [s.name for s in GRID_SHAPES]
     for T in DTYPES
         println(io, "\n## $T   ", named_rows(T))
-        w = score(raw, T, grid_names, r -> (r.mc, r.kc, r.nc); sets = ("wide",))
+        w = score(raw, T, grid_names, r -> (r.m_block, r.k_block, r.n_block); sets = ("wide",))
         @printf(
             io, "wide grid: best %.4f %s  worst %.4f %s  spread %.1f%%\n",
             w[1][2], w[1][1], w[end][2], w[end][1], 100 * (w[end][2] / w[1][2] - 1)
@@ -92,7 +92,7 @@ function summarize(io, raw, canaries)
         for (set, g) in score(raw, T, grid_names, r -> r.set; sets = ("model", "fallback"))
             @printf(io, "  %-10s %.4f\n", set, g)
         end
-        for (s, f) in (("nslice", r -> r.nc), ("mslice", r -> r.mc))
+        for (s, f) in (("nslice", r -> r.n_block), ("mslice", r -> r.m_block))
             pts = sort([r for r in raw if r.dtype == T && r.set == s]; by = f)
             isempty(pts) && continue
             tb = minimum(r.t for r in pts)
@@ -116,7 +116,7 @@ canaries = [run_canary(crng, "start")]
 for T in DTYPES
     kernel = _default_kernel(T)
     rows = named_rows(T)
-    println("\n$T kernel $(mr(kernel))x$(nr(kernel))/W$(lanewidth(kernel))  ", rows)
+    println("\n$T kernel $(tile_size(kernel)[1])x$(tile_size(kernel)[2])/W$(lanewidth(kernel))  ", rows)
     rows.model === nothing && @warn "no cache geometry detected: model undefined"
     grid = [("wide", c) for c in thin(WIDE[T])]
     for spec in thin(GRID_SHAPES)
@@ -124,8 +124,8 @@ for T in DTYPES
     end
     m = something(rows.model, rows.fallback)
     slices = vcat(
-        named_points(rows), [("nslice", (m.mc, m.kc, n)) for n in thin(NSLICE)],
-        [("mslice", (x, m.kc, m.nc)) for x in thin(MSLICE)],
+        named_points(rows), [("nslice", (m.m_block, m.k_block, n)) for n in thin(NSLICE)],
+        [("mslice", (x, m.k_block, m.n_block)) for x in thin(MSLICE)],
     )
     sweep_shape!(raw, kernel, T, BIG_SHAPE, slices)
     push!(canaries, run_canary(crng, "after-$T"))
@@ -133,7 +133,7 @@ end
 for T in CDTYPES
     kernel = _default_kernel(T)
     rows = map(v -> v === nothing ? nothing : _scale_blocking(v, complex_method(kernel)), named_rows(real(T)))
-    println("\n$T kernel $(mr(kernel))x$(nr(kernel))/W$(lanewidth(kernel))  ", rows)
+    println("\n$T kernel $(tile_size(kernel)[1])x$(tile_size(kernel)[2])/W$(lanewidth(kernel))  ", rows)
     for spec in thin(MAIN_SHAPES)
         sweep_shape!(raw, kernel, T, spec, named_points(rows))
     end

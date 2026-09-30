@@ -3,7 +3,7 @@
 # parsing and output paths.
 
 using QuasiStrided
-using QuasiStrided: SIMDKernel, mr, nr, lanewidth, plan_contract, execute!
+using QuasiStrided: SIMDKernel, tile_size, lanewidth, plan_contract, execute!
 using StridedViews: StridedView
 using LinearAlgebra
 using Statistics: median
@@ -61,7 +61,7 @@ function build_plain(::Type{T}, spec::ShapeSpec, rng) where {T}
     )
 end
 
-full_grid(mcs, kcs, ncs) = [(mc, kc, nc) for kc in kcs for mc in mcs for nc in ncs]
+full_grid(m_blocks, k_blocks, n_blocks) = [(m_block, k_block, n_block) for k_block in k_blocks for m_block in m_blocks for n_block in n_blocks]
 
 const DTYPES = (Float64, Float32)
 const CDTYPES = (ComplexF64, ComplexF32)
@@ -105,7 +105,7 @@ function run_canary(rng, label::String)
     fx = build_plain(Float64, ShapeSpec("canary_64^3", 64, 64, 64), rng)
     plan = plan_contract(
         fx.Cv, fx.Av, fx.indA, fx.Bv, fx.indB, fx.indC;
-        kernel = SIMDKernel(Val(8), Val(6), Float64), mc = 128, kc = 256, nc = 1536
+        kernel = SIMDKernel(Val(8), Val(6), Float64), m_block = 128, k_block = 256, n_block = 1536
     )
     t = median_time_s(() -> execute!(plan, 1.0, 0.0); reps = 15)
     println("canary[$label] median = $(t) s")

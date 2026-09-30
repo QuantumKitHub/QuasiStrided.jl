@@ -87,7 +87,8 @@ end
 
 const _PANEL_PATHS = Any[_PanelPath{typeof(p)}() for p in _NEST_PATHS]
 
-# The dot path at lane width `W`; `MATB`: the matrix operand is B (`Qm == 1`).
+# The dot path at lane width `W`; `MATB`: the matrix operand is B
+# (`m_length == 1`).
 struct _DotPath{MATB, W} end
 
 # The outer-product path at lane width `W`.

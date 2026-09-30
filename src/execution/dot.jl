@@ -1,6 +1,6 @@
 # The dot-product ("gemv") path for `M == 1` or `N == 1` when the matrix
 # operand (`Qfree x K`) is stored with K unit-stride. The register microkernel
-# vectorizes along M, which is 1/mr full here, and gathering the K-major
+# vectorizes along M, which is 1/m_tile full here, and gathering the K-major
 # matrix into packed panels would dominate the call. This path vectorizes
 # along K instead: one W-wide FMA per W matrix elements, the matrix read once
 # and unpacked, one horizontal reduction per output. Only the K-vector is
@@ -46,11 +46,11 @@ end
 # Whether the dot path applies (all but the workspace capacity): a degenerate
 # free extent, a matrix operand with unit-ramp K in dense storage (raw-pointer
 # loads), and at least one vector of K.
-function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, Qm::Int, Qn::Int, Qk::Int) where {T}
+function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, m_length::Int, n_length::Int, k_length::Int) where {T}
     _DOT_MODE[] === :never && return false
-    (Qm == 1 || Qn == 1) || return false
-    Qk >= _dot_lanewidth(T) || return false
-    if Qm == 1
+    (m_length == 1 || n_length == 1) || return false
+    k_length >= _dot_lanewidth(T) || return false
+    if m_length == 1
         Bstorage isa DenseVector{T} || return false
         _map_ramp_step(kgroup, 2) == 1 || return false
     else
@@ -64,7 +64,7 @@ end
 # packed-A buffer. Always true for an automatically chosen kernel; `nothing`
 # is the prediction's "assume so".
 function _dot_capacity_ok(plan::ContractPlan{T}) where {T}
-    need = (T <: Complex ? 2 : 1) * plan.blocking.kc
+    need = (T <: Complex ? 2 : 1) * plan.blocking.k_block
     return (length(plan.workspace.packed_a) * sizeof(real(T))) ÷ sizeof(T) >= need
 end
 _dot_capacity_ok(::Nothing) = true
@@ -75,14 +75,14 @@ function _execute_dot!(plan::ContractPlan{T}, alphaT::T, betaT::T, matB::Bool, :
         _dot_nest!(
             plan, ws, plan.Bstorage, plan.Bbase, plan.btransform,
             plan.Astorage, plan.Abase, plan.atransform,
-            plan.ngroup, ws.n_buf_B, ws.n_buf_C, plan.blocking.nc, ws.k_buf_A,
+            plan.ngroup, ws.n_buf_B, ws.n_buf_C, plan.blocking.n_block, ws.k_buf_A,
             alphaT, betaT, Val(W)
         )
     else
         _dot_nest!(
             plan, ws, plan.Astorage, plan.Abase, plan.atransform,
             plan.Bstorage, plan.Bbase, plan.btransform,
-            plan.mgroup, ws.m_buf_A, ws.m_buf_C, plan.blocking.mc, ws.k_buf_B,
+            plan.mgroup, ws.m_buf_A, ws.m_buf_C, plan.blocking.m_block, ws.k_buf_B,
             alphaT, betaT, Val(W)
         )
     end
@@ -111,8 +111,8 @@ function _dot_nest!(
         blocklen::Int, vkbuf::Vector{Int}, alphaT::T, betaT::T, ::Val{W}
     ) where {T, SM, FM, SV, FV, G <: AxisGroup, W}
     Qf = axis_length(g)
-    Qk = axis_length(plan.kgroup)
-    kc_eff = plan.blocking.kc
+    k_length = axis_length(plan.kgroup)
+    k_block = plan.blocking.k_block
     Cstorage = plan.Cstorage
     cbase = plan.Cbase
     lenm = length(mstorage)
@@ -125,35 +125,36 @@ function _dot_nest!(
     GC.@preserve ws mstorage begin
         gptr = reinterpret(Ptr{T}, pointer(ws.packed_a))
         mptr = pointer(mstorage)
-        pc = 0
+        k_block_start = 0
         firstblock = true
-        while pc < Qk
-            kblock = min(kc_eff, Qk - pc)
+        while k_block_start < k_length
+            k_block_length = min(k_block, k_length - k_block_start)
             beta_eff = firstblock ? betaT : one(T)
 
-            fill_offsets!((ws.k_buf_A, ws.k_buf_B), plan.kgroup, pc, kblock)
-            checked_span_bounds(vbase, _buffer_range(vkbuf, kblock), (0, 0), lenv)
+            fill_offsets!((ws.k_buf_A, ws.k_buf_B), plan.kgroup, k_block_start, k_block_length)
+            checked_span_bounds(vbase, _buffer_range(vkbuf, k_block_length), (0, 0), lenv)
             if vflip
-                _dot_gather!(gptr, vstorage, vbase, vkbuf, kblock, conj)
+                _dot_gather!(gptr, vstorage, vbase, vkbuf, k_block_length, conj)
             else
-                _dot_gather!(gptr, vstorage, vbase, vkbuf, kblock, identity)
+                _dot_gather!(gptr, vstorage, vbase, vkbuf, k_block_length, identity)
             end
 
             q0 = 0
             while q0 < Qf
                 qcount = min(blocklen, Qf - q0)
                 fill_offsets!((bufM, bufC), g, q0, qcount)
-                # The matrix's K offsets are `pc .. pc+kblock-1` (unit ramp).
-                checked_span_bounds(mbase, _buffer_range(bufM, qcount), (pc, pc + kblock - 1), lenm)
+                # The matrix's K offsets are
+                # `k_block_start .. k_block_start+k_block_length-1` (unit ramp).
+                checked_span_bounds(mbase, _buffer_range(bufM, qcount), (k_block_start, k_block_start + k_block_length - 1), lenm)
                 checked_span_bounds(cbase, _buffer_range(bufC, qcount), (0, 0), lenc)
                 if mconj
                     _dot_block!(
-                        Cstorage, cbase, bufC, mptr, mbase + pc, bufM, qcount, gptr, kblock,
+                        Cstorage, cbase, bufC, mptr, mbase + k_block_start, bufM, qcount, gptr, k_block_length,
                         alphaT, beta_eff, Val(W), Val(NB), Val(true)
                     )
                 else
                     _dot_block!(
-                        Cstorage, cbase, bufC, mptr, mbase + pc, bufM, qcount, gptr, kblock,
+                        Cstorage, cbase, bufC, mptr, mbase + k_block_start, bufM, qcount, gptr, k_block_length,
                         alphaT, beta_eff, Val(W), Val(NB), Val(false)
                     )
                 end
@@ -161,23 +162,23 @@ function _dot_nest!(
             end
 
             firstblock = false
-            pc += kblock
+            k_block_start += k_block_length
         end
     end
     return nothing
 end
 
 # Gather the transformed vector into `gptr`; for a complex `T` also its
-# pair-swapped copy at `gptr + kblock`, which gives the imaginary part without
-# a per-step shuffle.
+# pair-swapped copy at `gptr + k_block_length`, which gives the imaginary part
+# without a per-step shuffle.
 @inline function _dot_gather!(
-        gptr::Ptr{T}, vstorage::SV, vbase::Int, vkbuf::Vector{Int}, kblock::Int, transform::F
+        gptr::Ptr{T}, vstorage::SV, vbase::Int, vkbuf::Vector{Int}, k_block_length::Int, transform::F
     ) where {T, SV, F}
-    @inbounds for t in 0:(kblock - 1)
+    @inbounds for t in 0:(k_block_length - 1)
         z = convert(T, transform(vstorage[vbase + vkbuf[t + 1] + 1]))
         unsafe_store!(gptr + sizeof(T) * t, z)
         if T <: Complex
-            unsafe_store!(gptr + sizeof(T) * (kblock + t), Complex(imag(z), real(z)))
+            unsafe_store!(gptr + sizeof(T) * (k_block_length + t), Complex(imag(z), real(z)))
         end
     end
     return nothing
@@ -187,14 +188,14 @@ end
 # the last valid one (computed, never stored).
 @inline function _dot_block!(
         Cstorage::SC, cbase::Int, bufC::Vector{Int}, mptr::Ptr{T}, mbase_k::Int,
-        bufM::Vector{Int}, qcount::Int, gptr::Ptr{T}, kblock::Int,
+        bufM::Vector{Int}, qcount::Int, gptr::Ptr{T}, k_block_length::Int,
         alpha::T, beta::T, ::Val{W}, ::Val{NB}, ::Val{MCONJ}
     ) where {SC, T, W, NB, MCONJ}
     q = 0
     while q < qcount
         nvalid = min(NB, qcount - q)
         mbases = _dot_bases(bufM, q, nvalid, mbase_k, Val(NB))
-        sums = _dot_group(mptr, gptr, mbases, kblock, Val(W), Val(NB))
+        sums = _dot_group(mptr, gptr, mbases, k_block_length, Val(W), Val(NB))
         @inbounds for j in 1:nvalid
             s = MCONJ ? conj(sums[j]) : sums[j]
             _axpby_at!(Cstorage, cbase + bufC[q + j] + 1, alpha, s, beta)
@@ -218,18 +219,18 @@ end
 # bodies are `@generated` so every tuple index is a literal.
 
 @inline function _dot_group(
-        mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, kblock::Int, ::Val{W}, ::Val{NB}
+        mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, k_block_length::Int, ::Val{W}, ::Val{NB}
     ) where {T <: Real, NB, W}
     accs = ntuple(_ -> zero(Vec{W, T}), Val(NB))
-    kmain = (kblock ÷ W) * W
+    kmain = (k_block_length ÷ W) * W
     t = 0
     while t < kmain
         accs = _dot_step_real(accs, mptr, gptr, mbases, t, nothing)
         t += W
     end
     # Masked-off lanes are never read, so nothing past a row's end is touched.
-    if t < kblock
-        accs = _dot_step_real(accs, mptr, gptr, mbases, t, _dot_tailmask(Val(W), kblock - t))
+    if t < k_block_length
+        accs = _dot_step_real(accs, mptr, gptr, mbases, t, _dot_tailmask(Val(W), k_block_length - t))
     end
     return _dot_reduce_real(accs)
 end
@@ -270,21 +271,21 @@ end
 # so two FMAs per matrix vector and no shuffle. `accs[NB+j]` is `P2_j`.
 
 @inline function _dot_group(
-        mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, kblock::Int, ::Val{W}, ::Val{NB}
+        mptr::Ptr{T}, gptr::Ptr{T}, mbases::NTuple{NB, Int}, k_block_length::Int, ::Val{W}, ::Val{NB}
     ) where {T <: Complex, NB, W}
     R = real(T)
     WC = W ÷ 2
     accs = ntuple(_ -> zero(Vec{W, R}), Val(2 * NB))
-    kmain = (kblock ÷ WC) * WC
+    kmain = (k_block_length ÷ WC) * WC
     t = 0
     while t < kmain
-        accs = _dot_step_cplx(accs, mptr, gptr, gptr + sizeof(T) * kblock, mbases, t, nothing)
+        accs = _dot_step_cplx(accs, mptr, gptr, gptr + sizeof(T) * k_block_length, mbases, t, nothing)
         t += WC
     end
-    if t < kblock
+    if t < k_block_length
         accs = _dot_step_cplx(
-            accs, mptr, gptr, gptr + sizeof(T) * kblock, mbases, t,
-            _dot_tailmask(Val(W), 2 * (kblock - t))
+            accs, mptr, gptr, gptr + sizeof(T) * k_block_length, mbases, t,
+            _dot_tailmask(Val(W), 2 * (k_block_length - t))
         )
     end
     return _dot_reduce_cplx(accs, T)

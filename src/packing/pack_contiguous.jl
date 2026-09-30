@@ -32,12 +32,12 @@ end
 # Real A: one `Vec{MR}` load/convert/store per K step.
 @inline function _pack_a_contiguous!(
         packed::PackedPanel{T}, storage::DenseVector{S}, rowbase::Int, cols::C,
-        ::Val{MR}, kc::Int
+        ::Val{MR}, k_block_length::Int
     ) where {T, S, C, MR}
     GC.@preserve storage begin
         sp = pointer(storage)
         dp = packed.ptr
-        for p in 0:(kc - 1)
+        for p in 0:(k_block_length - 1)
             v = vload(Vec{MR, S}, sp + sizeof(S) * (rowbase + axis_offset(cols, p)))
             vstore(convert(Vec{MR, T}, v), dp + sizeof(T) * (MR * p))
         end
@@ -115,14 +115,14 @@ _single_region_shuffle(::InterleavedFormat) = _onee_pack_shuffle_a
 # lanes convert to `R` before the shuffle.
 @inline function _pack_complex_contiguous!(
         format::Union{PlanarFormat, InterleavedFormat}, packed::PackedPanel{R},
-        storage::DenseVector{Complex{RS}}, elembase::Int, steps::C, ::Val{PD}, kc::Int,
+        storage::DenseVector{Complex{RS}}, elembase::Int, steps::C, ::Val{PD}, k_block_length::Int,
         transform::F
     ) where {R, RS, C, PD, F}
     shuffle = _single_region_shuffle(format)
     GC.@preserve storage begin
         sp = reinterpret(Ptr{RS}, pointer(storage))
         dp = packed.ptr
-        for p in 0:(kc - 1)
+        for p in 0:(k_block_length - 1)
             src = convert(
                 Vec{2 * PD, R},
                 vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + axis_offset(steps, p))))
@@ -138,12 +138,12 @@ end
 
 @inline function _pack_complex_contiguous!(
         ::OneEFormat, packed::PackedPanel{R}, storage::DenseVector{Complex{RS}},
-        elembase::Int, steps::C, ::Val{PD}, kc::Int, transform::F
+        elembase::Int, steps::C, ::Val{PD}, k_block_length::Int, transform::F
     ) where {R, RS, C, PD, F}
     GC.@preserve storage begin
         sp = reinterpret(Ptr{RS}, pointer(storage))
         dp = packed.ptr
-        for p in 0:(kc - 1)
+        for p in 0:(k_block_length - 1)
             src = convert(
                 Vec{2 * PD, R},
                 vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + axis_offset(steps, p))))

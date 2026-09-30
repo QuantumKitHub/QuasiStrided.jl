@@ -70,10 +70,10 @@ end
             @test !_dot_takes(plan_contract(mk()...))
         end
     end
-    # N = 1: K tails, several K blocks (`kc = 64`) and output blocks (`mc = 7`).
+    # N = 1: K tails, several K blocks (`k_block = 64`) and output blocks (`m_block = 7`).
     W = QuasiStrided._dot_lanewidth(T)
     for (d, K) in ((3, W), (5, 3W - 1), (2, 1000)), (alpha, beta) in ab
-        _dot_check(_dot_n1_maker(T, d, K, 3K + d), alpha, beta; kc = 64, mc = 7)
+        _dot_check(_dot_n1_maker(T, d, K, 3K + d), alpha, beta; k_block = 64, m_block = 7)
     end
     # A scalar output, C[] = sum_k a[k] b[k].
     K = 5W + 3
@@ -111,7 +111,7 @@ end
 end
 
 @testset "dot path: allocation-free, and through the backend ($T)" for T in _DOT_TYPES
-    for (mk, kw) in ((_dot_gemv_maker(T, 6, 4), (;)), (_dot_n1_maker(T, 5, 300, 4), (kc = 64, mc = 8)))
+    for (mk, kw) in ((_dot_gemv_maker(T, 6, 4), (;)), (_dot_n1_maker(T, 5, 300, 4), (k_block = 64, m_block = 8)))
         plan = plan_contract(mk()...; oracle = false, kw...)
         @test _dot_takes(plan)
         execute!(plan, 1.0, 0.0)

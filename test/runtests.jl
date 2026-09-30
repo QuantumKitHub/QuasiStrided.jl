@@ -3,7 +3,7 @@ using Random
 using QuasiStrided
 # Internal names the test files use unqualified.
 using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescriptor,
-    describe_block, block_descriptors!, normalize_group, KernelDescriptor, mr, nr,
+    describe_block, block_descriptors!, normalize_group, KernelDescriptor, tile_size,
     scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
     AffineAxis, ScatterAxis, SourceTile, DestinationTile, axis_from_descriptor, nrows,
     ncols, axis_offset_range, checked_tile_storage_bounds, pack_a!, pack_b!,
@@ -12,7 +12,7 @@ using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescrip
     target_profile, cache_topology, unknown_target, _detect_isa, _detect_target,
     _derived_shape, _fallback_shape, _shape_override, _kernel_for, _default_kernel,
     _fallback_blocking, kernel_shapes, _parse_size, _count_cpu_list, NR_DEFAULT,
-    _rule_applies, _isa_nregisters, packed_a_per_k, packed_b_per_k, realtype,
+    _rule_applies, _isa_nregisters, sliver_widths, realtype,
     complex_method, RealMethod, PlanarMethod, OneMMethod, accumulator_planes, a_reals,
     b_reals, FMAddSubMethod, _modelled_blocking, _scale_blocking, _real_blocking_row,
     _planar_pressure, _pack_split, _NestPath

@@ -62,7 +62,7 @@ end
     end
     # Composite M, several N blocks; and a singleton M beside a long N, which
     # swaps roles and runs on the 9-long N with a scalar tail.
-    for (mk, kw) in ((_outer_maker(T, 32, 40, 50; variant = :multiM), (nc = 6,)), (_outer_maker(T, 1, 9, 77), (;)))
+    for (mk, kw) in ((_outer_maker(T, 32, 40, 50; variant = :multiM), (n_block = 6,)), (_outer_maker(T, 1, 9, 77), (;)))
         C_out, plan = _run_fresh(execute!, mk, 1.5, 0.5; kw...)
         @test _outer_takes(plan) == (axis_length(plan.mgroup) >= W)
         @test C_out ≈ _ref_of(mk, 1.5, 0.5)
@@ -86,7 +86,7 @@ end
         @test_throws BoundsError execute!(plan, 1.0, 0.0)
         @test all(iszero, plan.Cstorage)
     end
-    plan = plan_contract(_outer_maker(T, 64, 50, 6)()...; oracle = false, nc = 12)
+    plan = plan_contract(_outer_maker(T, 64, 50, 6)()...; oracle = false, n_block = 12)
     @test _outer_takes(plan)
     execute!(plan, 1.0, 0.0)
     @test (@allocated execute!(plan, 1.0, 0.0)) == 0 skip = (VERSION < v"1.11")

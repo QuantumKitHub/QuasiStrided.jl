@@ -86,20 +86,20 @@ end
 
 # Buffer lengths for `kernel` at the effective `blocking`, shared by the
 # constructors and `reserve!`. GUARDRAIL: `packed_a_length` already counts
-# reals, the sliver counts are in logical `mr`/`nr`; do not rescale either.
+# reals, the sliver counts are in logical `m_tile`/`n_tile`; do not rescale
+# either.
 @inline function _workspace_sizes(kernel, blocking::Blocking)
-    MRk = mr(kernel)
-    NRk = nr(kernel)
-    kc = blocking.kc
-    pa = packed_a_length(kernel, kc)
-    pb = packed_b_length(kernel, kc)
-    m_slivers = cld(blocking.mc, MRk)
-    n_slivers = cld(blocking.nc, NRk)
+    m_tile, n_tile = tile_size(kernel)
+    k_block = blocking.k_block
+    pa = packed_a_length(kernel, k_block)
+    pb = packed_b_length(kernel, k_block)
+    m_tiles = cld(blocking.m_block, m_tile)
+    n_tiles = cld(blocking.n_block, n_tile)
     return (
-        mc = blocking.mc, nc = blocking.nc, kc = kc,
-        mr = MRk, nr = NRk,
-        m_slivers = m_slivers, n_slivers = n_slivers,
-        packed_a = m_slivers * pa, packed_b = n_slivers * pb,
+        m_block = blocking.m_block, n_block = blocking.n_block, k_block = k_block,
+        m_tile = m_tile, n_tile = n_tile,
+        m_tiles = m_tiles, n_tiles = n_tiles,
+        packed_a = m_tiles * pa, packed_b = n_tiles * pb,
         tw_packed_a = pa, tw_packed_b = pb,
     )
 end
@@ -122,14 +122,14 @@ end
         packed_a::VT, packed_b::VT, tw_packed_a::VT, tw_packed_b::VT, c_panel::PT
     ) where {T, F, VT <: AbstractVector, PT <: AbstractVector}
     return ContractWorkspace{T, VT, PT}(
-        ints(s.mc), ints(s.mc),
-        ints(s.nc), ints(s.nc),
-        ints(s.kc), ints(s.kc),
-        _alloc_descriptors(s.m_slivers), _alloc_descriptors(s.m_slivers),
-        _alloc_descriptors(s.n_slivers), _alloc_descriptors(s.n_slivers),
+        ints(s.m_block), ints(s.m_block),
+        ints(s.n_block), ints(s.n_block),
+        ints(s.k_block), ints(s.k_block),
+        _alloc_descriptors(s.m_tiles), _alloc_descriptors(s.m_tiles),
+        _alloc_descriptors(s.n_tiles), _alloc_descriptors(s.n_tiles),
         packed_a, packed_b,
-        ints(s.mr), ints(s.mr),
-        ints(s.nr), ints(s.nr),
+        ints(s.m_tile), ints(s.m_tile),
+        ints(s.n_tile), ints(s.n_tile),
         ints(ntw), ints(ntw),
         tw_packed_a, tw_packed_b, c_panel,
     )
@@ -154,7 +154,7 @@ function ContractWorkspace(
     s = _workspace_sizes(kernel, blocking)
     R = realtype(kernel)
     return _build_workspace(
-        T, s, oracle ? s.kc : 0, n -> Vector{Int}(undef, n),
+        T, s, oracle ? s.k_block : 0, n -> Vector{Int}(undef, n),
         Vector{R}(undef, s.packed_a), Vector{R}(undef, s.packed_b),
         Vector{R}(undef, oracle ? s.tw_packed_a : 0),
         Vector{R}(undef, oracle ? s.tw_packed_b : 0), Vector{T}(undef, panel),
@@ -175,7 +175,7 @@ function ContractWorkspace(
     c_panel = _alloc_temp(T, panel, allocator)
 
     return _build_workspace(
-        T, s, oracle ? s.kc : 0, n -> _alloc_offsets(n, allocator),
+        T, s, oracle ? s.k_block : 0, n -> _alloc_offsets(n, allocator),
         packed_a, packed_b, tw_packed_a, tw_packed_b, c_panel
     )
 end
@@ -196,30 +196,30 @@ function reserve!(
     ) where {T, R}
     s = _workspace_sizes(kernel, blocking)
 
-    _grow!(ws.m_buf_A, s.mc)
-    _grow!(ws.m_buf_C, s.mc)
-    _grow!(ws.n_buf_B, s.nc)
-    _grow!(ws.n_buf_C, s.nc)
-    _grow!(ws.k_buf_A, s.kc)
-    _grow!(ws.k_buf_B, s.kc)
+    _grow!(ws.m_buf_A, s.m_block)
+    _grow!(ws.m_buf_C, s.m_block)
+    _grow!(ws.n_buf_B, s.n_block)
+    _grow!(ws.n_buf_C, s.n_block)
+    _grow!(ws.k_buf_A, s.k_block)
+    _grow!(ws.k_buf_B, s.k_block)
 
-    _grow!(ws.m_desc_A, s.m_slivers)
-    _grow!(ws.m_desc_C, s.m_slivers)
-    _grow!(ws.n_desc_B, s.n_slivers)
-    _grow!(ws.n_desc_C, s.n_slivers)
+    _grow!(ws.m_desc_A, s.m_tiles)
+    _grow!(ws.m_desc_C, s.m_tiles)
+    _grow!(ws.n_desc_B, s.n_tiles)
+    _grow!(ws.n_desc_C, s.n_tiles)
 
     _grow!(ws.packed_a, s.packed_a)
     _grow!(ws.packed_b, s.packed_b)
 
-    _grow!(ws.tile_m_buf_A, s.mr)
-    _grow!(ws.tile_m_buf_C, s.mr)
-    _grow!(ws.tile_n_buf_B, s.nr)
-    _grow!(ws.tile_n_buf_C, s.nr)
+    _grow!(ws.tile_m_buf_A, s.m_tile)
+    _grow!(ws.tile_m_buf_C, s.m_tile)
+    _grow!(ws.tile_n_buf_B, s.n_tile)
+    _grow!(ws.tile_n_buf_C, s.n_tile)
     _grow!(ws.c_panel, panel)
 
     if oracle
-        _grow!(ws.tw_k_buf_A, s.kc)
-        _grow!(ws.tw_k_buf_B, s.kc)
+        _grow!(ws.tw_k_buf_A, s.k_block)
+        _grow!(ws.tw_k_buf_B, s.k_block)
         _grow!(ws.tw_packed_a, s.tw_packed_a)
         _grow!(ws.tw_packed_b, s.tw_packed_b)
     end

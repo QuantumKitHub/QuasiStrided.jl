@@ -2,7 +2,7 @@
 # panel. The kernels consume B one (complex) scalar at a time and broadcast
 # it, so any K axis, column offsets and `AbstractVector` storage work.
 # Packing B buys locality and padding columns at an O(N*K) gather per
-# (jc, pc) block, which at small M costs as much as the kernel itself.
+# (N, K) block, which at small M costs as much as the kernel itself.
 
 # Stands in for a packed B micro-panel of `NR` columns: column `j`, K step
 # `p` is storage address `colbase[j+1] + axis_offset(ksteps, p)` (base
@@ -52,7 +52,7 @@ const _UNPACKED_B_MODE = Ref{Symbol}(:auto)
 
 # Whether B is read in place (given an eligible kernel): small M, and every B
 # column contiguous along K. Packing pays off only through reuse across M
-# slivers, while `nr` contiguous columns read in place cost the kernel
+# slivers, while `n_tile` contiguous columns read in place cost the kernel
 # nothing. A large K stride in B (each step its own cache line, and for a
 # power of two only a few L1 sets) is what packing exists for.
 @inline function _unpacked_b_rule(mgroup::AxisGroup, kgroup::AxisGroup)
@@ -67,46 +67,46 @@ end
 # Beyond this M the packed B's reuse wins.
 const _UNPACKED_B_MMAX = 256
 
-# The view for one N sliver; `buf`/`sfirst` locate an irregular sliver's
+# The view for one N sliver; `buf`/`n_tile_start` locate an irregular sliver's
 # offsets in `ws.n_buf_B`.
 @inline function _unpacked_b_view(
         kernel::DescriptorKernel{MR, NR, T}, storage::S, base::Int,
-        d::BlockDescriptor, buf::Vector{Int}, sfirst::Int, ksteps::K, transform::F
+        d::BlockDescriptor, buf::Vector{Int}, n_tile_start::Int, ksteps::K, transform::F
     ) where {MR, NR, T, S, K <: Axis, F}
     last = d.count - 1
     colbase = ntuple(Val(NR)) do j1
         jj = min(j1 - 1, last)
-        off = d.regular ? d.base + jj * d.stride : (@inbounds buf[sfirst + jj + 1])
+        off = d.regular ? d.base + jj * d.stride : (@inbounds buf[n_tile_start + jj + 1])
         base + off
     end
-    return UnpackedBView(storage, colbase, ksteps, packed_b_per_k(kernel), transform)
+    return UnpackedBView(storage, colbase, ksteps, sliver_widths(kernel)[2], transform)
 end
 
-# Loops 2/1 of `_execute_nest!` with B read in place. A barrier over the K
+# The tile loops of `_execute_nest!` with B read in place. A barrier over the K
 # axis type, so each view is concretely typed. `@noinline` so that the
 # packed-B nest does not grow by this body. The view's addresses are within
 # the caller's B check.
 @noinline function _micro_tiles_unpacked_b!(
-        kernel::K, plan::ContractPlan, ws, rowsB_k::KA, m_slivers::Int, n_slivers::Int,
-        MRk::Int, NRk::Int, MRp::Int, kblock::Int, alphaT, beta_eff,
+        kernel::K, plan::ContractPlan, ws, rowsB_k::KA, m_tiles::Int, n_tiles::Int,
+        m_tile::Int, n_tile::Int, a_sliver_width::Int, k_block_length::Int, alphaT, beta_eff,
         aff_mC::Val{MC}, aff_nC::Val{NC}
     ) where {K, KA <: Axis, MC, NC}
     Bstorage = plan.Bstorage
     Bbase = plan.Bbase
     btransform = plan.btransform
-    for s in 0:(n_slivers - 1)
-        sfirst = s * NRk
-        colsC = _axis_of(ws.n_desc_C[s + 1], ws.n_buf_C, sfirst, aff_nC)
+    for n_tile_index in 0:(n_tiles - 1)
+        n_tile_start = n_tile_index * n_tile
+        colsC = _axis_of(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC)
         bview = _unpacked_b_view(
-            kernel, Bstorage, Bbase, ws.n_desc_B[s + 1], ws.n_buf_B, sfirst, rowsB_k, btransform
+            kernel, Bstorage, Bbase, ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, rowsB_k, btransform
         )
-        for r in 0:(m_slivers - 1)
-            rfirst = r * MRk
-            rowsC = _axis_of(ws.m_desc_C[r + 1], ws.m_buf_C, rfirst, aff_mC)
-            apanel = _sliver_panel(ws.packed_a, MRp, kblock, r)
+        for m_tile_index in 0:(m_tiles - 1)
+            m_tile_start = m_tile_index * m_tile
+            rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
+            apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
             unsafe_execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                apanel, bview, kblock, alphaT, beta_eff
+                apanel, bview, k_block_length, alphaT, beta_eff
             )
         end
     end

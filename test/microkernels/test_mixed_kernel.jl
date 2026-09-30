@@ -9,12 +9,12 @@ mk_pack_b(::RealComplexKernel, B) = mk_cols(c -> mk_ilv(real(c), imag(c)), permu
 function mk_read(k::ComplexRealKernel, acc, i, j)
     W = lanewidth(k)
     v, u = divrem(i, W ÷ 2)
-    vec = acc[v + (2 * mr(k) ÷ W) * j + 1]
+    vec = acc[v + (2 * tile_size(k)[1] ÷ W) * j + 1]
     return Complex(vec[2u + 1], vec[2u + 2])
 end
 function mk_read(k::RealComplexKernel, acc, i, j)
     W = lanewidth(k)
-    MV = mr(k) ÷ W
+    MV = tile_size(k)[1] ÷ W
     v, u = divrem(i, W)
     return Complex(acc[v + MV * 2j + 1][u + 1], acc[v + MV * (2j + 1) + 1][u + 1])
 end
@@ -35,7 +35,7 @@ end
         rc = RealComplexKernel(Val(8), Val(4), ComplexF64)
         @test cr.inner isa SIMDKernel{16, 4, Float32, 8}
         @test rc.inner isa SIMDKernel{8, 8, Float64, 4}
-        @test (packed_a_per_k(cr), packed_b_per_k(cr), packed_a_per_k(rc), packed_b_per_k(rc)) == (16, 4, 8, 8)
+        @test (sliver_widths(cr)..., sliver_widths(rc)...) == (16, 4, 8, 8)
         @test_throws ArgumentError ComplexRealKernel(Val(3), Val(4), ComplexF64, Val(3))  # odd W
         @test_throws ArgumentError RealComplexKernel(Val(6), Val(4), ComplexF64, Val(4))
         @test_throws ArgumentError ComplexRealKernel(Val(8), Val(4), Float64)
@@ -52,17 +52,17 @@ end
         k = K(Val(MR), Val(NR), T, Val(W))
         R = real(T)
         rng = MersenneTwister(7)
-        kc, lda = 6, MR + 2
-        Av, Bv = rand(rng, SA, lda * kc + 1), rand(rng, SB, kc * NR)
+        k_block_length, lda = 6, MR + 2
+        Av, Bv = rand(rng, SA, lda * k_block_length + 1), rand(rng, SB, k_block_length * NR)
         for f in (identity, conj), (m, n) in ((MR, NR), (MR - 1, NR - 1)), panel in (false, true)
-            srcA = SourceTile(Av, 1, AffineAxis(0, 1, m), AffineAxis(0, lda, kc))
-            srcB = SourceTile(Bv, 0, AffineAxis(0, NR, kc), AffineAxis(0, 1, n))
-            A = zeros(T, MR, kc)
-            B = zeros(T, kc, NR)
-            A[1:m, :] = f.(reshape(Av[2:(1 + lda * kc)], lda, kc)[1:m, :])
-            B[:, 1:n] = f.(permutedims(reshape(Bv, NR, kc))[:, 1:n])
+            srcA = SourceTile(Av, 1, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
+            srcB = SourceTile(Bv, 0, AffineAxis(0, NR, k_block_length), AffineAxis(0, 1, n))
+            A = zeros(T, MR, k_block_length)
+            B = zeros(T, k_block_length, NR)
+            A[1:m, :] = f.(reshape(Av[2:(1 + lda * k_block_length)], lda, k_block_length)[1:m, :])
+            B[:, 1:n] = f.(permutedims(reshape(Bv, NR, k_block_length))[:, 1:n])
             TA, TB = mk_optypes(k)
-            pa, pb = zeros(R, packed_a_length(k, kc)), zeros(R, packed_b_length(k, kc))
+            pa, pb = zeros(R, packed_a_length(k, k_block_length)), zeros(R, packed_b_length(k, k_block_length))
             GC.@preserve pa pb begin
                 dpa = panel ? packed_panel(pa, 1, length(pa)) : pa
                 dpb = panel ? packed_panel(pb, 1, length(pb)) : pb
@@ -73,7 +73,7 @@ end
             alpha, beta = T(1.5, -0.5), T(0.25, 1)
             C0 = rand(rng, T, m * n)
             got = mk_dense(copy(C0))
-            execute_tile!(k, DestinationTile(got, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n)), pa, pb, kc, alpha, beta)
+            execute_tile!(k, DestinationTile(got, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n)), pa, pb, k_block_length, alpha, beta)
             @test mk_close(got, alpha .* vec((A * B)[1:m, 1:n]) .+ beta .* C0, T)
         end
     end
@@ -95,7 +95,7 @@ end
                 C = copy(C0)
                 plan = plan_contract(
                     StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
-                    kernel = k, kc = 16, conjA = cA, conjB = cB, accumulator = acc
+                    kernel = k, k_block = 16, conjA = cA, conjB = cB, accumulator = acc
                 )
                 execute!(plan, alpha, beta)
                 want = alpha .* ((cA ? conj.(A) : A) * (cB ? conj.(B) : B)) .+ beta .* C0

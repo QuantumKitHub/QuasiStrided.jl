@@ -201,11 +201,11 @@ Base.IndexStyle(::Type{<:CountingStorage}) = IndexLinear()
         (1, 3); kernel = kernel
     )
 
-    # One (jc, pc, ic) block, so the hoisted checks run once.
-    @test base.blocking.mc >= Ma && base.blocking.nc >= Na && base.blocking.kc >= Ka
-    m_slivers = cld(Ma, mr(kernel))
-    n_slivers = cld(Na, nr(kernel))
-    ntiles = m_slivers * n_slivers
+    # One (N, K, M) block, so the hoisted checks run once.
+    @test base.blocking.m_block >= Ma && base.blocking.n_block >= Na && base.blocking.k_block >= Ka
+    m_tiles = cld(Ma, tile_size(kernel)[1])
+    n_tiles = cld(Na, tile_size(kernel)[2])
+    ntiles = m_tiles * n_tiles
     @test ntiles >= 20   # a per-tile check would be at least this many calls
 
     cstore = CountingStorage(zeros(Ma * Na))
@@ -286,18 +286,18 @@ end
     base = _pcf_plan(Cv, Av, (1, 2), Bv, (2, 3, 4), (1, 3, 4); kernel = kernel)
     @test base.Astorage === parent(Av)                   # no M/N swap: M's run is 20 >= 8
     @test !first(QS.affine_ramp(base.ngroup))            # the buffer path, not the ramp path
-    Qn = axis_length(base.ngroup)
-    @test Qn == N1 * N2
-    @test base.blocking.nc >= Qn                         # one jc block, so 7 slivers
-    nsliv = cld(Qn, nr(kernel))
+    n_length = axis_length(base.ngroup)
+    @test n_length == N1 * N2
+    @test base.blocking.n_block >= n_length                         # one N block, so 7 slivers
+    nsliv = cld(n_length, tile_size(kernel)[2])
     @test nsliv == 7
 
-    noffs = [offsets(base.ngroup, q)[2] for q in 0:(Qn - 1)]
+    noffs = [offsets(base.ngroup, q)[2] for q in 0:(n_length - 1)]
     binding = argmax(noffs) - 1                          # zero-based logical coordinate
     @test binding == N1 - 1
-    @test 0 < binding ÷ nr(kernel) < nsliv - 1           # a strictly interior sliver
-    @test maximum(noffs[1:nr(kernel)]) < noffs[binding + 1]                 # not the first
-    @test maximum(noffs[(1 + (nsliv - 1) * nr(kernel)):end]) < noffs[binding + 1]  # not the last
+    @test 0 < binding ÷ tile_size(kernel)[2] < nsliv - 1           # a strictly interior sliver
+    @test maximum(noffs[1:tile_size(kernel)[2]]) < noffs[binding + 1]                 # not the first
+    @test maximum(noffs[(1 + (nsliv - 1) * tile_size(kernel)[2]):end]) < noffs[binding + 1]  # not the last
 
     _pcf_exec(base, 1.0, 0.0)
     ref = zeros(M, N1, N2)
@@ -319,7 +319,7 @@ end
     # A first- or last-sliver-only range would accept it.
     moffs = [offsets(base.mgroup, q)[2] for q in 0:(axis_length(base.mgroup) - 1)]
     mrange = (minimum(moffs), maximum(moffs))
-    NR = nr(kernel)
+    NR = tile_size(kernel)[2]
     truerange = (minimum(noffs), maximum(noffs))
     firstonly = (minimum(noffs[1:NR]), maximum(noffs[1:NR]))
     lastonly = let tail = noffs[(1 + (nsliv - 1) * NR):end]
@@ -509,7 +509,7 @@ end
     # Several macro blocks, so ramp descriptors start at a nonzero `first`.
     check(
         (40, 30), (40, 21), (21, 30), (1, 2), (2, 3), (1, 3);
-        kernel = kernel, mc = 8, kc = 5, nc = 6
+        kernel = kernel, m_block = 8, k_block = 5, n_block = 6
     )
     # Non-ramp composites on both sides (rank-4 operands, non-folding order).
     d = 5

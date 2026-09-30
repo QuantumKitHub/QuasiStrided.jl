@@ -134,7 +134,7 @@ end
         @test C == beta .* Array(mk()[1])
     end
     # beta = 0 never reads a NaN C, across several blocks.
-    C, _ = _run_fresh(execute!, _mm_maker(Float64, 11, 10, 9, 2; Cfill = NaN), 2.5, 0.0; mc = 4, kc = 4, nc = 4)
+    C, _ = _run_fresh(execute!, _mm_maker(Float64, 11, 10, 9, 2; Cfill = NaN), 2.5, 0.0; m_block = 4, k_block = 4, n_block = 4)
     @test C ≈ _ref_of(_mm_maker(Float64, 11, 10, 9, 2), 2.5, 0.0)
     # Empty M or N: a no-op.
     for (M, N) in ((3, 0), (0, 3))
@@ -151,7 +151,7 @@ end
         @test C ≈ _ref_of(mk, 1.5, 0.5)
     end
     # Block sizes beyond the extents are clamped, not an error.
-    C, _ = _run_fresh(execute!, _mm_maker(Float64, 9, 7, 6, 4), 1.0, 0.5; kernel = ScalarKernel(Val(4), Val(3), Float64), mc = 10_000, kc = 10_000, nc = 10_000)
+    C, _ = _run_fresh(execute!, _mm_maker(Float64, 9, 7, 6, 4), 1.0, 0.5; kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 10_000, k_block = 10_000, n_block = 10_000)
     @test C ≈ _ref_of(_mm_maker(Float64, 9, 7, 6, 4), 1.0, 0.5)
 end
 
@@ -183,7 +183,7 @@ end
     p = _mm_plan(Cmat, Amat, Bmat)
     plans = (
         p, _mm_plan(Cmat, Amat, Bmat; workspace = p.workspace, oracle = false),
-        _mm_plan(Cmat, Amat, Bmat; kernel = kernel, mc = 16, kc = 5, nc = 8),
+        _mm_plan(Cmat, Amat, Bmat; kernel = kernel, m_block = 16, k_block = 5, n_block = 8),
         ContractPlan(
             p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
             p.Astorage, p.Abase, p.Bstorage, p.Bbase, p.Cstorage, p.Cbase,
@@ -200,7 +200,7 @@ end
     @test Cmat ≈ Amat * Bmat
     @test allocs_tw == 0 skip = (VERSION < v"1.11")
     # ScalarKernel's accumulator is a Matrix: bounded, one per tile call.
-    ps = _mm_plan(Cmat, Amat, Bmat; kernel = ScalarKernel(Val(4), Val(3), Float64), mc = 8, kc = 6, nc = 7)
+    ps = _mm_plan(Cmat, Amat, Bmat; kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 8, k_block = 6, n_block = 7)
     @test _steady_allocs!(execute!, ps, Cmat) <= 176 * cld(Ma, 4) * cld(Na, 3) * cld(Ka, 6) + 1
 end
 
@@ -231,7 +231,7 @@ end
 @testset "plan_contract/execute!: no union-typed or partially-applied tile/workspace types" begin
     Amat, Bmat, Cmat = randn(19, 23), randn(23, 17), zeros(19, 17)
     Av, Bv, Cv = StridedView(Amat), StridedView(Bmat), StridedView(Cmat)
-    plan = _mm_plan(Cmat, Amat, Bmat; mc = 8, kc = 6, nc = 7)
+    plan = _mm_plan(Cmat, Amat, Bmat; m_block = 8, k_block = 6, n_block = 7)
     @test isconcretetype(typeof(plan))
     @test all(isconcretetype, fieldtypes(typeof(plan.workspace)))
     @test typeof(plan.workspace) === QuasiStrided.ContractWorkspace{Float64, Vector{Float64}, Vector{Float64}}
@@ -258,11 +258,11 @@ end
 # the planner's decision at a zero L2 threshold, replanned at its block extents.
 function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
     p = plan_contract(Cv, Av, iA, Bv, iB, iC; kw...)
-    k, kc, d, T = p.kernel, p.blocking.kc, default_blocking(p.kernel), eltype(Cv)
-    split(g, map, R, eff, req) = _pack_split(g, p.kgroup, map, R, sizeof(T), T <: Complex, kc, eff, cld(req, R) * R, d.kc, 0)
-    (mc, ms) = split(p.mgroup, 1, mr(k), p.blocking.mc, something(get(kw, :mc, nothing), d.mc))
-    (nc, ns) = split(p.ngroup, 2, nr(k), p.blocking.nc, d.nc)
-    q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, mc, nc)
+    k, k_block, d, T = p.kernel, p.blocking.k_block, default_blocking(p.kernel), eltype(Cv)
+    split(g, map, R, eff, req) = _pack_split(g, p.kgroup, map, R, sizeof(T), T <: Complex, k_block, eff, cld(req, R) * R, d.k_block, 0)
+    (m_block, ms) = split(p.mgroup, 1, tile_size(k)[1], p.blocking.m_block, something(get(kw, :m_block, nothing), d.m_block))
+    (n_block, ns) = split(p.ngroup, 2, tile_size(k)[2], p.blocking.n_block, d.n_block)
+    q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, m_block, n_block)
     @assert q.mgroup == p.mgroup && q.ngroup == p.ngroup
     return ContractPlan(
         k, q.mgroup, q.ngroup, q.kgroup, q.blocking, q.Astorage, q.Abase,
@@ -274,7 +274,7 @@ end
     plan_of(d) = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...)
     p = plan_of(16)
     k, b = p.kernel, p.blocking
-    splits(cap) = QuasiStrided._is_split(_pack_split(p.mgroup, p.kgroup, 1, mr(k), 8, false, b.kc, b.mc, b.mc, default_blocking(k).kc, cap)[2])
+    splits(cap) = QuasiStrided._is_split(_pack_split(p.mgroup, p.kgroup, 1, tile_size(k)[1], 8, false, b.k_block, b.m_block, b.m_block, default_blocking(k).k_block, cap)[2])
     @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
     host = splits(QuasiStrided._split_capacity(target_profile(), true))
     @test QuasiStrided._is_split(p.mpack) == host
@@ -284,7 +284,7 @@ end
 
 @testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
     kernels = T === ComplexF64 ? (nothing, OneMKernel(Val(4), Val(4), T), FMAddSubKernel(Val(8), Val(4), T)) : (nothing,)
-    for (ind, ext, mc) in (
+    for (ind, ext, m_block) in (
                 (_SP_I7, (8, 8, 8, 3, 6, 5), nothing), (_SP_I7, (6, 8, 11, 5, 10, 7), 48),
                 (_SP_BOTH, (20, 16, 9, 20, 8), nothing), (_SP_BOTH, (13, 12, 5, 11, 12), 64),
             ), kernel in kernels, conjB in (T <: Complex ? (false, true) : (false,)), beta in (0, 0.7)
@@ -292,7 +292,7 @@ end
         Cv, Av, iA, Bv, iB, iC = _sp_views(T, ind, ext)
         iszero(beta) && fill!(Cv, NaN)
         Cref = _lo_reference(iszero(beta) ? zero(Array(Cv)) : Array(Cv), Av, iA, Bv, iB, iC; conjB, alpha = 1.3, beta)
-        plan = _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; conjB, mc, kernel)
+        plan = _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; conjB, m_block, kernel)
         @test _path_of(plan) isa _NestPath{false, <:Any, (true, ind === _SP_BOTH)}
         execute!(plan, 1.3, beta)
         @test Array(Cv) ≈ Cref rtol = 100 * eps(real(T))

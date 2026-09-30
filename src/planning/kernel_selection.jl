@@ -71,8 +71,8 @@ _real_shape(::ComplexRealMethod, (MR, NR, W)::NTuple{3, Int}) = (2 * MR, NR, W)
 _real_shape(::RealComplexMethod, (MR, NR, W)::NTuple{3, Int}) = (MR, 2 * NR, W)
 
 # The real problem the inner kernel sees: extents and C's unit-stride M run in reals.
-_real_problem(::ComplexRealMethod, Qm::Int, Qn::Int, run::Int) = (2 * Qm, Qn, 2 * run)
-_real_problem(::RealComplexMethod, Qm::Int, Qn::Int, run::Int) = (Qm, 2 * Qn, run)
+_real_problem(::ComplexRealMethod, m_length::Int, n_length::Int, run::Int) = (2 * m_length, n_length, 2 * run)
+_real_problem(::RealComplexMethod, m_length::Int, n_length::Int, run::Int) = (m_length, 2 * n_length, run)
 
 # The kernel type implementing `method` for `T`, or `nothing` (exactly the
 # pairs with a menu).
@@ -228,50 +228,50 @@ end
 @noinline _kernel_for(profile::TargetProfile, ::Type{T}) where {T} =
     _kernel_from_shape(_derived_shape(profile, T), T, _default_method(T))
 
-# The real MV = 4 shape steps down to its MV = 2 sibling when `Qm` is below one
-# tall tile, or below two and the half tile pads to fewer rows. Above `2MR` the
-# tall tile's padding excess is under 1.2x, its speed advantage.
-@inline _extent_shape(shape::NTuple{3, Int}, ::Type{T}, method, Qm::Int) where {T} = shape
+# The real MV = 4 shape steps down to its MV = 2 sibling when `m_length` is
+# below one tall tile, or below two and the half tile pads to fewer rows. Above
+# `2MR` the tall tile's padding excess is under 1.2x, its speed advantage.
+@inline _extent_shape(shape::NTuple{3, Int}, ::Type{T}, method, m_length::Int) where {T} = shape
 
-@inline function _extent_shape(shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, Qm::Int) where {T}
+@inline function _extent_shape(shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, m_length::Int) where {T}
     MR, NR, W = shape
-    (Qm > 0 && MR == 4 * W && Qm < 2 * MR) || return shape
+    (m_length > 0 && MR == 4 * W && m_length < 2 * MR) || return shape
     half = (2 * W, NR, W)
     half in kernel_shapes(T, method) || return shape
     # Below one tall tile, always: the tall shape would fall to the fitted
     # shape (two steps down) in `_default_shape`.
-    Qm < MR && return half
-    return cld(Qm, half[1]) * half[1] < cld(Qm, MR) * MR ? half : shape
+    m_length < MR && return half
+    return cld(m_length, half[1]) * half[1] < cld(m_length, MR) * MR ? half : shape
 end
 
 # The real MV = 4 shape steps down to MV = 2 when C's unit-stride run along M
 # (`run`) can't fill the tall tile's slivers but fills a half tile: a sliver
 # that is not unit-stride in C takes the scattered store, which costs more than
 # the tall tile gains. Below one half tile both scatter, and the tall one stays.
-@inline _store_shape(shape::NTuple{3, Int}, ::Type{T}, method, Qm::Int, run::Int) where {T} = shape
+@inline _store_shape(shape::NTuple{3, Int}, ::Type{T}, method, m_length::Int, run::Int) where {T} = shape
 
-@inline function _store_shape(shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, Qm::Int, run::Int) where {T}
+@inline function _store_shape(shape::NTuple{3, Int}, ::Type{T}, method::RealMethod, m_length::Int, run::Int) where {T}
     MR, NR, W = shape
-    (MR == 4 * W && Qm != run && run % MR != 0 && run >= 2 * W) || return shape
+    (MR == 4 * W && m_length != run && run % MR != 0 && run >= 2 * W) || return shape
     half = (2 * W, NR, W)
     return half in kernel_shapes(T, method) ? half : shape
 end
 
 # Small-M demotion for complex `T` on AVX-512, where the planar fitted shape is
-# the spilling `MR = 2W` tile: the native-width FMAddSub shape that pads `Qm`
-# least, ties by the larger tile. `_small_m_candidates` is the cached,
-# host-dependent half (empty where the rule does not apply).
+# the spilling `MR = 2W` tile: the native-width FMAddSub shape that pads
+# `m_length` least, ties by the larger tile. `_small_m_candidates` is the
+# cached, host-dependent half (empty where the rule does not apply).
 _small_m_candidates(::Val, ::TargetProfile, ::Type) = NTuple{3, Int}[]
 function _small_m_candidates(::Val{:avx512}, profile::TargetProfile, ::Type{T}) where {T <: Complex}
     lanes = profile.vector_bytes ÷ sizeof(real(T))
     return [shape for shape in kernel_shapes(T, FMAddSubMethod()) if shape[3] == lanes]
 end
 
-function _small_m_shape(candidates::Vector{NTuple{3, Int}}, Qm::Int)
+function _small_m_shape(candidates::Vector{NTuple{3, Int}}, m_length::Int)
     best = nothing
     for shape in candidates
         MR, NR, _ = shape
-        key = (-(cld(Qm, MR) * MR), MR * NR)
+        key = (-(cld(m_length, MR) * MR), MR * NR)
         if best === nothing || key > best[1]
             best = (key, shape)
         end
@@ -280,30 +280,31 @@ function _small_m_shape(candidates::Vector{NTuple{3, Int}}, Qm::Int)
 end
 
 # Run-length demotion (real `T` only): the vectorized store needs every
-# register sliver unit-stride in C, i.e. `Qm == run || run % mr == 0` (not
-# `mr <= run`). Otherwise demote to the largest menu shape whose `mr` divides
-# `run`, unless `Qk` is deep enough that the smaller kernel's cost dominates.
+# register sliver unit-stride in C, i.e. `m_length == run || run % m_tile == 0`
+# (not `m_tile <= run`). Otherwise demote to the largest menu shape whose
+# `m_tile` divides `run`, unless `k_length` is deep enough that the smaller
+# kernel's cost dominates.
 @inline function _demote_shape_for_run(
-        ::Type{T}, shape::NTuple{3, Int}, method, run::Int, Qm::Int, Qk::Int
+        ::Type{T}, shape::NTuple{3, Int}, method, run::Int, m_length::Int, k_length::Int
     ) where {T}
-    target = _run_demotion_target(T, shape[1], method, run, Qm, Qk)
+    target = _run_demotion_target(T, shape[1], method, run, m_length, k_length)
     return target === nothing ? shape : target
 end
 
 @inline function _demote_shape_for_run(
-        ::Type{T}, shape::NTuple{3, Int}, method::_MixedMethod, run::Int, Qm::Int, Qk::Int
+        ::Type{T}, shape::NTuple{3, Int}, method::_MixedMethod, run::Int, m_length::Int, k_length::Int
     ) where {T}
-    m, _, r = _real_problem(method, Qm, 0, run)
-    real_shape = _demote_shape_for_run(real(T), _real_shape(method, shape), RealMethod(), r, m, Qk)
+    m, _, r = _real_problem(method, m_length, 0, run)
+    real_shape = _demote_shape_for_run(real(T), _real_shape(method, shape), RealMethod(), r, m, k_length)
     return _mixed_shape(method, real_shape)
 end
 
-function _run_demotion_target(::Type{T}, mrk::Int, method, run::Int, Qm::Int, Qk::Int) where {T}
+function _run_demotion_target(::Type{T}, m_tile::Int, method, run::Int, m_length::Int, k_length::Int) where {T}
     T <: Real || return nothing
     kmax = T === Float64 ? _RUN_DEMOTE_KMAX_F64 : _RUN_DEMOTE_KMAX_F32
-    Qk > kmax && return nothing
-    Qm == run && return nothing
-    run % mrk == 0 && return nothing
+    k_length > kmax && return nothing
+    m_length == run && return nothing
+    run % m_tile == 0 && return nothing
     best = nothing
     for shape in kernel_shapes(T, method)
         m = shape[1]
@@ -314,6 +315,6 @@ function _run_demotion_target(::Type{T}, mrk::Int, method, run::Int, Qm::Int, Qk
     return best
 end
 
-# Deepest `Qk` at which run-length demotion still wins.
+# Deepest `k_length` at which run-length demotion still wins.
 const _RUN_DEMOTE_KMAX_F64 = 32
 const _RUN_DEMOTE_KMAX_F32 = 64

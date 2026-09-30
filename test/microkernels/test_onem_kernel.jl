@@ -26,20 +26,20 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEForm
         wrong = SIMDKernel(Val(12), Val(8), Float64, Val(4))
         d = ComplexKernelDescriptor(Val(12), Val(8), ComplexF64, OneEFormat(), PlanarFormat())
         @test_throws ArgumentError OneMKernel{12, 8, ComplexF64, 8, typeof(wrong)}(d, wrong)
-        # The error reports the logical kc, not the doubled real one.
+        # The error reports the logical k_block_length, not the doubled real one.
         err = try
             accumulate(k, zero_accumulator(k), Float64[], Float64[], -3)
         catch e
             e
         end
-        @test err isa ArgumentError && occursin("kc = -3", err.msg)
+        @test err isa ArgumentError && occursin("k_block_length = -3", err.msg)
     end
 
     @testset "blocking and selection" begin
         for T in (ComplexF64, ComplexF32)
             bm = default_blocking(OneMKernel(Val(8), Val(8), T, Val(8)))
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
-            @test (bm.mc, bm.kc, bm.nc) == (bp.mc ÷ 2, bp.kc, bp.nc)  # twice the packed A reals
+            @test (bm.m_block, bm.k_block, bm.n_block) == (bp.m_block ÷ 2, bp.k_block, bp.n_block)  # twice the packed A reals
             for s in kernel_shapes(T, OneMMethod())
                 @test _kernel_from_shape(s, T, OneMMethod()) isa OneMKernel{s[1], s[2], T, s[3]}
             end

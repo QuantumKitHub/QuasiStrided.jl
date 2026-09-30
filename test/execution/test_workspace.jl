@@ -30,7 +30,7 @@ end
 
 @testset "ContractWorkspace: reuse across shapes is bitwise identical to fresh plans" begin
     kernel = ScalarKernel(Val(4), Val(3), Float64)
-    mc, kc, nc = 8, 6, 7
+    m_block, k_block, n_block = 8, 6, 7
     alpha, beta = 1.75, -0.5
 
     # Not monotone: sized by the first, grown by the second, then oversized.
@@ -44,12 +44,12 @@ end
         Cstart = randn(Ma, Na)
 
         Cfresh = copy(Cstart)
-        execute!(_mm_plan(Cfresh, Amat, Bmat; kernel = kernel, mc = mc, kc = kc, nc = nc), alpha, beta)
+        execute!(_mm_plan(Cfresh, Amat, Bmat; kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block), alpha, beta)
 
         Creuse = copy(Cstart)
         plan = _mm_plan(
             Creuse, Amat, Bmat;
-            kernel = kernel, mc = mc, kc = kc, nc = nc, workspace = ws
+            kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block, workspace = ws
         )
         execute!(plan, alpha, beta)
 
@@ -72,13 +72,13 @@ end
 
 @testset "ContractWorkspace: an oversized reused buffer is not read beyond its live region" begin
     kernel = ScalarKernel(Val(4), Val(3), Float64)
-    mc, kc, nc = 8, 6, 7
+    m_block, k_block, n_block = 8, 6, 7
     alpha, beta = 2.5, -0.75
 
     Random.seed!(606)
     Abig, Bbig = randn(23, 19), randn(19, 17)
     Cbig = zeros(23, 17)
-    big = _mm_plan(Cbig, Abig, Bbig; kernel = kernel, mc = mc, kc = kc, nc = nc)
+    big = _mm_plan(Cbig, Abig, Bbig; kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block)
     execute!(big, 1.0, 0.0)
     ws = big.workspace
 
@@ -87,7 +87,7 @@ end
     Cstart = randn(Ma, Na)
 
     Cref = copy(Cstart)
-    execute!(_mm_plan(Cref, Amat, Bmat; kernel = kernel, mc = mc, kc = kc, nc = nc), alpha, beta)
+    execute!(_mm_plan(Cref, Amat, Bmat; kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block), alpha, beta)
 
     # Poison every reused buffer: a stale packed slot yields NaN, a stale
     # offset or descriptor addresses far outside the operand.
@@ -105,11 +105,11 @@ end
     Cpoisoned = copy(Cstart)
     plan = _mm_plan(
         Cpoisoned, Amat, Bmat;
-        kernel = kernel, mc = mc, kc = kc, nc = nc, workspace = ws
+        kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block, workspace = ws
     )
     @test _ws_lengths(ws) == lengths_before
-    @test length(ws.packed_a) > cld(Ma, 4) * 4 * min(kc, Ka)
-    @test length(ws.packed_b) > cld(Na, 3) * 3 * min(kc, Ka)
+    @test length(ws.packed_a) > cld(Ma, 4) * 4 * min(k_block, Ka)
+    @test length(ws.packed_b) > cld(Na, 3) * 3 * min(k_block, Ka)
 
     execute!(plan, alpha, beta)
     @test all(isfinite, Cpoisoned)
@@ -123,7 +123,7 @@ end
     Amat, Bmat = randn(Ma, Ka), randn(Ka, Na)
 
     Cmat = zeros(Ma, Na)
-    plan = _mm_plan(Cmat, Amat, Bmat; kernel = kernel, kc = 4, oracle = false)
+    plan = _mm_plan(Cmat, Amat, Bmat; kernel = kernel, k_block = 4, oracle = false)
     ws = plan.workspace
 
     @test isempty(ws.tw_packed_a)
@@ -145,7 +145,7 @@ end
     @test_throws ArgumentError execute_tilewise!(plan, 1.0, 0.0)
 
     Ctw = zeros(Ma, Na)
-    plan_tw = _mm_plan(Ctw, Amat, Bmat; kernel = kernel, kc = 4, workspace = ws, oracle = true)
+    plan_tw = _mm_plan(Ctw, Amat, Bmat; kernel = kernel, k_block = 4, workspace = ws, oracle = true)
     @test plan_tw.workspace === ws
     @test !isempty(ws.tw_packed_a)
     execute_tilewise!(plan_tw, 1.0, 0.0)
@@ -156,11 +156,11 @@ end
     Random.seed!(1717)
     kernel = SIMDKernel(Val(4), Val(3), Float64)
     Ma, Ka, Na = 19, 23, 17
-    mc, kc, nc = 8, 6, 7
+    m_block, k_block, n_block = 8, 6, 7
     Amat, Bmat = randn(Ma, Ka), randn(Ka, Na)
 
     Cdefault = zeros(Ma, Na)
-    default_plan = _mm_plan(Cdefault, Amat, Bmat; kernel = kernel, mc = mc, kc = kc, nc = nc)
+    default_plan = _mm_plan(Cdefault, Amat, Bmat; kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block)
     execute!(default_plan, 1.5, 0.0)
     @test default_plan.workspace.packed_a isa Vector{Float64}
 
@@ -170,15 +170,15 @@ end
         Cmat = zeros(Ma, Na)
         plan = _mm_plan(
             Cmat, Amat, Bmat;
-            kernel = kernel, mc = mc, kc = kc, nc = nc,
+            kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block,
             allocator = allocator, oracle = false
         )
         ws = plan.workspace
 
         @test isconcretetype(typeof(ws))
         @test all(isconcretetype, fieldtypes(typeof(ws)))
-        @test length(ws.packed_a) == cld(plan.blocking.mc, 4) * 4 * plan.blocking.kc
-        @test length(ws.packed_b) == cld(plan.blocking.nc, 3) * 3 * plan.blocking.kc
+        @test length(ws.packed_a) == cld(plan.blocking.m_block, 4) * 4 * plan.blocking.k_block
+        @test length(ws.packed_b) == cld(plan.blocking.n_block, 3) * 3 * plan.blocking.k_block
         @test isempty(ws.tw_packed_a)
         @test ws.m_buf_A isa Vector{Int}
         @test ws.k_buf_B isa Vector{Int}
@@ -195,7 +195,7 @@ end
     Cmanual = zeros(Ma, Na)
     manual_plan = _mm_plan(
         Cmanual, Amat, Bmat;
-        kernel = kernel, mc = mc, kc = kc, nc = nc, allocator = manual, oracle = false
+        kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block, allocator = manual, oracle = false
     )
     @test_throws MethodError QuasiStrided.reserve!(
         manual_plan.workspace, kernel, manual_plan.blocking, false

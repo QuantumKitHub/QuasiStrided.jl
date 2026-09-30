@@ -1,8 +1,8 @@
 # The tile-by-tile correctness oracle for `execute!`: per register tile, K in
-# `kc` panels, pack one sliver each and call the checked `execute_tile!`. Uses
-# only its own `tw_*` buffers, so it shares no mutable state with `execute!`.
-# Needs a plan built with `oracle = true`. Unlike `execute!`, rounds a C narrower
-# than the compute type once per `kc` block.
+# `k_block` panels, pack one sliver each and call the checked `execute_tile!`.
+# Uses only its own `tw_*` buffers, so it shares no mutable state with
+# `execute!`. Needs a plan built with `oracle = true`. Unlike `execute!`, rounds
+# a C narrower than the compute type once per K block.
 function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) where {T}
     ws = plan.workspace
     # `tw_packed_a` is never empty for a legal blocking unless `oracle = false`.
@@ -17,44 +17,43 @@ function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) w
     betaT = convert(T, beta)
 
     kernel = plan.kernel
-    MRk = mr(kernel)
-    NRk = nr(kernel)
+    m_tile, n_tile = tile_size(kernel)
 
-    Qm = axis_length(plan.mgroup)
-    Qn = axis_length(plan.ngroup)
-    Qk = axis_length(plan.kgroup)
+    m_length = axis_length(plan.mgroup)
+    n_length = axis_length(plan.ngroup)
+    k_length = axis_length(plan.kgroup)
 
-    (Qm == 0 || Qn == 0) && return plan.Cstorage
+    (m_length == 0 || n_length == 0) && return plan.Cstorage
 
-    if Qk == 0 || iszero(alphaT)
-        _scale_all_of_C!(plan, betaT, MRk, NRk, Qm, Qn)
+    if k_length == 0 || iszero(alphaT)
+        _scale_all_of_C!(plan, betaT, m_tile, n_tile, m_length, n_length)
         return plan.Cstorage
     end
 
     m_bufs = (ws.tile_m_buf_A, ws.tile_m_buf_C)
     n_bufs = (ws.tile_n_buf_B, ws.tile_n_buf_C)
     k_bufs = (ws.tw_k_buf_A, ws.tw_k_buf_B)
-    kc_panel = plan.blocking.kc
+    k_block = plan.blocking.k_block
 
-    mfirst = 0
-    while mfirst < Qm
-        mcount = min(MRk, Qm - mfirst)
-        (dM_A, dM_C) = block_descriptors!(m_bufs, plan.mgroup, mfirst, mcount)
+    m_tile_start = 0
+    while m_tile_start < m_length
+        m_tile_length = min(m_tile, m_length - m_tile_start)
+        (dM_A, dM_C) = block_descriptors!(m_bufs, plan.mgroup, m_tile_start, m_tile_length)
         rowsA = _axis_of(dM_A, ws.tile_m_buf_A, 0)
         rowsC = _axis_of(dM_C, ws.tile_m_buf_C, 0)
 
-        nfirst = 0
-        while nfirst < Qn
-            ncount = min(NRk, Qn - nfirst)
-            (dN_B, dN_C) = block_descriptors!(n_bufs, plan.ngroup, nfirst, ncount)
+        n_tile_start = 0
+        while n_tile_start < n_length
+            n_tile_length = min(n_tile, n_length - n_tile_start)
+            (dN_B, dN_C) = block_descriptors!(n_bufs, plan.ngroup, n_tile_start, n_tile_length)
             colsB = _axis_of(dN_B, ws.tile_n_buf_B, 0)
             colsC = _axis_of(dN_C, ws.tile_n_buf_C, 0)
 
-            kfirst = 0
+            k_block_start = 0
             firstpanel = true
-            while kfirst < Qk
-                kcount = min(kc_panel, Qk - kfirst)
-                (dK_A, dK_B) = block_descriptors!(k_bufs, plan.kgroup, kfirst, kcount)
+            while k_block_start < k_length
+                k_block_length = min(k_block, k_length - k_block_start)
+                (dK_A, dK_B) = block_descriptors!(k_bufs, plan.kgroup, k_block_start, k_block_length)
                 colsK_A = _axis_of(dK_A, ws.tw_k_buf_A, 0)
                 rowsK_B = _axis_of(dK_B, ws.tw_k_buf_B, 0)
 
@@ -71,16 +70,16 @@ function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) w
                 beta_eff = firstpanel ? betaT : one(T)
                 _execute_micro_tile!(
                     kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                    ws.tw_packed_a, ws.tw_packed_b, kcount, alphaT, beta_eff
+                    ws.tw_packed_a, ws.tw_packed_b, k_block_length, alphaT, beta_eff
                 )
 
                 firstpanel = false
-                kfirst += kcount
+                k_block_start += k_block_length
             end
 
-            nfirst += ncount
+            n_tile_start += n_tile_length
         end
-        mfirst += mcount
+        m_tile_start += m_tile_length
     end
 
     return plan.Cstorage

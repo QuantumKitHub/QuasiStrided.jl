@@ -79,11 +79,11 @@ end
 
 @inline function Base.accumulate(
         kernel::SIMDKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, T}},
-        packed_a::PA, packed_b::PB, kc::Int
+        packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, W, NV, PA, PB}
-    kc == 0 && return acc
-    kc > 0 || _throw_negative_kc(:accumulate, kc)
-    @inbounds for p in 0:(kc - 1)
+    k_block_length == 0 && return acc
+    k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
+    @inbounds for p in 0:(k_block_length - 1)
         acc = _accumulate_step(kernel, acc, packed_a, packed_b, p)
     end
     return acc

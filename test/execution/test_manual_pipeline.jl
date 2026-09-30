@@ -20,7 +20,7 @@
     Cstorage = zeros(length(Cref))
     destination = DestinationTile(Cstorage, 0, row_C, col_C)
     @test (nrows(destination), ncols(destination)) == (6, 4)
-    packed_a, packed_b = zeros(mr(kernel) * 5), zeros(nr(kernel) * 5)
+    packed_a, packed_b = zeros(tile_size(kernel)[1] * 5), zeros(tile_size(kernel)[2] * 5)
 
     Cstart = rand(MersenneTwister(1234), size(Cref)...)
     # One panel covering K, then panels of 2, 2, 1 with nontrivial alpha/beta.
@@ -51,7 +51,7 @@ end
     @test_throws BoundsError execute_tile!(k, dst, zeros(4), zeros(4), 0, 1.0, 2.0)
     @test all(==(999.0), canary)
 
-    # Undersized packed buffers are rejected, except by the kc = 0 / alpha = 0
+    # Undersized packed buffers are rejected, except by the k_block_length = 0 / alpha = 0
     # short-circuits, which never read them.
     dst = DestinationTile(zeros(4), 0, AffineAxis(0, 1, 2), AffineAxis(0, 2, 2))
     @test_throws DimensionMismatch execute_tile!(k, dst, zeros(4), zeros(4), 50, 1.0, 0.0)

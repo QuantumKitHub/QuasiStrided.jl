@@ -16,11 +16,11 @@ zero_accumulator(kernel::ScalarKernel{MR, NR, T}) where {MR, NR, T} = zeros(T, M
 # Extends `Base.accumulate` so `using QuasiStrided` does not clash with it.
 function Base.accumulate(
         kernel::ScalarKernel{MR, NR, T}, acc::AbstractMatrix{T},
-        packed_a::PA, packed_b::PB, kc::Int
+        packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, PA, PB}
-    kc == 0 && return acc
-    kc > 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
-    @inbounds for p in 0:(kc - 1)
+    k_block_length == 0 && return acc
+    k_block_length > 0 || throw(ArgumentError("accumulate requires k_block_length >= 0, got k_block_length = $k_block_length"))
+    @inbounds for p in 0:(k_block_length - 1)
         for j in 0:(NR - 1)
             bj = panel_load(packed_b, packed_b_offset(kernel, j, p))
             for i in 0:(MR - 1)

@@ -34,20 +34,20 @@ end
 
 @inline function _execute_micro_tile!(
         kernel, storage::S, base::Int, rows::R, cols::C,
-        packed_a::PA, packed_b::PB, kc_len::Int, alpha, beta
+        packed_a::PA, packed_b::PB, k_block_length::Int, alpha, beta
     ) where {PA, PB, S, R <: Axis, C <: Axis}
     destination = DestinationTile(storage, base, rows, cols)
-    execute_tile!(kernel, destination, packed_a, packed_b, kc_len, alpha, beta)
+    execute_tile!(kernel, destination, packed_a, packed_b, k_block_length, alpha, beta)
     return nothing
 end
 
 # The caller has bounds-checked the whole macro block this tile belongs to.
 @inline function unsafe_execute_micro_tile!(
         kernel, storage::S, base::Int, rows::R, cols::C,
-        packed_a::PA, packed_b::PB, kc_len::Int, alpha, beta
+        packed_a::PA, packed_b::PB, k_block_length::Int, alpha, beta
     ) where {PA, PB, S, R <: Axis, C <: Axis}
     destination = DestinationTile(storage, base, rows, cols)
-    unsafe_execute_tile!(kernel, destination, packed_a, packed_b, kc_len, alpha, beta)
+    unsafe_execute_tile!(kernel, destination, packed_a, packed_b, k_block_length, alpha, beta)
     return nothing
 end
 
@@ -59,13 +59,13 @@ end
     return nothing
 end
 
-# Sliver `s` of a packed panel at the current block's depth `kc_len`, shared by
-# the packing and the consuming step so the two cannot disagree. GUARDRAIL:
-# `reg_tile` counts reals per K step (`packed_a_per_k`), not `mr`; they differ
-# for complex kernels.
-@inline function _sliver_panel(buffer, reg_tile::Int, kc_len::Int, s::Int)
-    stride = reg_tile * kc_len
-    return packed_panel(buffer, s * stride + 1, stride)
+# Sliver `tile_index` of a packed panel at the current block's depth
+# `k_block_length`, shared by the packing and the consuming step so the two
+# cannot disagree. GUARDRAIL: `sliver_width` counts reals per K step
+# (`sliver_widths`), not the tile size; they differ for complex kernels.
+@inline function _sliver_panel(buffer, sliver_width::Int, k_block_length::Int, tile_index::Int)
+    stride = sliver_width * k_block_length
+    return packed_panel(buffer, tile_index * stride + 1, stride)
 end
 
 # Classify each register sliver of a just-filled macro block, and return the
@@ -74,22 +74,22 @@ end
 @inline function _classify_slivers!(
         desc1::Vector{BlockDescriptor}, desc2::Vector{BlockDescriptor},
         buf1::Vector{Int}, buf2::Vector{Int},
-        blocklen::Int, reg_tile::Int, nslivers::Int
+        block_length::Int, tile::Int, tile_count::Int
     )
     lo1 = typemax(Int); hi1 = typemin(Int)
     lo2 = typemax(Int); hi2 = typemin(Int)
-    for s in 0:(nslivers - 1)
-        sfirst = s * reg_tile
-        scount = min(reg_tile, blocklen - sfirst)
-        d1 = describe_block(buf1, sfirst, scount)
-        d2 = describe_block(buf2, sfirst, scount)
-        desc1[s + 1] = d1
-        desc2[s + 1] = d2
-        (l1, h1) = descriptor_offset_range(d1, buf1, sfirst)
+    for tile_index in 0:(tile_count - 1)
+        tile_start = tile_index * tile
+        tile_length = min(tile, block_length - tile_start)
+        d1 = describe_block(buf1, tile_start, tile_length)
+        d2 = describe_block(buf2, tile_start, tile_length)
+        desc1[tile_index + 1] = d1
+        desc2[tile_index + 1] = d2
+        (l1, h1) = descriptor_offset_range(d1, buf1, tile_start)
         if h1 >= l1
             lo1 = min(lo1, l1); hi1 = max(hi1, h1)
         end
-        (l2, h2) = descriptor_offset_range(d2, buf2, sfirst)
+        (l2, h2) = descriptor_offset_range(d2, buf2, tile_start)
         if h2 >= l2
             lo2 = min(lo2, l2); hi2 = max(hi2, h2)
         end
@@ -116,17 +116,17 @@ end
 @inline function _ramp_slivers!(
         desc1::Vector{BlockDescriptor}, desc2::Vector{BlockDescriptor},
         step1::Int, step2::Int, first::Int,
-        blocklen::Int, reg_tile::Int, nslivers::Int
+        block_length::Int, tile::Int, tile_count::Int
     )
-    for s in 0:(nslivers - 1)
-        sfirst = s * reg_tile
-        scount = min(reg_tile, blocklen - sfirst)
-        q0 = first + sfirst
-        desc1[s + 1] = _ramp_descriptor(step1, q0, scount)
-        desc2[s + 1] = _ramp_descriptor(step2, q0, scount)
+    for tile_index in 0:(tile_count - 1)
+        tile_start = tile_index * tile
+        tile_length = min(tile, block_length - tile_start)
+        q0 = first + tile_start
+        desc1[tile_index + 1] = _ramp_descriptor(step1, q0, tile_length)
+        desc2[tile_index + 1] = _ramp_descriptor(step2, q0, tile_length)
     end
     return (
-        _ramp_offset_range(step1, first, blocklen),
-        _ramp_offset_range(step2, first, blocklen),
+        _ramp_offset_range(step1, first, block_length),
+        _ramp_offset_range(step2, first, block_length),
     )
 end

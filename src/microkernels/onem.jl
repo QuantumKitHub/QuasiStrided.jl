@@ -1,10 +1,10 @@
 # 1m (Van Zee's induced method): the real `SIMDKernel` of `2MR x NR`, run over
-# `2*kc` real K steps against 1e-packed A and planar B. At logical K step `p`,
-# `OneEFormat` A holds `(re_0, im_0, re_1, im_1, ...)` then
-# `(-im_0, re_0, -im_1, re_1, ...)`, and planar B `re_0..` then `im_0..`, so
-# accumulator real row `2i` is the real and `2i+1` the imaginary part of
-# complex row `i`. There is deliberately no FMA loop here: 1m reuses the real
-# kernel body verbatim.
+# `2*k_block_length` real K steps against 1e-packed A and planar B. At logical K
+# step `p`, `OneEFormat` A holds `(re_0, im_0, re_1, im_1, ...)` then `(-im_0,
+# re_0, -im_1, re_1, ...)`, and planar B `re_0..` then `im_0..`, so accumulator
+# real row `2i` is the real and `2i+1` the imaginary part of complex row `i`.
+# There is deliberately no FMA loop here: 1m reuses the real kernel body
+# verbatim.
 
 using SIMD: Vec
 
@@ -53,11 +53,12 @@ zero_accumulator(kernel::OneMKernel) = zero_accumulator(kernel.inner)
 
 function Base.accumulate(
         kernel::OneMKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, R}},
-        packed_a::PA, packed_b::PB, kc::Int
+        packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, W, R, NV, PA, PB}
-    # Checked here so the message reports the logical kc, not the doubled one.
-    kc >= 0 || throw(ArgumentError("accumulate requires kc >= 0, got kc = $kc"))
-    return accumulate(kernel.inner, acc, packed_a, packed_b, 2 * kc)
+    # Checked here so the message reports the logical k_block_length, not the
+    # doubled one.
+    k_block_length >= 0 || throw(ArgumentError("accumulate requires k_block_length >= 0, got k_block_length = $k_block_length"))
+    return accumulate(kernel.inner, acc, packed_a, packed_b, 2 * k_block_length)
 end
 
 # Scalar store for an interleaved accumulator (1m and fmaddsub): with `W` even

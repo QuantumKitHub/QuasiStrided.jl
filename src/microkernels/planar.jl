@@ -124,11 +124,11 @@ end
 
 function Base.accumulate(
         kernel::PlanarKernel{MR, NR, T, W}, acc::NTuple{NA, Vec{W, R}},
-        packed_a::PA, packed_b::PB, kc::Int
+        packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, W, R, NA, PA, PB}
-    kc == 0 && return acc
-    kc > 0 || _throw_negative_kc(:accumulate, kc)
-    @inbounds for p in 0:(kc - 1)
+    k_block_length == 0 && return acc
+    k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
+    @inbounds for p in 0:(k_block_length - 1)
         acc = _accumulate_step_planar(kernel, acc, packed_a, packed_b, p)
     end
     return acc

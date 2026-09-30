@@ -38,7 +38,7 @@ end
 
 @testset "Blocking: field validation" begin
     b = Blocking(4, 8, 16)
-    @test b.mc == 4 && b.kc == 8 && b.nc == 16
+    @test b.m_block == 4 && b.k_block == 8 && b.n_block == 16
 
     @test_throws ArgumentError Blocking(0, 8, 16)
     @test_throws ArgumentError Blocking(4, 0, 16)
@@ -51,28 +51,28 @@ end
     bf32 = default_blocking(ScalarKernel(Val(8), Val(6), Float32))
     @test bf64 isa Blocking
     @test bf32 isa Blocking
-    @test bf64.mc >= 1 && bf64.kc >= 1 && bf64.nc >= 1
-    @test bf32.mc >= 1 && bf32.kc >= 1 && bf32.nc >= 1
+    @test bf64.m_block >= 1 && bf64.k_block >= 1 && bf64.n_block >= 1
+    @test bf32.m_block >= 1 && bf32.k_block >= 1 && bf32.n_block >= 1
     # Same kernel shape, different scalar type, through SIMDKernel too.
     @test default_blocking(SIMDKernel(Val(8), Val(6), Float64)) == bf64
 end
 
-@testset "plan_contract: mc/kc/nc keywords are validated and rounded" begin
+@testset "plan_contract: m_block/k_block/n_block keywords are validated and rounded" begin
     kernel = ScalarKernel(Val(4), Val(3), Float64)
     Ma, Ka, Na = 9, 10, 8
     Amat, Bmat, Cmat = randn(Ma, Ka), randn(Ka, Na), zeros(Ma, Na)
     Av, Bv, Cv = StridedView(Amat), StridedView(Bmat), StridedView(Cmat)
     indA, indB, indC = (1, 2), (2, 3), (1, 3)
 
-    @test_throws ArgumentError plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel, mc = 0)
-    @test_throws ArgumentError plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel, kc = 0)
-    @test_throws ArgumentError plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel, nc = -3)
+    @test_throws ArgumentError plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel, m_block = 0)
+    @test_throws ArgumentError plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel, k_block = 0)
+    @test_throws ArgumentError plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel, n_block = -3)
 
-    # mc=5 with MR=4 rounds up to 8, then clamps to roundup(Ma=9,4)=12 -> 8.
-    plan = _mm_plan(Cmat, Amat, Bmat; kernel = kernel, mc = 5, kc = 100, nc = 100)
-    @test plan.blocking.mc == 8
-    @test plan.blocking.kc == 10  # clamped to Qk
-    @test plan.blocking.nc == 9   # NR=3: roundup(8,3)=9, requested 100 clamped down to that
+    # m_block=5 with MR=4 rounds up to 8, then clamps to roundup(Ma=9,4)=12 -> 8.
+    plan = _mm_plan(Cmat, Amat, Bmat; kernel = kernel, m_block = 5, k_block = 100, n_block = 100)
+    @test plan.blocking.m_block == 8
+    @test plan.blocking.k_block == 10  # clamped to k_length
+    @test plan.blocking.n_block == 9   # NR=3: roundup(8,3)=9, requested 100 clamped down to that
 end
 
 
@@ -167,8 +167,8 @@ end
 # Label order within M/N and the M/N orientation swap.
 const _lo_order = QuasiStrided._order_free_labels
 const _lo_run = QuasiStrided._leading_unit_run
-_lo_swap(morder, norder, indC, C, mr_asis, mr_swapped = mr_asis) = QuasiStrided._prefer_swap(
-    _lo_run(morder, indC, C), _lo_run(norder, indC, C), mr_asis, mr_swapped
+_lo_swap(morder, norder, indC, C, m_tile_asis, m_tile_swapped = m_tile_asis) = QuasiStrided._prefer_swap(
+    _lo_run(morder, indC, C), _lo_run(norder, indC, C), m_tile_asis, m_tile_swapped
 )
 
 # A view with these strides over dummy data (only strides/size are read).
@@ -279,7 +279,7 @@ end
     @test _lo_run((10, 20), (10, 20), _lo_view((6, 1), (1, 17))) == 6
     @test _lo_run((10, 20), (10, 20), _lo_view((0, 6), (1, 1))) == 0
 
-    # The swap rule on the ccsd_t shapes at dim 4, with `mr` played by hand.
+    # The swap rule on the ccsd_t shapes at dim 4, with `m_tile` played by hand.
     # ccsd_t_2: sorted M = (b,i,j) (run 1), sorted N = (a,c,k) (run 4).
     @test _lo_swap((b, i, j), (a, c, k), indC, C6, 4)        # 4-wide kernel: swap
     @test !_lo_swap((b, i, j), (a, c, k), indC, C6, 8)       # 8-wide: 4 < 8, do not swap
@@ -287,10 +287,10 @@ end
     @test _lo_swap((c, i, j), (a, b, k), indC, C6, 8)
     @test _lo_swap((c, i, j), (a, b, k), indC, C6, 16)
     @test !_lo_swap((c, i, j), (a, b, k), indC, C6, 32)
-    # ccsd_t_1: M already has the run; never swap, whatever mr says.
+    # ccsd_t_1: M already has the run; never swap, whatever m_tile says.
     @test !_lo_swap((a, i, j), (b, c, k), indC, C6, 4)
     @test !_lo_swap((a, i, j), (b, c, k), indC, C6, 8)
-    # Two-mr form: each orientation is judged against the kernel it would run.
+    # Two-m_tile form: each orientation is judged against the kernel it would run.
     @test _lo_swap((b, i, j), (a, c, k), indC, C6, 8, 4)
     @test !_lo_swap((b, i, j), (a, c, k), indC, C6, 8, 8)
     @test !_lo_swap((a, i, j), (b, c, k), indC, C6, 4, 4)
@@ -312,8 +312,8 @@ end
         Cr = _lo_view(lens, strides)
         nlabels = rand(rng, 1:D)
         order = Tuple(Random.shuffle(rng, collect(1:D))[1:nlabels])
-        Qm = prod(lens[l] for l in order)
-        Qm == 1 && continue
+        m_length = prod(lens[l] for l in order)
+        m_length == 1 && continue
         ntested += 1
 
         run = QuasiStrided._leading_unit_run(order, indCr, Cr)
@@ -323,7 +323,7 @@ end
         cgroup = QuasiStrided.AxisGroup(clens, (cstrides,))
         (isramp, steps) = QuasiStrided.affine_ramp(cgroup)
 
-        @test (run == Qm) == (isramp && steps[1] == 1)
+        @test (run == m_length) == (isramp && steps[1] == 1)
     end
 end
 
@@ -352,7 +352,7 @@ end
         @test (name == "ccsd_t_1") == (mrun == d)
         @test nrun == (name == "ccsd_t_1" ? 1 : name == "ccsd_t_3" ? d^2 : d)
 
-        # Named kernels, host-independent: mr = 4 swaps 2/3/4, mr = 8 only 3.
+        # Named kernels, host-independent: m_tile = 4 swaps 2/3/4, m_tile = 8 only 3.
         for (kernel, expect_swap) in (
                 (ScalarKernel(Val(4), Val(3), Float64), name != "ccsd_t_1"),
                 (SIMDKernel(Val(8), Val(6), Float64), name == "ccsd_t_3"),
@@ -360,7 +360,7 @@ end
             plan = plan_contract(Cv, Av, indA, Bv, indB, indC; kernel = kernel)
             swapped = plan.Astorage === parent(Bv)
             @test swapped == expect_swap
-            @test swapped == _lo_swap(msorted, nsorted, indC, Cv, mr(kernel))
+            @test swapped == _lo_swap(msorted, nsorted, indC, Cv, tile_size(kernel)[1])
             if swapped
                 # B feeds M: mgroup's maps are (B, C) over the sorted N labels.
                 @test plan.mgroup.strides[2] == Tuple(cstride(l) for l in nsorted)
@@ -381,16 +381,16 @@ end
             @test plan.ngroup.lengths == ntuple(_ -> d, 3)
         end
 
-        # Default kernel: the same rule at this machine's `mr`.
+        # Default kernel: the same rule at this machine's `m_tile`.
         plan = plan_contract(Cv, Av, indA, Bv, indB, indC)
-        MRk = mr(plan.kernel)
-        @test (plan.Astorage === parent(Bv)) == (mrun < MRk && nrun >= MRk)
+        m_tile = tile_size(plan.kernel)[1]
+        @test (plan.Astorage === parent(Bv)) == (mrun < m_tile && nrun >= m_tile)
     end
 end
 
 @testset "run-length-aware kernel demotion" begin
-    # ccsd_t_1 with C's leading run exactly `d` and Qm != run, so only
-    # `run % mr == 0` avoids demotion. Expectations are derived from the
+    # ccsd_t_1 with C's leading run exactly `d` and m_length != run, so only
+    # `run % m_tile == 0` avoids demotion. Expectations are derived from the
     # menu, so this holds on every ISA.
     d = 16
     extra = 4
@@ -409,23 +409,23 @@ end
         msorted = _lo_order(mlab, indC, Cv)
         run = _lo_run(msorted, indC, Cv)
         cpos(l) = findfirst(==(l), indC)::Int
-        Qm = prod(size(Cv, cpos(l)) for l in mlab)
-        Qn = prod(size(Cv, cpos(l)) for l in nlab)
+        m_length = prod(size(Cv, cpos(l)) for l in mlab)
+        n_length = prod(size(Cv, cpos(l)) for l in nlab)
 
         plan = plan_contract(Cv, Av, indA, Bv, indB, indC)
         @test plan.Astorage === parent(Av)
 
-        default_kernel = QuasiStrided._default_kernel(T, Qm, Qn)
-        default_mr = mr(default_kernel)
-        if Qm == run || run % default_mr == 0
+        default_kernel = QuasiStrided._default_kernel(T, m_length, n_length)
+        default_m_tile = tile_size(default_kernel)[1]
+        if m_length == run || run % default_m_tile == 0
             @test plan.kernel === default_kernel
         else
             candidates = [sh[1] for sh in QuasiStrided.kernel_shapes(T) if run % sh[1] == 0]
             if isempty(candidates)
                 @test plan.kernel === default_kernel
             else
-                @test run % mr(plan.kernel) == 0
-                @test mr(plan.kernel) == maximum(candidates)
+                @test run % tile_size(plan.kernel)[1] == 0
+                @test tile_size(plan.kernel)[1] == maximum(candidates)
             end
         end
 
@@ -443,7 +443,7 @@ end
         @test Cex ≈ Cref
     end
 
-    # Plain GEMM: `Qm == run`, so no demotion.
+    # Plain GEMM: `m_length == run`, so no demotion.
     for T in (Float64, Float32)
         Ma, Ka, Na = 37, 11, 23
         Amat = randn(T, Ma, Ka)
@@ -460,7 +460,7 @@ end
 end
 
 @testset "run-length demotion K-depth guard: deep-K does not demote, shallow-K does" begin
-    # C[a,b,c,i,j,k] = A[i,j,m,a] * B[m,k,b,c], i=j=k=b=c=6: Qk = m is swept.
+    # C[a,b,c,i,j,k] = A[i,j,m,a] * B[m,k,b,c], i=j=k=b=c=6: k_length = m is swept.
     IA = (:i, :j, :m, :a)
     IB = (:m, :k, :b, :c)
     IC = (:a, :b, :c, :i, :j, :k)
@@ -478,9 +478,9 @@ end
     kmax_of(::Type{Float32}) = QuasiStrided._RUN_DEMOTE_KMAX_F32
 
     for (T, a) in ((Float64, 8), (Float32, 16))
-        Qm = a * 36
-        Qn = 216
-        default_kernel = QuasiStrided._default_kernel(T, Qm, Qn)
+        m_length = a * 36
+        n_length = 216
+        default_kernel = QuasiStrided._default_kernel(T, m_length, n_length)
 
         # Deep K never demotes; the fixture never swaps.
         m_deep = 2 * kmax_of(T)
@@ -489,7 +489,7 @@ end
         @test plan_deep.Astorage === parent(Av)
         @test plan_deep.kernel === default_kernel
 
-        # Shallow K demotes where the default's `mr` breaks the run (ISA-dependent).
+        # Shallow K demotes where the default's `m_tile` breaks the run (ISA-dependent).
         m_shallow = 8
         Cv2, Av2, Bv2 = _run_demote_fixture(T, a, m_shallow)
         plan_shallow = plan_contract(Cv2, Av2, indA, Bv2, indB, indC)
@@ -497,19 +497,19 @@ end
         mlab, = QuasiStrided._classify_labels(indA, indB, indC)
         msorted = _lo_order(mlab, indC, Cv2)
         run = _lo_run(msorted, indC, Cv2)
-        if Qm == run || run % mr(default_kernel) == 0
+        if m_length == run || run % tile_size(default_kernel)[1] == 0
             @test plan_shallow.kernel === default_kernel
         else
             @test plan_shallow.kernel !== default_kernel
             @test typeof(plan_shallow.kernel) !== typeof(default_kernel)
-            @test run % mr(plan_shallow.kernel) == 0
+            @test run % tile_size(plan_shallow.kernel)[1] == 0
         end
 
-        # The guard is `Qk > kmax`: `Qk == kmax` may still demote.
+        # The guard is `k_length > kmax`: `k_length == kmax` may still demote.
         Cv_b, Av_b, Bv_b = _run_demote_fixture(T, a, kmax_of(T))
         plan_b = plan_contract(Cv_b, Av_b, indA, Bv_b, indB, indC)
         run_b = _lo_run(msorted, indC, Cv_b)  # same M order at every m in this fixture
-        if Qm == run_b || run_b % mr(default_kernel) == 0
+        if m_length == run_b || run_b % tile_size(default_kernel)[1] == 0
             @test plan_b.kernel === default_kernel
         else
             @test plan_b.kernel !== default_kernel
@@ -537,7 +537,7 @@ end
     execute!(p, 1.0, 0.0)
     @test Cmat ≈ Amat * Bmat
 
-    # Into C's transpose: N's 12-wide run >= mr = 8, so B feeds M.
+    # Into C's transpose: N's 12-wide run >= m_tile = 8, so B feeds M.
     Ct = zeros(Na, Ma)
     pt = plan_contract(StridedView(Ct), Av, (1, 2), Bv, (2, 3), (3, 1); kernel = kernel)
     @test pt.Astorage === parent(Bv)
@@ -592,13 +592,13 @@ end
 end
 
 @testset "label order: the swap never fires for complex kernels (guarded by T <: Real, deliberately deferred)" begin
-    # ccsd_t_3 would swap for a real dtype at this mr; the transforms follow
+    # ccsd_t_3 would swap for a real dtype at this m_tile; the transforms follow
     # the flag XOR A's `conj` op.
     d = 4
     for T in (ComplexF64, ComplexF32)
         W = QuasiStrided._default_lanewidth(real(T))
         kernel = QuasiStrided.PlanarKernel(Val(W), Val(8), T, Val(W))
-        @test mr(kernel) <= 16
+        @test tile_size(kernel)[1] <= 16
         (indA, indB, indC), _ = _lo_labels(_LO_CASES[3][2], _LO_CASES[3][3])
         A = randn(T, d, d, d, d)
         B = randn(T, d, d, d, d)

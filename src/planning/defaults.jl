@@ -59,37 +59,37 @@ end
 _default_kernel(::Type{T}) where {T} =
     _kernel_from_shape(_resolved_defaults(T).shape, T, _default_method(T))
 
-# The automatic `(shape, method)` for extents `Qm`/`Qn` and C's unit-stride run
-# along M (`run = Qm`: no layout known). Returned as plain values so
-# `plan_contract` never holds a menu-wide kernel Union. The extent and store
-# step-downs apply first; then an `Qm` that cannot fill one tile demotes to the
-# fitted shape, or on AVX-512 complex to FMAddSub.
-@inline function _default_shape(::Type{T}, Qm::Int, Qn::Int, run::Int = Qm) where {T}
+# The automatic `(shape, method)` for extents `m_length`/`n_length` and C's
+# unit-stride run along M (`run = m_length`: no layout known). Returned as plain
+# values so `plan_contract` never holds a menu-wide kernel Union. The extent and
+# store step-downs apply first; then an `m_length` that cannot fill one tile
+# demotes to the fitted shape, or on AVX-512 complex to FMAddSub.
+@inline function _default_shape(::Type{T}, m_length::Int, n_length::Int, run::Int = m_length) where {T}
     d = _resolved_defaults(T)
     method = _default_method(T)
-    shape = _store_shape(_extent_shape(d.shape, T, method, Qm), T, method, Qm, run)
-    (Qm > 0 && Qm < shape[1]) || return (shape, method)
+    shape = _store_shape(_extent_shape(d.shape, T, method, m_length), T, method, m_length, run)
+    (m_length > 0 && m_length < shape[1]) || return (shape, method)
     # Static, so a real `T`'s method stays a concrete `RealMethod`.
     T <: Complex || return (d.fitted, method)
-    small = _small_m_shape(d.small_m, Qm)
+    small = _small_m_shape(d.small_m, m_length)
     small === nothing || return (small, FMAddSubMethod())
     return (d.fitted, method)
 end
 
 # The automatic `(shape, method)` under `method`, `_default_method(T, TA, TB)`.
-@inline _default_shape(::Type{T}, ::ComplexMethod, Qm::Int, Qn::Int, run::Int) where {T} =
-    _default_shape(T, Qm, Qn, run)
+@inline _default_shape(::Type{T}, ::ComplexMethod, m_length::Int, n_length::Int, run::Int) where {T} =
+    _default_shape(T, m_length, n_length, run)
 
 # The real default shape of the real problem, mapped: the real extent, store and
 # small-M demotions carry over, on the real type's cached defaults.
-@inline function _default_shape(::Type{T}, method::_MixedMethod, Qm::Int, Qn::Int, run::Int) where {T}
-    shape, _ = _default_shape(real(T), _real_problem(method, Qm, Qn, run)...)
+@inline function _default_shape(::Type{T}, method::_MixedMethod, m_length::Int, n_length::Int, run::Int) where {T}
+    shape, _ = _default_shape(real(T), _real_problem(method, m_length, n_length, run)...)
     return (_mixed_shape(method, shape), method)
 end
 
 # `@noinline`: the return type is the Union of `T`'s menu kernels.
-@noinline function _default_kernel(::Type{T}, Qm::Int, Qn::Int) where {T}
-    shape, method = _default_shape(T, Qm, Qn)
+@noinline function _default_kernel(::Type{T}, m_length::Int, n_length::Int) where {T}
+    shape, method = _default_shape(T, m_length, n_length)
     return _kernel_from_shape(shape, T, method)
 end
 
@@ -99,8 +99,8 @@ end
 Cache-blocking factors for `kernel` on this host: an analytical model of the
 detected cache geometry ([`target_profile`](@ref)), or fixed constants where
 L1d or L2 is undetected, scaled for complex methods by packed reals per
-element. `plan_contract` rounds `mc`/`nc` to `mr`/`nr` multiples and clamps
-all three to the contraction's extents.
+element. `plan_contract` rounds `m_block`/`n_block` to multiples of the tile
+size and clamps all three to the contraction's extents.
 """
 function default_blocking(kernel)
     T = scalartype(kernel)

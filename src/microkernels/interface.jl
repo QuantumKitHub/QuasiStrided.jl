@@ -1,7 +1,8 @@
 # What every microkernel shares. Each kernel file implements only
 # `zero_accumulator`, `accumulate` and `store_tile!`, with one contract:
-#   * `accumulate(kernel, acc, packed_a, packed_b, kc)` adds `kc` K steps to
-#     `acc`; `kc == 0` returns `acc` without reading the panels.
+#   * `accumulate(kernel, acc, packed_a, packed_b, k_block_length)` adds
+#     `k_block_length` K steps to `acc`; `k_block_length == 0` returns `acc`
+#     without reading the panels.
 #   * `store_tile!(dest, acc, alpha, beta, kernel)` writes `alpha*acc + beta*C`
 #     over the valid rectangle only: `alpha == 0` never reads `acc`, `beta == 0`
 #     never reads old `C`, padding lanes are never read.
@@ -18,13 +19,13 @@ abstract type DescriptorKernel{MR, NR, T} end
 abstract type ComplexMethod end
 struct RealMethod <: ComplexMethod end      # what a real kernel reports
 struct PlanarMethod <: ComplexMethod end    # split re/im planes, 4 real FMAs per MAC
-struct OneMMethod <: ComplexMethod end      # Van Zee's 1m: a real 2mr x nr kernel
+struct OneMMethod <: ComplexMethod end      # Van Zee's 1m: a real 2MR x NR kernel
 struct FMAddSubMethod <: ComplexMethod end  # interleaved A, x86 `vfmaddsub`
 struct ComplexRealMethod <: ComplexMethod end  # complex A, real B: the real kernel on 2MR rows
 struct RealComplexMethod <: ComplexMethod end  # real A, complex B: the real kernel on 2NR columns
 
-# Reals per packed A / B element. Blocking divides the real `mc`/`nc` by these,
-# so every method gets the same packed byte budget.
+# Reals per packed A / B element. Blocking divides the real `m_block`/`n_block`
+# by these, so every method gets the same packed byte budget.
 a_reals(::RealMethod) = 1
 b_reals(::RealMethod) = 1
 a_reals(::PlanarMethod) = 2
@@ -49,17 +50,15 @@ accumulator_planes(::RealComplexMethod) = 1
 complex_method(::Any) = RealMethod()
 
 realtype(k::DescriptorKernel) = realtype(k.descriptor)
-packed_a_per_k(k::DescriptorKernel) = packed_a_per_k(k.descriptor)
-packed_b_per_k(k::DescriptorKernel) = packed_b_per_k(k.descriptor)
+sliver_widths(k::DescriptorKernel) = sliver_widths(k.descriptor)
 a_format(k::DescriptorKernel) = a_format(k.descriptor)
 b_format(k::DescriptorKernel) = b_format(k.descriptor)
-mr(k::DescriptorKernel) = mr(k.descriptor)
-nr(k::DescriptorKernel) = nr(k.descriptor)
+tile_size(k::DescriptorKernel) = tile_size(k.descriptor)
 scalartype(k::DescriptorKernel) = scalartype(k.descriptor)
 packed_a_offset(k::DescriptorKernel, i::Int, p::Int) = packed_a_offset(k.descriptor, i, p)
 packed_b_offset(k::DescriptorKernel, j::Int, p::Int) = packed_b_offset(k.descriptor, j, p)
-packed_a_length(k::DescriptorKernel, kc::Int) = packed_a_length(k.descriptor, kc)
-packed_b_length(k::DescriptorKernel, kc::Int) = packed_b_length(k.descriptor, kc)
+packed_a_length(k::DescriptorKernel, k_block_length::Int) = packed_a_length(k.descriptor, k_block_length)
+packed_b_length(k::DescriptorKernel, k_block_length::Int) = packed_b_length(k.descriptor, k_block_length)
 # Only these resolve for a complex descriptor; the single-plane offsets above
 # are a MethodError there, by design.
 @inline packed_a_plane_offset(k::DescriptorKernel, plane::Int, i::Int, p::Int) =
@@ -162,19 +161,19 @@ end
 # GUARDRAIL: every throw reachable from the per-tile prologue sits behind a
 # `@noinline` helper. An inline interpolated message pulls `print_to_string`, a
 # GC frame and ~1 KB of stack into the hot tile function.
-@noinline _throw_packed_short(which::Symbol, got::Int, need::Int, kc::Int) = throw(
+@noinline _throw_packed_short(which::Symbol, got::Int, need::Int, k_block_length::Int) = throw(
     DimensionMismatch(
         "execute_tile!: packed_$which has length $got, " *
-            "need at least packed_$(which)_length(kernel, kc=$kc) = $need"
+            "need at least packed_$(which)_length(kernel, k_block_length=$k_block_length) = $need"
     )
 )
 @noinline _throw_tile_extent(which::Symbol, got::Int, limit::Int) = throw(
     ArgumentError(
-        "destination valid $which extent $got exceeds $(which === :row ? "mr" : "nr")(kernel) = $limit"
+        "destination valid $which extent $got exceeds tile_size(kernel)[$(which === :row ? 1 : 2)] = $limit"
     )
 )
-@noinline _throw_negative_kc(where::Symbol, kc::Int) =
-    throw(ArgumentError("$where requires kc >= 0, got kc = $kc"))
+@noinline _throw_negative_k_block_length(where::Symbol, k_block_length::Int) =
+    throw(ArgumentError("$where requires k_block_length >= 0, got k_block_length = $k_block_length"))
 
 # `execute_tile!`'s validation, in order. Returns `(run, alphaT, betaT)`;
 # `run == false` means the call is finished. `Val(false)` drops the storage
@@ -182,13 +181,13 @@ end
 # GUARDRAIL: `@inline` and one bound type parameter per argument (hot path).
 @inline function _execute_tile_prologue!(
         kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
-        kc::Int, alpha, beta, ::Val{BOUNDS}
+        k_block_length::Int, alpha, beta, ::Val{BOUNDS}
     ) where {MR, NR, T, K <: DescriptorKernel{MR, NR, T}, PA, PB, BOUNDS}
     m = nrows(destination)
     n = ncols(destination)
     m <= MR || _throw_tile_extent(:row, m, MR)
     n <= NR || _throw_tile_extent(:column, n, NR)
-    kc >= 0 || _throw_negative_kc(:execute_tile!, kc)
+    k_block_length >= 0 || _throw_negative_k_block_length(:execute_tile!, k_block_length)
 
     alphaT = convert(T, alpha)
     betaT = convert(T, beta)
@@ -197,15 +196,15 @@ end
 
     BOUNDS && checked_tile_storage_bounds(destination)
 
-    if kc == 0 || iszero(alphaT)
+    if k_block_length == 0 || iszero(alphaT)
         scale_tile!(destination, betaT)
         return (false, alphaT, betaT)
     end
 
-    need_a = packed_a_length(kernel, kc)
-    length(packed_a) >= need_a || _throw_packed_short(:a, length(packed_a), need_a, kc)
-    need_b = packed_b_length(kernel, kc)
-    length(packed_b) >= need_b || _throw_packed_short(:b, length(packed_b), need_b, kc)
+    need_a = packed_a_length(kernel, k_block_length)
+    length(packed_a) >= need_a || _throw_packed_short(:a, length(packed_a), need_a, k_block_length)
+    need_b = packed_b_length(kernel, k_block_length)
+    length(packed_b) >= need_b || _throw_packed_short(:b, length(packed_b), need_b, k_block_length)
 
     return (true, alphaT, betaT)
 end
@@ -213,13 +212,13 @@ end
 # One checked K panel: `zero_accumulator`, `accumulate`, `store_tile!`.
 function execute_tile!(
         kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
-        kc::Int, alpha, beta
+        k_block_length::Int, alpha, beta
     ) where {MR, NR, T, K <: DescriptorKernel{MR, NR, T}, PA, PB}
     run, alphaT, betaT = _execute_tile_prologue!(
-        kernel, destination, packed_a, packed_b, kc, alpha, beta, Val(true)
+        kernel, destination, packed_a, packed_b, k_block_length, alpha, beta, Val(true)
     )
     run || return destination
-    acc = accumulate(kernel, zero_accumulator(kernel), packed_a, packed_b, kc)
+    acc = accumulate(kernel, zero_accumulator(kernel), packed_a, packed_b, k_block_length)
     return store_tile!(destination, acc, alphaT, betaT, kernel)
 end
 
@@ -230,12 +229,12 @@ end
 # range extremes.
 @inline function unsafe_execute_tile!(
         kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
-        kc::Int, alpha, beta
+        k_block_length::Int, alpha, beta
     ) where {K, PA, PB}
     run, alphaT, betaT = _execute_tile_prologue!(
-        kernel, destination, packed_a, packed_b, kc, alpha, beta, Val(false)
+        kernel, destination, packed_a, packed_b, k_block_length, alpha, beta, Val(false)
     )
     run || return destination
-    acc = accumulate(kernel, zero_accumulator(kernel), packed_a, packed_b, kc)
+    acc = accumulate(kernel, zero_accumulator(kernel), packed_a, packed_b, k_block_length)
     return store_tile!(destination, acc, alphaT, betaT, kernel)
 end

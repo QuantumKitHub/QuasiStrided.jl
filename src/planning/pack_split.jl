@@ -32,12 +32,12 @@ _is_split(s::PackSplit) = s.L != 0
 # The split for the operand behind map 1 of `g` (A for M, B for N) and the block
 # extent it needs, or `(eff, _NO_SPLIT)`. `eff` is the plan's extent, `rounded`
 # the requested one rounded to `R`; a split block may take the budget the
-# blocking reserved for the requested `kc_req` when the K extent clamps `kc`.
+# blocking reserved for `k_block_requested` when the K extent clamps `k_block`.
 # `l2bytes = nothing`: `_split_capacity`, doubled for complex, whose block
 # walk costs more per element.
 @inline function _pack_split(
-        g::AxisGroup{D}, kg::AxisGroup, kmap::Int, R::Int, S::Int, complex::Bool, kc::Int,
-        eff::Int, rounded::Int, kc_req::Int, l2bytes::Union{Int, Nothing} = nothing
+        g::AxisGroup{D}, kg::AxisGroup, kmap::Int, R::Int, S::Int, complex::Bool, k_block::Int,
+        eff::Int, rounded::Int, k_block_requested::Int, l2bytes::Union{Int, Nothing} = nothing
     ) where {D}
     D < 256 || return (eff, _NO_SPLIT)
     line = _K_LINE_BYTES
@@ -51,13 +51,13 @@ _is_split(s::PackSplit) = s.L != 0
         g.lengths[d] > 1 && abs(g.strides[1][d]) == 1 && (dj = d; break)
     end
     dj == 0 && return (eff, _NO_SPLIT)
-    return _pack_split_window(g, kg, kmap, d1, dj, R, S, complex, kc, eff, rounded, kc_req, l2bytes)
+    return _pack_split_window(g, kg, kmap, d1, dj, R, S, complex, k_block, eff, rounded, k_block_requested, l2bytes)
 end
 
 # Out of line: shared by every eltype, and most plans never get here.
 @noinline function _pack_split_window(
         g::AxisGroup, kg::AxisGroup{DK}, kmap::Int, d1::Int, dj::Int, R::Int, S::Int, complex::Bool,
-        kc::Int, eff::Int, rounded::Int, kc_req::Int, l2bytes::Union{Int, Nothing}
+        k_block::Int, eff::Int, rounded::Int, k_block_requested::Int, l2bytes::Union{Int, Nothing}
     ) where {DK}
     line = _K_LINE_BYTES
     L = _largest_divisor_upto(g.lengths[dj], max(1, line ÷ S))
@@ -79,11 +79,11 @@ end
     for d in d1:(dj - 1)
         psi *= g.lengths[d]
     end
-    klines = ks * S >= line ? kc : cld(kc * ks * S, line)
+    klines = ks * S >= line ? k_block : cld(k_block * ks * S, line)
     aliased = abs(g.strides[1][d1]) * S % _K_WALK_FAR_BYTES == 0
     cap = something(l2bytes, _split_capacity(target_profile(), aliased) << complex)
     widemul(psi, max(1, klines) * line) > cap || return (eff, _NO_SPLIT)
-    return _pack_split_dynamic(g.lengths, d1, dj, L, psi, R, eff, rounded, kc, kc_req, kinner)
+    return _pack_split_dynamic(g.lengths, d1, dj, L, psi, R, eff, rounded, k_block, k_block_requested, kinner)
 end
 
 # The cache that can hold the per-sliver walk's reuse window: the core's L2
@@ -102,9 +102,9 @@ end
 
 function _pack_split_blocks(
         lengths::NTuple{D, Int}, d1::Int, dj::Int, L::Int, psi::Int, R::Int,
-        eff::Int, rounded::Int, kc::Int, kc_req::Int, kinner::Bool
+        eff::Int, rounded::Int, k_block::Int, k_block_requested::Int, kinner::Bool
     ) where {D}
-    budget = max(rounded, Int(min(widemul(rounded, kc_req) ÷ kc, typemax(Int32))) ÷ R * R)
+    budget = max(rounded, Int(min(widemul(rounded, k_block_requested) ÷ k_block, typemax(Int32))) ÷ R * R)
     # Prefixes of `d1:dj-1`: whole axes, then a divisor chunk of the next one.
     # `E` is also the run of consecutive C coordinates a block stores, so take
     # the largest whose whole groups fit the budget, preferring `R | E`. A

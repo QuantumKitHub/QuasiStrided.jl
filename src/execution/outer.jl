@@ -10,17 +10,17 @@
 const _OUTER_MODE = Ref{Symbol}(:auto)
 
 # N and B may have any layout: B is read one scalar per column.
-function _outer_applicable(::Type{T}, Astorage, Cstorage, mgroup::AxisGroup, Qm::Int) where {T}
+function _outer_applicable(::Type{T}, Astorage, Cstorage, mgroup::AxisGroup, m_length::Int) where {T}
     _OUTER_MODE[] === :never && return false
     T <: Real || return false
     (Astorage isa DenseVector{T} && Cstorage isa DenseVector{T}) || return false
-    Qm >= _dot_lanewidth(T) || return false
+    m_length >= _dot_lanewidth(T) || return false
     _map_ramp_step(mgroup, 1) == 1 || return false
     return _map_ramp_step(mgroup, 2) == 1
 end
 
 function _execute_outer!(
-        plan::ContractPlan{T}, alphaT::T, betaT::T, Qm::Int, Qn::Int, ::Val{W}
+        plan::ContractPlan{T}, alphaT::T, betaT::T, m_length::Int, n_length::Int, ::Val{W}
     ) where {T, W}
     ws = plan.workspace
     Astorage = plan.Astorage
@@ -29,26 +29,26 @@ function _execute_outer!(
     Bbase = plan.Bbase
     bufB = ws.n_buf_B
     bufC = ws.n_buf_C
-    nc_eff = plan.blocking.nc
+    n_block = plan.blocking.n_block
     lenB = length(Bstorage)
     lenC = length(Cstorage)
 
-    checked_span_bounds(plan.Abase, (0, Qm - 1), (0, 0), length(Astorage))
+    checked_span_bounds(plan.Abase, (0, m_length - 1), (0, 0), length(Astorage))
 
     GC.@preserve ws Astorage Cstorage begin
         ap = pointer(Astorage) + sizeof(T) * plan.Abase
         cp = pointer(Cstorage) + sizeof(T) * plan.Cbase
-        jc = 0
-        while jc < Qn
-            nblock = min(nc_eff, Qn - jc)
-            fill_offsets!((bufB, bufC), plan.ngroup, jc, nblock)
-            checked_span_bounds(Bbase, _buffer_range(bufB, nblock), (0, 0), lenB)
-            checked_span_bounds(plan.Cbase, (0, Qm - 1), _buffer_range(bufC, nblock), lenC)
+        n_block_start = 0
+        while n_block_start < n_length
+            n_block_length = min(n_block, n_length - n_block_start)
+            fill_offsets!((bufB, bufC), plan.ngroup, n_block_start, n_block_length)
+            checked_span_bounds(Bbase, _buffer_range(bufB, n_block_length), (0, 0), lenB)
+            checked_span_bounds(plan.Cbase, (0, m_length - 1), _buffer_range(bufC, n_block_length), lenC)
             _outer_block!(
-                cp, bufC, ap, Bstorage, Bbase, bufB, nblock, Qm,
+                cp, bufC, ap, Bstorage, Bbase, bufB, n_block_length, m_length,
                 alphaT, betaT, plan.btransform, Val(W)
             )
-            jc += nblock
+            n_block_start += n_block_length
         end
     end
     return plan.Cstorage
@@ -58,11 +58,11 @@ end
 # chosen once per block.
 @inline function _outer_block!(
         cp::Ptr{T}, bufC::Vector{Int}, ap::Ptr{T}, Bstorage::SB, Bbase::Int,
-        bufB::Vector{Int}, nblock::Int, Qm::Int, alpha::T, beta::T, btransform::F, ::Val{W}
+        bufB::Vector{Int}, n_block_length::Int, m_length::Int, alpha::T, beta::T, btransform::F, ::Val{W}
     ) where {T, SB, F, W}
     sz = sizeof(T)
-    mmain = (Qm ÷ W) * W
-    @inbounds for n in 1:nblock
+    mmain = (m_length ÷ W) * W
+    @inbounds for n in 1:n_block_length
         b = convert(T, btransform(Bstorage[Bbase + bufB[n] + 1]))
         bv = Vec{W, T}(b)
         cpn = cp + sz * bufC[n]
@@ -73,7 +73,7 @@ end
                 vstore(alpha * r, cpn + sz * m)
                 m += W
             end
-            while m < Qm
+            while m < m_length
                 r = unsafe_load(ap + sz * m) * b
                 unsafe_store!(cpn + sz * m, alpha * r)
                 m += 1
@@ -84,7 +84,7 @@ end
                 vstore(muladd(alpha, r, vload(Vec{W, T}, cpn + sz * m)), cpn + sz * m)
                 m += W
             end
-            while m < Qm
+            while m < m_length
                 r = unsafe_load(ap + sz * m) * b
                 unsafe_store!(cpn + sz * m, muladd(alpha, r, unsafe_load(cpn + sz * m)))
                 m += 1
@@ -96,7 +96,7 @@ end
                 vstore(muladd(alpha, r, betav * vload(Vec{W, T}, cpn + sz * m)), cpn + sz * m)
                 m += W
             end
-            while m < Qm
+            while m < m_length
                 r = unsafe_load(ap + sz * m) * b
                 unsafe_store!(cpn + sz * m, muladd(alpha, r, beta * unsafe_load(cpn + sz * m)))
                 m += 1

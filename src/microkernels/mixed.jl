@@ -1,10 +1,11 @@
 # Mixed-domain kernels (BLIS's mixed-domain method): a complex operand times a
 # real one is a real product once the complex operand is viewed as real, so
 # both run the real `SIMDKernel` verbatim, at 2 real FMAs per complex MAC.
-#   * complex A x real B: interleaved A is a real `2MR x kc` panel; the
-#     accumulator is 1m/fmaddsub's interleaved layout.
-#   * real A x complex B: interleaved B is a real `kc x 2NR` panel; accumulator
-#     column `2j` holds the real and `2j+1` the imaginary part of column `j`.
+#   * complex A x real B: interleaved A is a real `2MR x k_block_length`
+#     panel; the accumulator is 1m/fmaddsub's interleaved layout.
+#   * real A x complex B: interleaved B is a real `k_block_length x 2NR` panel;
+#     accumulator column `2j` holds the real and `2j+1` the imaginary part of
+#     column `j`.
 
 using SIMD: Vec
 
@@ -78,8 +79,8 @@ lanewidth(kernel::_MixedKernel) = lanewidth(kernel.inner)
 
 zero_accumulator(kernel::_MixedKernel) = zero_accumulator(kernel.inner)
 
-@inline Base.accumulate(kernel::_MixedKernel, acc::NTuple, packed_a, packed_b, kc::Int) =
-    accumulate(kernel.inner, acc, packed_a, packed_b, kc)
+@inline Base.accumulate(kernel::_MixedKernel, acc::NTuple, packed_a, packed_b, k_block_length::Int) =
+    accumulate(kernel.inner, acc, packed_a, packed_b, k_block_length)
 
 # Inlined or not as the fmaddsub and planar stores each reuses.
 function store_tile!(

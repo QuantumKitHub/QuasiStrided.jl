@@ -250,10 +250,10 @@ end
         klabels::NTuple{DK, Int},
         indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
         indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
-        Qm::Int, Qn::Int
+        m_length::Int, n_length::Int
     ) where {DK, NA, NB, DM, DN}
     DK <= 1 && return klabels
-    return _choose_k_order(klabels, indA, A, morder, indB, B, norder, Qm, Qn, nothing)
+    return _choose_k_order(klabels, indA, A, morder, indB, B, norder, m_length, n_length, nothing)
 end
 
 # `l2bytes = nothing`: the core's L2 share, looked up only once a cost is needed.
@@ -261,7 +261,7 @@ function _choose_k_order(
         klabels::NTuple{DK, Int},
         indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
         indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
-        Qm::Int, Qn::Int, l2bytes::Union{Int, Nothing}
+        m_length::Int, n_length::Int, l2bytes::Union{Int, Nothing}
     ) where {DK, NA, NB, DM, DN}
     DK <= 1 && return klabels
     opA = _k_operand(klabels, indA, A, morder)
@@ -271,7 +271,7 @@ function _choose_k_order(
     permB = _sort_perm(id, opB.st)
     permA == id && permB == id && return klabels
     l2 = l2bytes === nothing ? _l2_core_bytes(eltype(A)) : l2bytes
-    cost(perm) = _k_order_cost(perm, opA, Qm, l2) + _k_order_cost(perm, opB, Qn, l2)
+    cost(perm) = _k_order_cost(perm, opA, m_length, l2) + _k_order_cost(perm, opB, n_length, l2)
     best = id
     bestcost = cost(id)
     for cand in (permA, permB)
@@ -307,7 +307,7 @@ end
 
 # Swap the operand roles (B feeds M) when the as-is M run cannot fill a register
 # sliver of the kernel it would run and the swapped one can: the vectorized
-# store needs `mr` consecutive M coordinates unit-stride in C, so a shorter run
-# buys nothing.
-_prefer_swap(run_m::Int, run_n::Int, mr_asis::Int, mr_swapped::Int = mr_asis) =
-    run_m < mr_asis && run_n >= mr_swapped
+# store needs `m_tile` consecutive M coordinates unit-stride in C, so a shorter
+# run buys nothing.
+_prefer_swap(run_m::Int, run_n::Int, m_tile_asis::Int, m_tile_swapped::Int = m_tile_asis) =
+    run_m < m_tile_asis && run_n >= m_tile_swapped

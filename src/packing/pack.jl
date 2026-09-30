@@ -15,13 +15,13 @@ end
 # Out of line so the packers carry no string formatting (and no GC frame).
 @noinline _throw_pack_extent(which::Symbol, name::Symbol, got::Int, limit::Int) = throw(
     ArgumentError(
-        "$(which)!: source $(name) count $got must satisfy 0 <= $got <= $(which === :pack_a ? "mr" : "nr")(kernel)=$limit"
+        "$(which)!: source $(name) count $got must satisfy 0 <= $got <= tile_size(kernel)[$(which === :pack_a ? 1 : 2)]=$limit"
     )
 )
-@noinline _throw_pack_short(which::Symbol, got::Int, need::Int, kc::Int) = throw(
+@noinline _throw_pack_short(which::Symbol, got::Int, need::Int, k_block_length::Int) = throw(
     DimensionMismatch(
         "$(which)!: packed buffer has length $got, " *
-            "need at least packed_$(which === :pack_a ? "a" : "b")_length(kernel, kc=$kc) = $need"
+            "need at least packed_$(which === :pack_a ? "a" : "b")_length(kernel, k_block_length=$k_block_length) = $need"
     )
 )
 
@@ -65,15 +65,15 @@ end
     ) where {V, MR, NR, T2, FA, FB, F, BOUNDS}
     _check_packed_eltype(packed, kernel)
     m = nrows(source)
-    kc = ncols(source)
+    k_block_length = ncols(source)
     (0 <= m <= MR) || _throw_pack_extent(:pack_a, :row, m, MR)
-    needed = packed_a_length(kernel, kc)
-    length(packed) >= needed || _throw_pack_short(:pack_a, length(packed), needed, kc)
+    needed = packed_a_length(kernel, k_block_length)
+    length(packed) >= needed || _throw_pack_short(:pack_a, length(packed), needed, k_block_length)
     # `<= 0`, not `== 0` (counts are never negative): LLVM may then assume
-    # `kc >= 1` in the loops below.
-    kc <= 0 && return packed
+    # `k_block_length >= 1` in the loops below.
+    k_block_length <= 0 && return packed
     BOUNDS && checked_tile_storage_bounds(source)
-    return _pack_a_sliver!(FA(), packed, source, kernel, transform, m, kc)
+    return _pack_a_sliver!(FA(), packed, source, kernel, transform, m, k_block_length)
 end
 
 @inline function _pack_b!(
@@ -81,55 +81,55 @@ end
         transform::F, ::Val{BOUNDS}
     ) where {V, MR, NR, T2, FA, FB, F, BOUNDS}
     _check_packed_eltype(packed, kernel)
-    kc = nrows(source)
+    k_block_length = nrows(source)
     n = ncols(source)
     (0 <= n <= NR) || _throw_pack_extent(:pack_b, :column, n, NR)
-    needed = packed_b_length(kernel, kc)
-    length(packed) >= needed || _throw_pack_short(:pack_b, length(packed), needed, kc)
-    kc <= 0 && return packed
+    needed = packed_b_length(kernel, k_block_length)
+    length(packed) >= needed || _throw_pack_short(:pack_b, length(packed), needed, k_block_length)
+    k_block_length <= 0 && return packed
     BOUNDS && checked_tile_storage_bounds(source)
-    return _pack_b_sliver!(FB(), packed, source, kernel, transform, n, kc)
+    return _pack_b_sliver!(FB(), packed, source, kernel, transform, n, k_block_length)
 end
 
 # A's packed index runs along `source.rows`, B's along `source.cols`; each
 # contiguous fast path needs that lane axis to be unit-stride.
 @inline function _pack_a_sliver!(
         format::FMT, packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2},
-        transform::F, m::Int, kc::Int
+        transform::F, m::Int, k_block_length::Int
     ) where {FMT, V, MR, NR, T2, F}
     if format isa RealFormat
         if _pack_a_contiguous_eligible(packed, source, transform, m, Val(MR), real(T2))
             rowbase = source.base + source.rows.base
-            return _pack_a_contiguous!(packed, source.storage, rowbase, source.cols, Val(MR), kc)
+            return _pack_a_contiguous!(packed, source.storage, rowbase, source.cols, Val(MR), k_block_length)
         end
     elseif _pack_complex_contiguous_eligible(
             packed, source.storage, source.rows, transform, format, m, Val(MR), T2
         )
         elembase = source.base + source.rows.base
         return _pack_complex_contiguous!(
-            format, packed, source.storage, elembase, source.cols, Val(MR), kc, transform
+            format, packed, source.storage, elembase, source.cols, Val(MR), k_block_length, transform
         )
     end
     load = (i, p) -> tile_load(source, i, p)
     plane_offset = (plane, i, p) -> packed_a_plane_offset(kernel, plane, i, p)
-    return _pack_panel!(packed, _element_type(format, T2), format, Val(MR), kc, m, transform, load, plane_offset)
+    return _pack_panel!(packed, _element_type(format, T2), format, Val(MR), k_block_length, m, transform, load, plane_offset)
 end
 
 @inline function _pack_b_sliver!(
         format::FMT, packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2},
-        transform::F, n::Int, kc::Int
+        transform::F, n::Int, k_block_length::Int
     ) where {FMT, V, MR, NR, T2, F}
     if _pack_complex_contiguous_eligible(
             packed, source.storage, source.cols, transform, format, n, Val(NR), T2
         )
         elembase = source.base + source.cols.base
         return _pack_complex_contiguous!(
-            format, packed, source.storage, elembase, source.rows, Val(NR), kc, transform
+            format, packed, source.storage, elembase, source.rows, Val(NR), k_block_length, transform
         )
     end
     load = (j, p) -> tile_load(source, p, j)
     plane_offset = (plane, j, p) -> packed_b_plane_offset(kernel, plane, j, p)
-    return _pack_panel!(packed, _element_type(format, T2), format, Val(NR), kc, n, transform, load, plane_offset)
+    return _pack_panel!(packed, _element_type(format, T2), format, Val(NR), k_block_length, n, transform, load, plane_offset)
 end
 
 # What a packed element converts to: the real operand of a mixed-domain kernel
@@ -137,24 +137,24 @@ end
 @inline _element_type(::RealFormat, ::Type{T}) where {T} = real(T)
 @inline _element_type(::PackFormat, ::Type{T}) where {T} = T
 
-# One sliver over `kc` K steps; `PD` (MR or NR) is a compile-time constant. A
-# full sliver gets a constant-trip inner loop that LLVM fully unrolls; a tail
-# writes its valid lanes and its padding as two loops. A per-lane
-# `t < valid ? load : zero` would compile to a branch around the load and keep
-# the loop scalar.
+# One sliver over `k_block_length` K steps; `PD` (MR or NR) is a compile-time
+# constant. A full sliver gets a constant-trip inner loop that LLVM fully
+# unrolls; a tail writes its valid lanes and its padding as two loops. A
+# per-lane `t < valid ? load : zero` would compile to a branch around the load
+# and keep the loop scalar.
 @inline function _pack_panel!(
-        packed::V, ::Type{T}, format::FMT, ::Val{PD}, kc::Int, valid::Int,
+        packed::V, ::Type{T}, format::FMT, ::Val{PD}, k_block_length::Int, valid::Int,
         transform::F, load::L, plane_offset::P
     ) where {V, T, FMT <: PackFormat, PD, F, L, P}
     if valid == PD
-        @inbounds for p in 0:(kc - 1)
+        @inbounds for p in 0:(k_block_length - 1)
             for t in 0:(PD - 1)
                 z = convert(T, transform(load(t, p)))::T
                 _pack_emit!(packed, format, plane_offset, t, p, z)
             end
         end
     else
-        @inbounds for p in 0:(kc - 1)
+        @inbounds for p in 0:(k_block_length - 1)
             for t in 0:(valid - 1)
                 z = convert(T, transform(load(t, p)))::T
                 _pack_emit!(packed, format, plane_offset, t, p, z)
