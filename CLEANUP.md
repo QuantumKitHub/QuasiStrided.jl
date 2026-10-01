@@ -19,8 +19,8 @@ TTFX when codegen is touched).
 | 4 | Packing formats | `packing/format.jl`, `panel.jl` (`transposed.jl` → chunk 11) | done |
 | 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | done |
 | 6 | Kernel interface | `microkernels/interface.jl`, `scalar.jl` | done |
-| 7 | SIMD kernels | `simd.jl`, `planar.jl` | |
-| 8 | Complex/mixed kernels | `onem.jl`, `fmaddsub.jl`, `mixed.jl` | |
+| 7 | SIMD kernels | `simd.jl`, `planar.jl` | in progress (with 8) |
+| 8 | Complex/mixed kernels | `onem.jl`, `fmaddsub.jl`, `mixed.jl` | in progress (with 7) |
 | 9 | Labels | `planning/labels.jl`, `conjugation.jl` | |
 | 10 | Kernel selection | `planning/kernel_selection.jl` | |
 | 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl`, the line-by-line packer | |
@@ -141,6 +141,32 @@ declares `pack_formats`, from which the reals per packed element follow. One
 under `--check-bounds=yes`, as in the tests, the checks run). `ScalarKernel`
 uses a tuple accumulator (allocation-free) and branches on `beta` once per
 tile. The contract lives in docstrings.
+
+### D11. Vector kernels (chunk 7, decided; applied together with chunk 8)
+
+One abstract `VectorKernel{MR, NR, T, W}` with generic `add_tile`,
+`store_tile!` and scattered store; each kernel supplies its K step, its
+full-block vector store and a generator-time accumulator-index function. All
+kernel structs in one types file before the implementations, so layout
+methods dispatch instead of `<:` tests (a generator only sees methods defined
+before it). Kept as is: `@generated` (not `ntuple`); `muladd(-a, b, c)` (it
+already compiles to one `vfnmadd`, no separate negation); the per-block `beta` tests in
+the vector stores are left for now (LLVM does not unswitch them: about 4
+compares per block). Hoisting is decided after chunk 8, leaning towards doing
+it: each executed variant is smaller and branch-free (less code fetched per
+store), at the cost of compile time and code size; measure both. `b_step_load*` hooks get descriptive
+names.
+
+### D12. Kernels = K step + accumulator layout (chunks 7–8)
+
+Three K steps (real, planar, fmaddsub) and three accumulator layouts (real,
+split re/im, lane pairs). `accumulator_layout(kernel)` selects one generic
+`store_tile!` (vector or scalar store, shared generated block/tail loop; each
+layout supplies its full-block store and lane value); one generic `add_tile`
+over `accumulate_step` with `k_steps` (1m: 2k). `inner(k)` is computed, not a
+field (no `KI` parameter). One generic constructor without `W`; generic
+`complex_method`/`lanewidth`. 1m gets the lane-pair vector store. The `beta`
+hoist is a separate commit on top, measured on its own.
 
 ## Possible improvements
 
