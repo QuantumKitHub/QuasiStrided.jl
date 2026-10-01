@@ -44,7 +44,7 @@ end
 # A and B are packed line by line (`plan.mpack`/`plan.npack`).
 struct _NestPath{UNPACKED_B, AFF, SPLIT} end
 
-@inline _is_ramp_map(g::AxisGroup, p::Int) = _map_ramp_step(g, p) !== nothing
+@inline _is_ramp_map(g::AxisGroup, p::Int) = map_ramp_step(g, p) !== nothing
 
 # N's B flag stays `false` when B is read in place: that path builds no B
 # sliver axis, so the flag would only split specialisations. A split group is

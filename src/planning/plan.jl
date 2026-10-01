@@ -185,14 +185,14 @@ function _planned(
     run_m = T <: Real || method isa _MixedMethod ? _leading_unit_run(morder, indC, C) : 0
     run_n = T <: Real ? _leading_unit_run(norder, indC, C) : 0
 
-    mgroup = _build_pair_group(morder, indA, A, indC, C)  # maps: (A, C)
-    ngroup = _build_pair_group(norder, indB, B, indC, C)  # maps: (B, C)
+    mgroup = AxisGroup(morder, (indA, A), (indC, C))  # maps: (A, C)
+    ngroup = AxisGroup(norder, (indB, B), (indC, C))  # maps: (B, C)
 
     m_length = axis_length(mgroup)
     n_length = axis_length(ngroup)
 
     korder = _order_contract_labels(klabels, indA, A, morder, indB, B, norder, m_length, n_length)
-    kgroup = _build_pair_group(korder, indA, A, indB, B)  # maps: (A, B)
+    kgroup = AxisGroup(korder, (indA, A), (indB, B))  # maps: (A, B)
 
     k_length = axis_length(kgroup)
 
@@ -201,7 +201,7 @@ function _planned(
     if T <: Real && _prefer_swap(run_m, run_n, m_tile_asis, m_tile_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
         # together; the sum is unchanged.
-        kgroup_swapped = _build_pair_group(korder, indB, B, indA, A)  # maps: (B, A)
+        kgroup_swapped = AxisGroup(korder, (indB, B), (indA, A))  # maps: (B, A)
         req_swapped = _plan_request(
             T, f, ngroup, mgroup, kgroup_swapped,
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),

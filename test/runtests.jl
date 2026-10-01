@@ -2,8 +2,8 @@ using Test
 using Random
 using QuasiStrided
 # Internal names the test files use unqualified.
-using QuasiStrided: AxisGroup, axis_length, offsets, fill_offsets!, BlockDescriptor,
-    describe_block, block_descriptors!, normalize_group, KernelDescriptor, tile_size,
+using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
+    describe_block, block_descriptors!, KernelDescriptor, tile_size,
     scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
     AffineAxis, ScatterAxis, SourceTile, DestinationTile, axis_from_descriptor, nrows,
     ncols, axis_offset_range, checked_tile_storage_bounds, pack_a!, pack_b!,

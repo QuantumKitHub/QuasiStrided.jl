@@ -55,6 +55,49 @@ axis_length(ax::PtrScatterAxis) = ax.count
 @inline axis_offset(ax::PtrScatterAxis, t::Int) =
     unsafe_load(ax.offsets + sizeof(Int) * t)
 
+# An offset interval of one map: `regular` iff `buffer[t+1] == base + t*stride`
+# for all `t < count`; otherwise read the buffer (valid until it is refilled).
+struct BlockDescriptor
+    base::Int
+    stride::Int
+    count::Int
+    regular::Bool
+end
+
+# Classifies `buffer[first+1 : first+count]`. A difference that overflows is
+# irregular: a regular block's offset range is computed as `base + t*stride`.
+function describe_block(buffer::Vector{Int}, first::Int, count::Int)
+    first >= 0 || throw(ArgumentError("first must be nonnegative, got $first"))
+    count >= 0 || throw(ArgumentError("count must be nonnegative, got $count"))
+    count <= length(buffer) - first ||
+        throw(DimensionMismatch("buffer length $(length(buffer)) is less than first + count = $first + $count"))
+
+    count == 0 && return BlockDescriptor(0, 0, 0, true)
+
+    @inbounds base = buffer[first + 1]
+    count == 1 && return BlockDescriptor(base, 0, 1, true)
+
+    @inbounds stride, overflowed = Base.Checked.sub_with_overflow(buffer[first + 2], buffer[first + 1])
+    overflowed && return BlockDescriptor(base, 0, count, false)
+
+    @inbounds for t in 2:(count - 1)
+        diff, ovf = Base.Checked.sub_with_overflow(buffer[first + t + 1], buffer[first + t])
+        (ovf || diff != stride) && return BlockDescriptor(base, 0, count, false)
+    end
+
+    return BlockDescriptor(base, stride, count, true)
+end
+
+describe_block(buffer::Vector{Int}, count::Int) = describe_block(buffer, 0, count)
+
+function block_descriptors!(
+        buffers::NTuple{P, Vector{Int}}, g::AxisGroup{D, P},
+        first::Int, count::Int
+    ) where {D, P}
+    fill_offsets!(buffers, g, first, count)
+    return ntuple(p -> describe_block(buffers[p], count), Val(P))
+end
+
 function axis_from_descriptor(descriptor::BlockDescriptor, buffer::Vector{Int}, first::Int)
     if descriptor.regular
         return AffineAxis(descriptor.base, descriptor.stride, descriptor.count)

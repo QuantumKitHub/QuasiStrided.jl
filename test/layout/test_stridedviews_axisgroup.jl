@@ -2,7 +2,6 @@
 # indexing.
 
 using StridedViews: StridedView, offset
-using QuasiStrided: _build_pair_group
 
 @testset "AxisGroup over a StridedView reproduces its indexing ($name)" for (name, v) in (
         ("permuted", permutedims(StridedView(reshape(collect(1.0:30.0), 3, 5, 2)), (3, 1, 2))),
@@ -19,12 +18,12 @@ using QuasiStrided: _build_pair_group
     end
 end
 
-@testset "_build_pair_group: worked example from label positions" begin
+@testset "AxisGroup from labels: worked example" begin
     A, B, C = StridedView(randn(3, 5, 2)), StridedView(randn(5, 4)), StridedView(zeros(3, 4, 2))
     indA, indB, indC = (1, 2, 3), (2, 4), (1, 4, 3)   # A[a,k,b] B[k,n] C[a,n,b]
-    M = _build_pair_group((1, 3), indA, A, indC, C)
+    M = AxisGroup((1, 3), (indA, A), (indC, C))
     @test (M.lengths, M.strides) == ((3, 2), ((1, 15), (1, 12)))
-    K = _build_pair_group((2,), indA, A, indB, B)
+    K = AxisGroup((2,), (indA, A), (indB, B))
     @test (K.lengths, K.strides) == ((5,), ((3,), (1,)))
-    @test_throws DimensionMismatch _build_pair_group((2,), indA, A, indB, StridedView(randn(6, 4)))
+    @test_throws DimensionMismatch AxisGroup((2,), (indA, A), (indB, StridedView(randn(6, 4))))
 end

@@ -235,7 +235,7 @@ end
 
 # `g` with its second map replaced by the column-major one scaled by `step`.
 @inline function _dense_second_map(g::AxisGroup{D, 2}, step::Int) where {D}
-    dense = ntuple(d -> step * _unchecked_axis_length(ntuple(i -> i < d ? g.lengths[i] : 1, Val(D))), Val(D))
+    dense = ntuple(d -> step * prod(ntuple(i -> i < d ? g.lengths[i] : 1, Val(D))), Val(D))
     return AxisGroup(g.lengths, (g.strides[1], dense))
 end
 

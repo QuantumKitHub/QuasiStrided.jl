@@ -29,7 +29,7 @@ const _pcf_Plan = QuasiStrided.ContractPlan
     @test_throws ArgumentError QS._classify_labels((1, 2), (3, 4), (1, 2, 3, 9))
 end
 
-@testset "per-call floor: _build_pair_group matches a direct construction" begin
+@testset "per-call floor: AxisGroup from labels matches a direct construction" begin
     Random.seed!(1234)
     for trial in 1:60
         nd1 = rand(1:4)
@@ -47,7 +47,7 @@ end
         )
         v2 = StridedView(randn(dims2))
 
-        g = QS._build_pair_group(Tuple(labels), ind1, v1, ind2, v2)
+        g = AxisGroup(Tuple(labels), (ind1, v1), (ind2, v2))
         s1 = Base.strides(v1)
         s2 = Base.strides(v2)
         p1 = ntuple(d -> findfirst(==(labels[d]), ind1)::Int, shared)
@@ -58,16 +58,16 @@ end
         @test g isa AxisGroup{shared, 2}
         @test isconcretetype(typeof(g))
         @test Base.return_types(
-            QS._build_pair_group, (typeof(Tuple(labels)), typeof(ind1), typeof(v1), typeof(ind2), typeof(v2))
+            AxisGroup, (typeof(Tuple(labels)), Tuple{typeof(ind1), typeof(v1)}, Tuple{typeof(ind2), typeof(v2)})
         ) == [AxisGroup{shared, 2}]
     end
 
     v1 = StridedView(randn(3, 4))
     v2 = StridedView(randn(5, 4))
-    @test_throws DimensionMismatch QS._build_pair_group((1,), (1, 2), v1, (1, 2), v2)
+    @test_throws DimensionMismatch AxisGroup((1,), ((1, 2), v1), ((1, 2), v2))
 
     # Rank zero: an outer product's K group.
-    g0 = QS._build_pair_group((), (1, 2), v1, (1, 2), v2)
+    g0 = AxisGroup((), ((1, 2), v1), ((1, 2), v2))
     @test g0 isa AxisGroup{0, 2}
     @test axis_length(g0) == 1
 end
@@ -419,7 +419,6 @@ end
             s = offsets(g, 1)
             @test any(q -> offsets(g, q) != (q * s[1], q * s[2]), 0:(Q - 1))
         end
-        Q > 0 && @test isramp == (length(normalize_group(g).lengths) <= 1)
     end
 end
 

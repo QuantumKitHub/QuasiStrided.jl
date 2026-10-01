@@ -20,7 +20,7 @@
 
 # Set element `n` of `out`, ignoring an `n` past the end (input about to be rejected).
 @inline function _push_label(out::NTuple{D, Int}, n::Int, x::Int) where {D}
-    return n <= D ? _tupleset(out, n, x) : out
+    return n <= D ? Base.setindex(out, x, n) : out
 end
 
 # (mlabels, nlabels, klabels) in indA/indB order. Per (inA, inB, inC):
@@ -101,10 +101,6 @@ function _classify_labels(
     return mlabels, nlabels, klabels
 end
 
-@noinline _throw_label_length(lbl::Int, l1::Int, l2::Int) = throw(
-    DimensionMismatch("label $lbl has mismatched axis length: $l1 vs $l2")
-)
-
 # Stable insertion sort of the permutation `perm` by `key[perm[j]]`, ascending
 # (n <= ndims, and unlike `sortperm` it allocates nothing).
 @inline function _sort_perm(perm::NTuple{D, Int}, key::NTuple{D, Int}) where {D}
@@ -114,10 +110,10 @@ end
         kx = key[x]
         j = i - 1
         while j >= 1 && key[out[j]] > kx
-            out = _tupleset(out, j + 1, out[j])
+            out = Base.setindex(out, out[j], j + 1)
             j -= 1
         end
-        out = _tupleset(out, j + 1, x)
+        out = Base.setindex(out, x, j + 1)
     end
     return out
 end

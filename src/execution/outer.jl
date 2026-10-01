@@ -15,8 +15,8 @@ function _outer_applicable(::Type{T}, Astorage, Cstorage, mgroup::AxisGroup, m_l
     T <: Real || return false
     (Astorage isa DenseVector{T} && Cstorage isa DenseVector{T}) || return false
     m_length >= _dot_lanewidth(T) || return false
-    _map_ramp_step(mgroup, 1) == 1 || return false
-    return _map_ramp_step(mgroup, 2) == 1
+    map_ramp_step(mgroup, 1) == 1 || return false
+    return map_ramp_step(mgroup, 2) == 1
 end
 
 function _execute_outer!(

@@ -20,29 +20,6 @@ end
 # (a complex output has two accumulator planes).
 _dot_group_width(::Type{T}) where {T} = T <: Complex ? 4 : 8
 
-# The affine step of map `p` of `g` alone, or `nothing` if it is not a single
-# ramp; `affine_ramp` asks the same of all maps at once.
-function _map_ramp_step(g::AxisGroup{D, P}, p::Int) where {D, P}
-    step = 0
-    run = 1
-    started = false
-    for d in 1:D
-        L = g.lengths[d]
-        L == 0 && return 0
-        L == 1 && continue
-        S = g.strides[p][d]
-        if !started
-            step = S
-            run = L
-            started = true
-        else
-            Int128(run) * Int128(step) == Int128(S) || return nothing
-            run *= L
-        end
-    end
-    return step
-end
-
 # Whether the dot path applies (all but the workspace capacity): a degenerate
 # free extent, a matrix operand with unit-ramp K in dense storage (raw-pointer
 # loads), and at least one vector of K.
@@ -52,10 +29,10 @@ function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, m_len
     k_length >= _dot_lanewidth(T) || return false
     if m_length == 1
         Bstorage isa DenseVector{T} || return false
-        _map_ramp_step(kgroup, 2) == 1 || return false
+        map_ramp_step(kgroup, 2) == 1 || return false
     else
         Astorage isa DenseVector{T} || return false
-        _map_ramp_step(kgroup, 1) == 1 || return false
+        map_ramp_step(kgroup, 1) == 1 || return false
     end
     return true
 end

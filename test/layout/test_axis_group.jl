@@ -1,5 +1,5 @@
 # AxisGroup indexing against an oracle built on `CartesianIndices` (first axis
-# fastest), never on offsets/fill_offsets!/block_descriptors! themselves.
+# fastest), never on fill_offsets!/block_descriptors! themselves.
 
 using QuasiStrided: affine_ramp
 
@@ -47,29 +47,20 @@ end
         full = oracle_offsets(lengths, strides)
         Q = axis_length(g)
         @test Q == length(full)
-        @test [offsets(g, q) for q in 0:(Q - 1)] == full
-        @test_throws BoundsError offsets(g, Q)
-        @test_throws BoundsError offsets(g, -1)
         isramp, steps = affine_ramp(g)
         if Q > 0
             step1 = Q > 1 ? full[2] : ntuple(_ -> 0, P)
             @test isramp == (full == [step1 .* q for q in 0:(Q - 1)])
             isramp && @test steps == step1
         end
-        # normalize_group is planning-time only: check it at the pair arity.
-        gn = P == 2 ? normalize_group(g) : g
-        @test axis_length(gn) == Q
         for _ in 1:4
             first = rand(rng, 0:Q)
             count = rand(rng, 0:(Q - first))
             bufs = ntuple(_ -> fill(-1, count + 2), P)   # the suffix must stay untouched
             descs = block_descriptors!(bufs, g, first, count)
-            bufsn = ntuple(_ -> zeros(Int, count), P)
-            fill_offsets!(bufsn, gn, first, count)
             for p in 1:P
                 expected = [full[i + 1][p] for i in first:(first + count - 1)]
                 @test bufs[p] == [expected; -1; -1]
-                @test bufsn[p] == expected
                 d = descs[p]
                 affine = count <= 1 || expected == [expected[1] + t * (expected[2] - expected[1]) for t in 0:(count - 1)]
                 @test d.regular == affine && d.count == count
@@ -90,17 +81,6 @@ end
     # Singleton strides never contribute, even extreme ones.
     g1 = AxisGroup((1,), ((typemin(Int),),))
     @test offsets(g1, 0) == (0,)
-end
-
-@testset "normalize_group: folds only where every map folds" begin
-    folded = normalize_group(AxisGroup((3, 2), ((1, 3), (2, 6))))
-    @test folded.lengths == (6,) && folded.strides == ((1,), (2,))
-    @test normalize_group(AxisGroup((4, 3), ((-1, -4),))).lengths == (12,)
-    # map 1 alone would fold, map 2 does not: the group must not.
-    @test normalize_group(AxisGroup((3, 2), ((1, 3), (1, 10)))).lengths == (3, 2)
-    g = normalize_group(AxisGroup((1, 1, 1), ((5, 6, 7), (8, 9, 10))))
-    @test g.lengths == () && length(g.strides) == 2 && offsets(g, 0) == (0, 0)
-    @test normalize_group(AxisGroup((3, 1, 2), ((1, 999, 3),))).lengths == (6,)
 end
 
 @testset "AxisGroup: constructor validation and overflow policy" begin
@@ -124,8 +104,6 @@ end
     end
     short, ok = fill(-7, Q - 1), fill(-7, Q)
     @test_throws DimensionMismatch fill_offsets!((short, ok), g, 0, Q)
-    @test ok == fill(-7, Q)
-    @test_throws ArgumentError fill_offsets!((ok, ok), g, 0, Q)    # aliased buffers
     @test ok == fill(-7, Q)
     fill_offsets!((ok, short), g, Q, 0)                            # empty interval at Q
     @test ok == fill(-7, Q)

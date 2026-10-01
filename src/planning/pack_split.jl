@@ -128,7 +128,7 @@ function _pack_split_blocks(
     (q, Eq, E) = best[3] > 0 ? best : anyc
     E == 0 && return (eff, _NO_SPLIT)
     blk = lcm(R, E * L)
-    neweff = min(budget ÷ blk * blk, _roundup(_unchecked_axis_length(lengths), R))
+    neweff = min(budget ÷ blk * blk, _roundup(prod(lengths), R))
     return (neweff, PackSplit(q, dj, L, kinner, Eq, E))
 end
 

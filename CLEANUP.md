@@ -14,7 +14,7 @@ TTFX when codegen is touched).
 |---|---|---|---|
 | 0 | Tour | `QuasiStrided.jl`, `plan.jl`, `execute.jl` call path | done |
 | 1 | Hardware | `hardware/target.jl` | done |
-| 2 | Axis groups | `layout/axis_group.jl`, `pair_group.jl` | |
+| 2 | Axis groups | `layout/axis_group.jl`, `pair_group.jl` | done |
 | 3 | Tiles | `layout/tiles.jl` | |
 | 4 | Packing formats | `packing/format.jl`, `panel.jl`, `transposed.jl` | |
 | 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | |
@@ -89,6 +89,23 @@ time, CpuId is x86-only without cache sharing, Hwloc needs a C library and
 `CacheLevel` lost `ways`, `TargetProfile` lost `arch` and derives
 `vector_bytes`/`nregisters` from `isa`; `core_bytes(profile, level)` replaces
 three copies of the per-core share.
+
+### D6. Axis groups (chunk 2, applied)
+
+`normalize_group` and `offsets` leave `src` (`offsets` is a test helper);
+`map_ramp_step` moves from dot.jl and `affine_ramp` is built on it;
+`Base.setindex`/`prod`/`Base.Checked` replace hand-written versions;
+`BlockDescriptor` moves to tiles.jl; `pair_group.jl` becomes the
+`AxisGroup(labels, (ind1, v1), (ind2, v2))` constructor; `fill_offsets!`
+drops its alias check. Kept: generic `P` (a batch label in A, B and C would
+be a `P = 3` group) and unconditional range checks in `fill_offsets!`
+(`@boundscheck`/`@propagate_inbounds` only help when inlined).
+
+## Possible improvements
+
+- Piecewise-affine block descriptions instead of block-sized offset buffers:
+  https://github.com/lkdvos/QuasiStrided.jl/issues/13 (decide after chunks
+  3, 5, 12, 14).
 
 ## Open items (to revisit in their chunk)
 

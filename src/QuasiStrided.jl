@@ -1,6 +1,7 @@
 module QuasiStrided
 
 using StridedViews: StridedView, offset
+using Base.Checked: checked_abs, checked_add, checked_mul
 
 # TensorOperations names are always qualified: a bare `using` collides on `scalartype`.
 import TensorOperations as TO
@@ -15,7 +16,6 @@ include("hardware/target.jl")
 
 # --- Layout: zero-based strided/scattered addressing ---
 include("layout/axis_group.jl")
-include("layout/pair_group.jl")
 include("layout/tiles.jl")
 
 # --- Packing: packed-panel formats and the packers that fill them ---

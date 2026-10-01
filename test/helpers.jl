@@ -11,6 +11,12 @@ const execute_tilewise! = QuasiStrided.execute_tilewise!
 
 import TensorOperations as TO
 
+# Offsets of coordinate `q` of an `AxisGroup` in every map, by direct decoding.
+function offsets(g::AxisGroup{D, P}, q::Int) where {D, P}
+    c = Tuple(CartesianIndices(g.lengths)[q + 1])
+    return ntuple(p -> sum((c[d] - 1) * g.strides[p][d] for d in 1:D; init = 0), P)
+end
+
 # Plan for the matmul C[m,n] = sum_k A[m,k]*B[k,n].
 function _mm_plan(Cmat, Amat, Bmat; kwargs...)
     return plan_contract(
