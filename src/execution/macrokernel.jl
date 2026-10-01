@@ -18,14 +18,14 @@ end
 @noinline _throw_irregular_ramp_descriptor() =
     throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))
 
-# `pack!` is one of pack_a!/pack_b!/unsafe_pack_a!/unsafe_pack_b!; call sites
-# spell the unsafe name out. GUARDRAIL: `transform` needs its own bound type
-# parameter, or it costs a dynamic dispatch per call (see `pack_a!`).
+# `pack!` is `pack!` or `unsafe_pack!`; B passes its axes swapped (its
+# `transpose`). GUARDRAIL: `transform` needs its own bound type parameter, or
+# it costs a dynamic dispatch per call.
 @inline function _pack_sliver!(
         pack!::PF, packed::PK, storage::S, base::Int,
-        rows::R, cols::C, kernel, transform::TF
+        lanes::R, steps::C, spec, transform::TF
     ) where {PF, PK, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}, TF}
-    pack!(packed, Tile(storage, base, rows, cols), kernel, transform)
+    pack!(packed, Tile(storage, base, lanes, steps), spec, transform)
     return nothing
 end
 

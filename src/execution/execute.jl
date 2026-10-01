@@ -368,8 +368,7 @@ function _execute_nest!(
 
             if split_b
                 _pack_block_transposed!(
-                    packed_b_offset, b_format(kernel),
-                    packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), kernel, Val(tile_size(kernel, 2)), b_sliver_width,
+                    packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), sliver_spec(kernel, 2),
                     plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, n_block_length, k_block_length,
                     plan.npack
                 )
@@ -379,8 +378,8 @@ function _execute_nest!(
                     bpanel = _sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
                     colsB = _axis_of(ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, aff_nB)
                     _pack_sliver!(
-                        unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
-                        kernel, btransform
+                        unsafe_pack!, bpanel, plan.Bstorage, plan.Bbase, colsB, rowsB_k,
+                        sliver_spec(kernel, 2), btransform
                     )
                 end
             end
@@ -408,8 +407,7 @@ function _execute_nest!(
 
                 if split_a
                     _pack_block_transposed!(
-                        packed_a_offset, a_format(kernel),
-                        packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), kernel, Val(tile_size(kernel, 1)), a_sliver_width,
+                        packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), sliver_spec(kernel, 1),
                         plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, m_block_length, k_block_length,
                         plan.mpack
                     )
@@ -419,8 +417,8 @@ function _execute_nest!(
                         apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
                         rowsA = _axis_of(ws.m_desc_A[m_tile_index + 1], ws.m_buf_A, m_tile_start, aff_mA)
                         _pack_sliver!(
-                            unsafe_pack_a!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
-                            kernel, atransform
+                            unsafe_pack!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
+                            sliver_spec(kernel, 1), atransform
                         )
                     end
                 end

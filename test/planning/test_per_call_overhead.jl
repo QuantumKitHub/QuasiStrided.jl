@@ -345,29 +345,22 @@ end
     @test_throws BoundsError _pcf_exec(plow, 1.0, 0.0)
 end
 
-@testset "per-call floor: the unsafe_* packers keep every non-bounds check" begin
+@testset "per-call floor: unsafe_pack! keeps every non-bounds check" begin
     kernel = SIMDKernel(Val(8), Val(6), Float64)
     src = Tile(collect(1.0:64.0), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 4))
     packed = zeros(8 * 4)
 
+    a = sliver_spec(kernel, 1)
     ref = zeros(8 * 4)
-    pack_a!(ref, src, kernel, identity)
-    GC.@preserve packed QS.unsafe_pack_a!(QS.packed_panel(packed, 1, length(packed)), src, kernel, identity)
+    pack!(ref, src, a, identity)
+    GC.@preserve packed unsafe_pack!(QS.packed_panel(packed, 1, length(packed)), src, a, identity)
     @test packed == ref
 
     # Only the bounds checks are skipped.
-    @test_throws DimensionMismatch QS.unsafe_pack_a!(zeros(3), src, kernel, identity)
-    @test_throws ArgumentError QS.unsafe_pack_a!(zeros(Float32, 64), src, kernel, identity)
+    @test_throws DimensionMismatch unsafe_pack!(zeros(3), src, a, identity)
+    @test_throws ArgumentError unsafe_pack!(zeros(Float32, 64), src, a, identity)
     toowide = Tile(collect(1.0:200.0), 0, AffineAxis(0, 1, 9), AffineAxis(0, 16, 4))
-    @test_throws ArgumentError QS.unsafe_pack_a!(zeros(200), toowide, kernel, identity)
-
-    srcB = Tile(collect(1.0:64.0), 0, AffineAxis(0, 1, 4), AffineAxis(0, 4, 6))
-    refB = zeros(6 * 4)
-    packedB = zeros(6 * 4)
-    pack_b!(refB, srcB, kernel, identity)
-    GC.@preserve packedB QS.unsafe_pack_b!(QS.packed_panel(packedB, 1, length(packedB)), srcB, kernel, identity)
-    @test packedB == refB
-    @test_throws DimensionMismatch QS.unsafe_pack_b!(zeros(3), srcB, kernel, identity)
+    @test_throws ArgumentError unsafe_pack!(zeros(200), toowide, a, identity)
 
     dest = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
     @test_throws DimensionMismatch QS.unsafe_execute_tile!(
@@ -378,8 +371,9 @@ end
     )
     d1 = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
     d2 = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
-    execute_tile!(kernel, d1, ref, refB, 4, 1.0, 0.0)
-    QS.unsafe_execute_tile!(kernel, d2, ref, refB, 4, 1.0, 0.0)
+    packedB = collect(1.0:24.0)
+    execute_tile!(kernel, d1, ref, packedB, 4, 1.0, 0.0)
+    QS.unsafe_execute_tile!(kernel, d2, ref, packedB, 4, 1.0, 0.0)
     @test d1.storage == d2.storage
 end
 

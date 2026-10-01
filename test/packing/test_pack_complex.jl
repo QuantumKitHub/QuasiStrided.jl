@@ -19,7 +19,7 @@ const COMPLEX_FORMATS = (
     (InterleavedFormat(), PlanarFormat()), (OneEFormat(), OneEFormat()),
 )
 
-@testset "complex pack_a!/pack_b! ($T, $(typeof(fa)), $(typeof(fb))) vs reference" for
+@testset "complex pack! ($T, $(typeof(fa)), $(typeof(fb))) vs reference" for
     T in (ComplexF64, ComplexF32), (fa, fb) in COMPLEX_FORMATS
 
     MR, NR = 4, 3
@@ -28,7 +28,7 @@ const COMPLEX_FORMATS = (
     storage = complex_storage(T, 4000)
     calls = Ref(0)
     counting = z -> (calls[] += 1; 2z + one(T))   # nonzero at zero
-    for (side, pack!, PD, fmt) in ((:a, pack_a!, MR, fa), (:b, pack_b!, NR, fb)), k_block_length in (1, 5)
+    for (i, PD, fmt) in ((1, MR, fa), (2, NR, fb)), k_block_length in (1, 5)
         fixtures = (
             (AffineAxis(0, 1, PD), AffineAxis(0, 97, k_block_length)),
             (AffineAxis(40, -1, PD), AffineAxis(3000, -97, k_block_length)),
@@ -36,13 +36,13 @@ const COMPLEX_FORMATS = (
         )
         len = _ref_rpe(fmt) * PD * k_block_length
         for (lane, step) in fixtures, valid in (PD, 1, 0)
-            src, g = pack_fixture(side, storage, 500, resized(lane, valid), step)
+            src, g = pack_fixture(storage, 500, resized(lane, valid), step)
             for f in (identity, conj)
-                got, _ = pack_into(pack!, :vector, R, len, src, kernel, f)
+                got, _ = pack_into(:vector, R, len, src, sliver_spec(kernel, i), f)
                 @test all(isequal.(got, ref_pack(fmt, T, PD, k_block_length, valid, g, f)))
             end
             calls[] = 0
-            got, canaries = pack_into(pack!, :panel, R, len, src, kernel, counting)
+            got, canaries = pack_into(:panel, R, len, src, sliver_spec(kernel, i), counting)
             @test all(isequal.(got, ref_pack(fmt, T, PD, k_block_length, valid, g, z -> 2z + one(T))))
             @test calls[] == valid * k_block_length   # once per element, not per real half
             @test canaries
@@ -53,24 +53,26 @@ end
 @testset "complex packing: validation before any write, k_block_length == 0 is a no-op" begin
     kernel = Descriptor(Val(4), Val(3), ComplexF64, PlanarFormat(), PlanarFormat())
     storage = fill(ComplexF64(3, 4), 100)
-    src = Tile(storage, 0, AffineAxis(0, 1, 4), AffineAxis(0, 8, 2))
+    src = Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 8, 2))
+    a, b = sliver_spec(kernel, 1), sliver_spec(kernel, 2)
     # The buffer holds realtype(kernel), not scalartype(kernel).
-    @test_throws ArgumentError pack_a!(zeros(ComplexF64, 1000), src, kernel, identity)
-    @test_throws ArgumentError pack_b!(zeros(ComplexF64, 1000), src, kernel, identity)
-    @test_throws ArgumentError pack_a!(zeros(Float32, 1000), src, kernel, identity)
+    @test_throws ArgumentError pack!(zeros(ComplexF64, 1000), src, a, identity)
+    @test_throws ArgumentError pack!(zeros(ComplexF64, 1000), src, b, identity)
+    @test_throws ArgumentError pack!(zeros(Float32, 1000), src, a, identity)
     canary = fill(-42.0, 1000)
-    @test_throws ArgumentError pack_a!(canary, Tile(storage, 0, AffineAxis(0, 1, 5), src.cols), kernel, identity)
-    @test_throws ArgumentError pack_b!(canary, Tile(storage, 0, src.cols, AffineAxis(0, 1, 4)), kernel, identity)
+    @test_throws ArgumentError pack!(canary, Tile(storage, 0, AffineAxis(0, 1, 5), src.cols), a, identity)
+    @test_throws ArgumentError pack!(canary, Tile(storage, 0, AffineAxis(0, 1, 4), src.cols), b, identity)
     # A buffer sized as if it held complex elements is half as long as needed.
-    @test_throws DimensionMismatch pack_a!(zeros(Float64, 4 * 2), src, kernel, identity)
-    @test_throws BoundsError pack_a!(canary, Tile(storage, 90, src.rows, src.cols), kernel, identity)
+    @test_throws DimensionMismatch pack!(zeros(Float64, 4 * 2), src, a, identity)
+    @test_throws BoundsError pack!(canary, Tile(storage, 90, src.rows, src.cols), a, identity)
     @test all(==(-42.0), canary)
 
     read = Ref(false)
     spy = z -> (read[] = true; z)
     packed = fill(-42.0, 8)
-    @test pack_a!(packed, Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 8, 0)), kernel, spy) === packed
-    @test pack_b!(packed, Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 8, 3)), kernel, spy) === packed
+    for spec in (a, b)
+        @test pack!(packed, Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 8, 0)), spec, spy) === packed
+    end
     @test all(==(-42.0), packed)
     @test !read[]
 end
@@ -81,38 +83,26 @@ end
     function run(::Type{T}, fa, fb) where {T}
         MR, NR, k_block_length = 8, 6, 4
         kernel = Descriptor(Val(MR), Val(NR), T, fa, fb)
-        R = real(T)
         storage = rand(T, 4000)
-        bufa = zeros(R, packed_a_length(kernel, k_block_length))
-        bufb = zeros(R, packed_b_length(kernel, k_block_length))
-        ro, co, ro_b = collect(0:(MR - 1)) .* 3, [0, 100, 250, 400], collect(0:(NR - 1)) .* 5
+        steps, lanes = [0, 100, 250, 400], collect(0:(max(MR, NR) - 1)) .* 3
         fast = Int[]
         slow = Int[]
-        GC.@preserve bufa bufb begin
-            pa = packed_panel(bufa, 1, length(bufa))
-            pb = packed_panel(bufb, 1, length(bufb))
-            full_a = Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length))
-            full_b = Tile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR))
-            for f in (identity, conj)   # the contiguous fast path, where the ISA has it
-                push!(fast, steady_pack_allocs(pack_a!, pa, full_a, kernel, f))
-                push!(fast, steady_pack_allocs(pack_b!, pb, full_b, kernel, f))
-            end
-            srcs_a = (
-                full_a, Tile(storage, 0, view(ro, 1:MR), view(co, 1:k_block_length)),
-                Tile(storage, 0, AffineAxis(0, 1, MR - 1), AffineAxis(0, MR, k_block_length)),
-                Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
+        for (i, L) in ((1, MR), (2, NR))
+            spec = sliver_spec(kernel, i)
+            buf = zeros(real(T), packed_length(spec, k_block_length))
+            full = Tile(storage, 0, AffineAxis(0, 1, L), AffineAxis(0, L, k_block_length))
+            srcs = (
+                full, Tile(storage, 0, view(lanes, 1:L), view(steps, 1:k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, L - 1), AffineAxis(0, L, k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, L), AffineAxis(0, L, 0)),
             )
-            srcs_b = (
-                full_b, Tile(storage, 0, view(co, 1:k_block_length), view(ro_b, 1:NR)),
-                Tile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR - 1)),
-            )
-            for s in srcs_a, f in (identity, conj)
-                push!(slow, steady_pack_allocs(pack_a!, bufa, s, kernel, f))
+            GC.@preserve buf for f in (identity, conj)   # the contiguous fast path, where the ISA has it
+                push!(fast, steady_pack_allocs(packed_panel(buf, 1, length(buf)), full, spec, f))
             end
-            for s in srcs_b, f in (identity, conj)
-                push!(slow, steady_pack_allocs(pack_b!, bufb, s, kernel, f))
+            for s in srcs, f in (identity, conj)
+                push!(slow, steady_pack_allocs(buf, s, spec, f))
             end
-            push!(slow, steady_pack_allocs(pack_a!, bufa, full_a, kernel, z -> 2z + oneunit(z)))
+            push!(slow, steady_pack_allocs(buf, full, spec, z -> 2z + oneunit(z)))
         end
         return fast, slow
     end

@@ -97,6 +97,7 @@ struct Tile{S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
 end
 
 Base.size(tile::Tile) = (length(tile.rows), length(tile.cols))
+Base.transpose(tile::Tile) = Tile(tile.storage, tile.base, tile.cols, tile.rows)
 
 Base.@propagate_inbounds Base.getindex(tile::Tile, i::Int, j::Int) =
     tile.storage[tile.base + tile.rows[i] + tile.cols[j] + 1]
@@ -141,7 +142,3 @@ end
 
 checked_tile_storage_bounds(tile::Tile) =
     checked_tile_storage_bounds(tile.base, tile.rows, tile.cols, length(tile.storage))
-
-# Whether an axis steps through storage one element at a time.
-is_unit_stride(ax::AffineAxis) = ax.stride == 1
-is_unit_stride(::AbstractVector{Int}) = false

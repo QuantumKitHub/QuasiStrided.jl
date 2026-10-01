@@ -178,8 +178,3 @@ init_target!() = (TARGET[] = detect_target(); nothing)
 # core, which are the CPUs sharing L1d.
 core_bytes(profile::TargetProfile, level::CacheLevel) =
     level.bytes ÷ max(1, level.sharing ÷ max(1, profile.l1d.sharing))
-
-# Shared by the deinterleaving complex packer and the planar store: both pay
-# off only with 512-bit vector registers.
-@inline complex_fastpath_isa_eligible(profile::TargetProfile) = profile.isa === :avx512
-@inline complex_fastpath_isa_eligible() = complex_fastpath_isa_eligible(target_profile())

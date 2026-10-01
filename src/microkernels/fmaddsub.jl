@@ -203,7 +203,7 @@ end
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NV}
     # The pointer reinterpretation is only sound on dense rank-1 complex storage.
-    S <: DenseVector && _lane_convertible(eltype(S), T) ||
+    S <: DenseVector && lane_convertible(eltype(S), T) ||
         throw(ArgumentError("_store_tile_fmaddsub_vector!: storage $S is not a dense vector convertible to $T"))
     RC = real(eltype(S))
     iseven(W) || throw(ArgumentError("_store_tile_fmaddsub_vector!: requires an even W, got $W"))

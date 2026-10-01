@@ -108,7 +108,7 @@ const _QSF = QuasiStrided
         end
     end
 
-    @testset "pack_a! InterleavedFormat: scalar loop and fast path vs local layout" begin
+    @testset "pack! InterleavedFormat A: scalar loop and fast path vs local layout" begin
         # Bitwise (`isequal` separates -0.0): packing is a copy, or a sign flip under conj.
         for T in (ComplexF64, ComplexF32), (MR, NR, W) in (kernel_shapes(T, FMAddSubMethod())..., (3, 2, 2))
             R = real(T)
@@ -122,21 +122,13 @@ const _QSF = QuasiStrided
                 A = zeros(T, MR, k_block_length)
                 A[1:m, :] = f.(reshape(vals[(base + 1):(base + lda * k_block_length)], lda, k_block_length)[1:m, :])
                 want = mk_pack_a(k, A)
-                bufv = fill(R(-777), packed_a_length(k, k_block_length))  # a Vector: the scalar loop
-                pack_a!(bufv, src, k, f)
-                @test isequal(bufv, want)
-                bufp = fill(R(-777), packed_a_length(k, k_block_length))  # a PackedPanel: the fast path where gated in
-                GC.@preserve bufp pack_a!(packed_panel(bufp, 1, length(bufp)), src, k, f)
+                bufp = fill(R(-777), packed_a_length(k, k_block_length))
+                pack!(bufp, src, sliver_spec(k, 1), f)
                 @test isequal(bufp, want)
             end
             src = Tile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, k_block_length))
-            bufp = zeros(R, packed_a_length(k, k_block_length))
-            GC.@preserve bufp begin
-                pp = packed_panel(bufp, 1, length(bufp))
-                @test _QSF._pack_complex_contiguous_eligible(
-                    pp, vals, src.rows, identity, InterleavedFormat(), MR, Val(MR), T
-                ) == _QSF.complex_fastpath_isa_eligible()
-            end
+            @test _QSF.complex_contiguous_eligible(src, sliver_spec(k, 1), identity, MR) ==
+                _QSF.complex_fastpath_isa_eligible()
         end
     end
 

@@ -78,13 +78,24 @@ sliver_width(d::Descriptor{MR, NR}) where {MR, NR} =
     (MR * reals_per_element(a_format(d)), NR * reals_per_element(b_format(d)))
 sliver_width(k, i::Int) = sliver_width(k)[i]
 
-packed_a_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 1) * k_block_length
-packed_b_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 2) * k_block_length
+# How one operand's slivers are packed: side `I` (1 for A, 2 for B), `L` lanes
+# (`MR` or `NR`) in format `F`, for a kernel of scalar type `T`.
+struct SliverSpec{I, L, F <: PackFormat, T} end
 
-# Zero-based offsets, in reals, of one-based coordinates. For 1e and
-# interleaved, `i`/`j` runs over reals (1:2MR) and 1e's second region is
+@inline sliver_spec(::Descriptor{MR, NR, T, FA, FB}, i::Int) where {MR, NR, T, FA, FB} =
+    i == 1 ? SliverSpec{1, MR, FA, T}() : SliverSpec{2, NR, FB, T}()
+
+realtype(::SliverSpec{I, L, F, T}) where {I, L, F, T} = real(T)
+sliver_width(::SliverSpec{I, L, F}) where {I, L, F} = L * reals_per_element(F())
+packed_length(spec::SliverSpec, k_block_length::Int) = sliver_width(spec) * k_block_length
+
+# Zero-based offset, in reals, of lane `t` of plane `plane` at K step `p`. For
+# 1e and interleaved, `t` runs over reals (1:2L) and 1e's second region is
 # `plane == 2`.
-@inline packed_a_offset(d::Descriptor{MR}, i::Int, p::Int, plane::Int = 0) where {MR} =
-    (p - 1) * sliver_width(d, 1) + plane * MR + (i - 1)
-@inline packed_b_offset(d::Descriptor{MR, NR}, j::Int, p::Int, plane::Int = 0) where {MR, NR} =
-    (p - 1) * sliver_width(d, 2) + plane * NR + (j - 1)
+@inline panel_offset(spec::SliverSpec{I, L}, t::Int, p::Int, plane::Int = 0) where {I, L} =
+    (p - 1) * sliver_width(spec) + plane * L + (t - 1)
+
+packed_a_length(d::Descriptor, k_block_length::Int) = packed_length(sliver_spec(d, 1), k_block_length)
+packed_b_length(d::Descriptor, k_block_length::Int) = packed_length(sliver_spec(d, 2), k_block_length)
+@inline packed_a_offset(d::Descriptor, i::Int, p::Int, plane::Int = 0) = panel_offset(sliver_spec(d, 1), i, p, plane)
+@inline packed_b_offset(d::Descriptor, j::Int, p::Int, plane::Int = 0) = panel_offset(sliver_spec(d, 2), j, p, plane)

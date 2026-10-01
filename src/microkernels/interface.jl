@@ -55,32 +55,13 @@ a_format(k::DescriptorKernel) = a_format(k.descriptor)
 b_format(k::DescriptorKernel) = b_format(k.descriptor)
 tile_size(k::DescriptorKernel) = tile_size(k.descriptor)
 scalartype(k::DescriptorKernel) = scalartype(k.descriptor)
+@inline sliver_spec(k::DescriptorKernel, i::Int) = sliver_spec(k.descriptor, i)
 @inline packed_a_offset(k::DescriptorKernel, i::Int, p::Int, plane::Int = 0) =
     packed_a_offset(k.descriptor, i, p, plane)
 @inline packed_b_offset(k::DescriptorKernel, j::Int, p::Int, plane::Int = 0) =
     packed_b_offset(k.descriptor, j, p, plane)
 packed_a_length(k::DescriptorKernel, k_block_length::Int) = packed_a_length(k.descriptor, k_block_length)
 packed_b_length(k::DescriptorKernel, k_block_length::Int) = packed_b_length(k.descriptor, k_block_length)
-
-# GUARDRAIL: every forwarded argument needs its OWN bound type parameter; an
-# unbound one makes the call dynamically dispatched and allocating on every
-# pack. `V` is unconstrained so a `DenseVector` forwards too.
-pack_a!(
-    packed::V, source::Tile, kernel::K, transform::F
-) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
-    pack_a!(packed, source, kernel.descriptor, transform)
-pack_b!(
-    packed::V, source::Tile, kernel::K, transform::F
-) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
-    pack_b!(packed, source, kernel.descriptor, transform)
-@inline unsafe_pack_a!(
-    packed::V, source::Tile, kernel::K, transform::F
-) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
-    unsafe_pack_a!(packed, source, kernel.descriptor, transform)
-@inline unsafe_pack_b!(
-    packed::V, source::Tile, kernel::K, transform::F
-) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
-    unsafe_pack_b!(packed, source, kernel.descriptor, transform)
 
 # Constructor check: `rows` reals per sliver must split into whole `W`-vectors.
 # `even`: the lane-pair kernels keep one element's re/im in adjacent lanes, and

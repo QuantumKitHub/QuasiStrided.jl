@@ -186,7 +186,7 @@ end
 # storage can be reinterpreted as `2W` consecutive reals per `W` rows), on an
 # ISA the complex fast paths ship for (shared with the complex pack fast path).
 @inline _complex_vector_eligible(tile::Tile, ::Type{T}) where {T} =
-    is_unit_stride(tile.rows) && _dense_lanes(tile.storage, T) &&
+    is_unit_stride(tile.rows) && dense_lanes(tile.storage, T) &&
     complex_fastpath_isa_eligible()
 
 # Shuffle patterns built from `W` at specialization time, never hardcoded to
@@ -248,7 +248,7 @@ end
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NA}
     # The pointer reinterpretation is only sound on dense rank-1 complex storage.
-    S <: DenseVector && _lane_convertible(eltype(S), T) ||
+    S <: DenseVector && lane_convertible(eltype(S), T) ||
         throw(ArgumentError("_store_tile_planar_vector!: storage $S is not a dense vector convertible to $T"))
     RC = real(eltype(S))
     MV = MR ÷ W

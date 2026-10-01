@@ -1,66 +1,80 @@
 # Contiguous packing fast paths, each for the one sliver shape it can serve: a
-# full sliver whose lane axis is unit-stride, dense storage, a `PackedPanel`
-# destination and the driver's `identity`/`conj` transform. They read exactly
-# the addresses the scalar loop would, so they skip no validation.
+# full sliver whose lane axis is unit-stride, dense storage and the driver's
+# `identity`/`conj` transform. They read exactly the addresses the scalar loop
+# would, so they skip no validation.
 
 using SIMD: shufflevector
 
-# `conj` is the identity on a real element type.
-@inline _copies_unchanged(::typeof(identity), ::Type) = true
-@inline _copies_unchanged(::typeof(conj), ::Type{T}) where {T <: Real} = true
-@inline _copies_unchanged(::Any, ::Type) = false
+# --- Vector-path predicates (the microkernels' vector stores use them too) ---
+
+# Whether an axis steps through storage one element at a time.
+is_unit_stride(ax::AffineAxis) = ax.stride == 1
+is_unit_stride(::AbstractVector{Int}) = false
 
 # Dense rank-1 storage whose elements load as SIMD lanes and convert lane-wise
 # to `T`: `T` itself, or another supported type of the same domain.
-const _LaneFloat = Union{Float32, Float64}
-@inline _dense_lanes(storage::S, ::Type{T}) where {S, T} =
-    storage isa DenseVector && _lane_convertible(eltype(S), T)
-_lane_convertible(::Type, ::Type) = false
-_lane_convertible(::Type{<:_LaneFloat}, ::Type{<:_LaneFloat}) = true
-_lane_convertible(::Type{Complex{S}}, ::Type{Complex{T}}) where {S <: _LaneFloat, T <: _LaneFloat} = true
+const LaneFloat = Union{Float32, Float64}
+@inline dense_lanes(storage::S, ::Type{T}) where {S, T} =
+    storage isa DenseVector && lane_convertible(eltype(S), T)
+lane_convertible(::Type, ::Type) = false
+lane_convertible(::Type{<:LaneFloat}, ::Type{<:LaneFloat}) = true
+lane_convertible(::Type{Complex{S}}, ::Type{Complex{T}}) where {S <: LaneFloat, T <: LaneFloat} = true
 
-# Everything but `m == MR` and the stride test folds at compile time.
-@inline function _pack_a_contiguous_eligible(
-        packed::V, source::Tile, transform::F, m::Int, ::Val{MR}, ::Type{T}
-    ) where {V, F, MR, T}
-    return packed isa PackedPanel{T} && _dense_lanes(source.storage, T) &&
-        _copies_unchanged(transform, T) && m == MR && is_unit_stride(source.rows)
+# The deinterleaving complex packer and the planar store pay off only with
+# 512-bit vector registers.
+@inline complex_fastpath_isa_eligible(profile::TargetProfile) = profile.isa === :avx512
+@inline complex_fastpath_isa_eligible() = complex_fastpath_isa_eligible(target_profile())
+
+# --- Real ---
+
+# `conj` is the identity on a real element type.
+@inline copies_unchanged(::typeof(identity), ::Type) = true
+@inline copies_unchanged(::typeof(conj), ::Type{T}) where {T <: Real} = true
+@inline copies_unchanged(::Any, ::Type) = false
+
+# Everything but `lanes == L` and the stride test folds at compile time.
+@inline function real_contiguous_eligible(
+        tile::Tile, spec::SliverSpec{I, L, F}, transform, lanes::Int
+    ) where {I, L, F}
+    T = realtype(spec)
+    return F === RealFormat && dense_lanes(tile.storage, T) &&
+        copies_unchanged(transform, T) && lanes == L && is_unit_stride(tile.rows)
 end
 
-# Real A: one `Vec{MR}` load/convert/store per K step.
-@inline function _pack_a_contiguous!(
-        packed::PackedPanel{T}, storage::DenseVector{S}, rowbase::Int, cols::C,
-        ::Val{MR}, k_block_length::Int
-    ) where {T, S, C, MR}
+# One `Vec{L}` load/convert/store per K step.
+@inline function pack_real_contiguous!(
+        panel::PackedPanel{T}, tile::Tile{<:DenseVector{S}}, ::SliverSpec{I, L}, k_block_length::Int
+    ) where {T, S, I, L}
+    storage = tile.storage
+    lanebase = @inbounds tile.base + tile.rows[1]
     GC.@preserve storage begin
         sp = pointer(storage)
-        dp = packed.ptr
+        dp = panel.ptr
         for p in 1:k_block_length
-            v = vload(Vec{MR, S}, sp + sizeof(S) * (rowbase + (@inbounds cols[p])))
-            vstore(convert(Vec{MR, T}, v), dp + sizeof(T) * (MR * (p - 1)))
+            v = vload(Vec{L, S}, sp + sizeof(S) * (lanebase + (@inbounds tile.cols[p])))
+            vstore(convert(Vec{L, T}, v), dp + sizeof(T) * (L * (p - 1)))
         end
     end
-    return packed
+    return panel
 end
 
-# The transforms `_pack_alt` covers; anything else must take the scalar path.
-@inline _complex_pack_transform_eligible(::typeof(identity)) = true
-@inline _complex_pack_transform_eligible(::typeof(conj)) = true
-@inline _complex_pack_transform_eligible(::Any) = false
+# --- Complex ---
 
-# Complex: a deinterleave of the source's native `[re, im, ...]` layout plus,
-# for `conj`, a sign flip. `lane_axis` is the axis the packed index runs along
-# (`source.rows` for A, `source.cols` for B); unit stride over dense rank-1
-# storage is what makes reading `PD` elements as `2PD` reals a sound bitcast.
-# `valid == PD` keeps padding (and its no-`-0.0` rule) on the scalar path.
-@inline function _pack_complex_contiguous_eligible(
-        packed::V, storage::S, lane_axis::AX, transform::F, format::FMT,
-        valid::Int, ::Val{PD}, ::Type{T}
-    ) where {V, S, AX, F, FMT, PD, T}
-    return !(format isa RealFormat) &&
-        packed isa PackedPanel{real(T)} && _dense_lanes(storage, T) &&
-        _complex_pack_transform_eligible(transform) &&
-        valid == PD && is_unit_stride(lane_axis) &&
+# The transforms `pack_alt` covers; anything else must take the scalar path.
+@inline complex_pack_transform_eligible(::typeof(identity)) = true
+@inline complex_pack_transform_eligible(::typeof(conj)) = true
+@inline complex_pack_transform_eligible(::Any) = false
+
+# A deinterleave of the source's native `[re, im, ...]` layout plus, for
+# `conj`, a sign flip. Unit stride over dense rank-1 storage is what makes
+# reading `L` elements as `2L` reals a sound bitcast. `lanes == L` keeps
+# padding (and its no-`-0.0` rule) on the scalar path.
+@inline function complex_contiguous_eligible(
+        tile::Tile, spec::SliverSpec{I, L, F, T}, transform, lanes::Int
+    ) where {I, L, F, T}
+    return F !== RealFormat && dense_lanes(tile.storage, T) &&
+        complex_pack_transform_eligible(transform) &&
+        lanes == L && is_unit_stride(tile.rows) &&
         complex_fastpath_isa_eligible()
 end
 
@@ -68,94 +82,72 @@ end
 # transform is entirely the choice of `alt`. `-src` is a sign-bit flip,
 # bit-identical to the scalar `imag(conj(z))` (a multiply by -1 would not be,
 # on NaN payloads).
-@inline _pack_alt(src::Vec, ::typeof(identity)) = src
-@inline _pack_alt(src::Vec, ::typeof(conj)) = -src
+@inline pack_alt(src::Vec, ::typeof(identity)) = src
+@inline pack_alt(src::Vec, ::typeof(conj)) = -src
 # 1e's second region stores `-im`, so it wants the opposite choice.
-@inline _pack_alt_flipped(src::Vec, ::typeof(identity)) = -src
-@inline _pack_alt_flipped(src::Vec, ::typeof(conj)) = src
+@inline pack_alt_flipped(src::Vec, ::typeof(identity)) = -src
+@inline pack_alt_flipped(src::Vec, ::typeof(conj)) = src
 
 # `@generated` because `shufflevector` needs a literal `Val` index tuple, which
-# `Val(ntuple(...))` is not reliably. `src` holds `PD` elements of one K step.
+# `Val(ntuple(...))` is not reliably. `src` holds `L` elements of one K step.
 
-# Planar, one whole K step: `[re_0 .. re_{PD-1} | im_0 .. im_{PD-1}]`.
-@generated function _planar_pack_shuffle(
-        src::Vec{N, R}, alt::Vec{N, R}, ::Val{PD}
-    ) where {N, R, PD}
-    N == 2 * PD || return :(throw(ArgumentError("_planar_pack_shuffle: expected N == 2PD")))
-    idx = ntuple(k -> (k - 1) < PD ? 2 * (k - 1) : N + 2 * ((k - 1) - PD) + 1, 2 * PD)
+# Planar, one whole K step: `[re_0 .. re_{L-1} | im_0 .. im_{L-1}]`.
+@generated function planar_pack_shuffle(
+        src::Vec{N, R}, alt::Vec{N, R}, ::Val{L}
+    ) where {N, R, L}
+    N == 2 * L || return :(throw(ArgumentError("planar_pack_shuffle: expected N == 2L")))
+    idx = ntuple(k -> (k - 1) < L ? 2 * (k - 1) : N + 2 * ((k - 1) - L) + 1, 2 * L)
     return :(shufflevector(src, alt, Val($idx)))
 end
 
 # 1e's first region (and interleaved): `[re_0, ±im_0, re_1, ±im_1, ...]`.
-@generated function _onee_pack_shuffle_a(
-        src::Vec{N, R}, alt::Vec{N, R}, ::Val{PD}
-    ) where {N, R, PD}
-    N == 2 * PD || return :(throw(ArgumentError("_onee_pack_shuffle_a: expected N == 2PD")))
-    idx = ntuple(k -> iseven(k) ? N + (k - 1) : (k - 1), 2 * PD)
+@generated function onee_pack_shuffle_a(
+        src::Vec{N, R}, alt::Vec{N, R}, ::Val{L}
+    ) where {N, R, L}
+    N == 2 * L || return :(throw(ArgumentError("onee_pack_shuffle_a: expected N == 2L")))
+    idx = ntuple(k -> iseven(k) ? N + (k - 1) : (k - 1), 2 * L)
     return :(shufflevector(src, alt, Val($idx)))
 end
 
 # 1e's second region: `[∓im_0, re_0, ∓im_1, re_1, ...]`.
-@generated function _onee_pack_shuffle_b(
-        src::Vec{N, R}, alt::Vec{N, R}, ::Val{PD}
-    ) where {N, R, PD}
-    N == 2 * PD || return :(throw(ArgumentError("_onee_pack_shuffle_b: expected N == 2PD")))
-    idx = ntuple(k -> isodd(k) ? N + k : k - 2, 2 * PD)
+@generated function onee_pack_shuffle_b(
+        src::Vec{N, R}, alt::Vec{N, R}, ::Val{L}
+    ) where {N, R, L}
+    N == 2 * L || return :(throw(ArgumentError("onee_pack_shuffle_b: expected N == 2L")))
+    idx = ntuple(k -> isodd(k) ? N + k : k - 2, 2 * L)
     return :(shufflevector(src, alt, Val($idx)))
 end
 
-_single_region_shuffle(::PlanarFormat) = _planar_pack_shuffle
-_single_region_shuffle(::InterleavedFormat) = _onee_pack_shuffle_a
-
-# Lane `t` of K step `p` is element `elembase + steps[p] + (t - 1)`;
-# only the lane axis must be unit-stride, `steps` may be scattered. Pinning
-# `Complex{RS}` in the signature keeps the bitcast to `RS` lanes sound; the
-# lanes convert to `R` before the shuffle.
-@inline function _pack_complex_contiguous!(
-        format::Union{PlanarFormat, InterleavedFormat}, packed::PackedPanel{R},
-        storage::DenseVector{Complex{RS}}, elembase::Int, steps::C, ::Val{PD}, k_block_length::Int,
-        transform::F
-    ) where {R, RS, C, PD, F}
-    shuffle = _single_region_shuffle(format)
-    GC.@preserve storage begin
-        sp = reinterpret(Ptr{RS}, pointer(storage))
-        dp = packed.ptr
-        for p in 1:k_block_length
-            src = convert(
-                Vec{2 * PD, R},
-                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + (@inbounds steps[p]))))
-            )
-            vstore(
-                shuffle(src, _pack_alt(src, transform), Val(PD)),
-                dp + sizeof(R) * (2 * PD * (p - 1))
-            )
-        end
-    end
-    return packed
+# One K step's `2L` reals `src`, stored at `dp`.
+@inline store_step!(dp::Ptr, src::Vec, ::SliverSpec{I, L, PlanarFormat}, transform) where {I, L} =
+    vstore(planar_pack_shuffle(src, pack_alt(src, transform), Val(L)), dp)
+@inline store_step!(dp::Ptr, src::Vec, ::SliverSpec{I, L, InterleavedFormat}, transform) where {I, L} =
+    vstore(onee_pack_shuffle_a(src, pack_alt(src, transform), Val(L)), dp)
+@inline function store_step!(dp::Ptr{R}, src::Vec, ::SliverSpec{I, L, OneEFormat}, transform) where {R, I, L}
+    vstore(onee_pack_shuffle_a(src, pack_alt(src, transform), Val(L)), dp)
+    vstore(onee_pack_shuffle_b(src, pack_alt_flipped(src, transform), Val(L)), dp + sizeof(R) * 2L)
+    return nothing
 end
 
-@inline function _pack_complex_contiguous!(
-        ::OneEFormat, packed::PackedPanel{R}, storage::DenseVector{Complex{RS}},
-        elembase::Int, steps::C, ::Val{PD}, k_block_length::Int, transform::F
-    ) where {R, RS, C, PD, F}
+# Lane `t` of K step `p` is element `tile.base + tile.rows[1] + tile.cols[p] +
+# (t - 1)`; only the lane axis must be unit-stride, the K steps may be
+# scattered. Pinning `Complex{RS}` in the signature keeps the bitcast to `RS`
+# lanes sound; the lanes convert to `R` before the shuffle.
+@inline function pack_complex_contiguous!(
+        panel::PackedPanel{R}, tile::Tile{<:DenseVector{Complex{RS}}}, spec::SliverSpec{I, L},
+        k_block_length::Int, transform::F
+    ) where {R, RS, I, L, F}
+    storage = tile.storage
+    elembase = @inbounds tile.base + tile.rows[1]
     GC.@preserve storage begin
         sp = reinterpret(Ptr{RS}, pointer(storage))
-        dp = packed.ptr
         for p in 1:k_block_length
             src = convert(
-                Vec{2 * PD, R},
-                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + (@inbounds steps[p]))))
+                Vec{2 * L, R},
+                vload(Vec{2 * L, RS}, sp + sizeof(RS) * (2 * (elembase + (@inbounds tile.cols[p]))))
             )
-            at = 4 * PD * (p - 1)
-            vstore(
-                _onee_pack_shuffle_a(src, _pack_alt(src, transform), Val(PD)),
-                dp + sizeof(R) * at
-            )
-            vstore(
-                _onee_pack_shuffle_b(src, _pack_alt_flipped(src, transform), Val(PD)),
-                dp + sizeof(R) * (at + 2 * PD)
-            )
+            store_step!(panel.ptr + sizeof(R) * panel_offset(spec, 1, p), src, spec, transform)
         end
     end
-    return packed
+    return panel
 end

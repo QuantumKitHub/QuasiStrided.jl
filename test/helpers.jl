@@ -66,7 +66,7 @@ end
 # Steady-state allocation of one `pack!` call. `::F where {F}` forces
 # specialization on the pass-through `transform`; without it the dynamic call
 # allocates on Julia 1.10.
-function steady_pack_allocs(pack!::P, packed, source, kernel, transform::F) where {P, F}
-    pack!(packed, source, kernel, transform)
-    return @allocated pack!(packed, source, kernel, transform)
+function steady_pack_allocs(packed, source, spec, transform::F) where {F}
+    pack!(packed, source, spec, transform)
+    return @allocated pack!(packed, source, spec, transform)
 end

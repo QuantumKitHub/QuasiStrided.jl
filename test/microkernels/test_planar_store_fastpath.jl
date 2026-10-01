@@ -102,14 +102,6 @@ end
         @test eligible(zeros(ComplexF32, m * n), AffineAxis(0, 1, m)) == STORE_FASTPATH_ON
         @test !eligible(zeros(Float64, m * n), AffineAxis(0, 1, m))
     end
-
-    @testset "ISA gate: AVX-512 only" begin
-        @test QuasiStrided.complex_fastpath_isa_eligible(synthetic(:avx512))
-        for key in (:avx2, :neon, :unknown)
-            @test !QuasiStrided.complex_fastpath_isa_eligible(synthetic(key))
-        end
-        @test STORE_FASTPATH_ON == (target_profile().isa === :avx512)
-    end
 end
 
 

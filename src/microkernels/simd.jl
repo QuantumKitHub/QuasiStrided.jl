@@ -94,7 +94,7 @@ end
 # exactly what SIMD.jl's array `vload`/`vstore` accept. Must admit `Memory{T}`:
 # that is the `parent` of an Array-backed `StridedView` on Julia >= 1.11.
 @inline _vector_store_eligible(tile::Tile, ::Type{T}) where {T} =
-    is_unit_stride(tile.rows) && _dense_lanes(tile.storage, T)
+    is_unit_stride(tile.rows) && dense_lanes(tile.storage, T)
 
 @generated function _store_tile_scattered!(
         destination::Tile, acc::NTuple{NV, Vec{W, T}},

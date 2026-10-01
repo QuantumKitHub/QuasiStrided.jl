@@ -1,5 +1,5 @@
 # The stages driven by hand, end to end: AxisGroup -> BlockDescriptor -> tile
-# axes -> pack_a!/pack_b! -> ScalarKernel execute_tile!, with beta applied on
+# axes -> pack! -> ScalarKernel execute_tile!, with beta applied on
 # the first K panel only.
 
 @testset "manual pipeline: AxisGroup -> tiles -> packing -> ScalarKernel" begin
@@ -31,8 +31,8 @@
             copyto!(Cstorage, vec(Cstart))
             for (idx, (first, len)) in enumerate(panels)
                 (dK_A, dK_B) = block_descriptors!(kb, K, first, len)
-                pack_a!(packed_a, Tile(vec(A), 0, row_A, axis(dK_A, kb[1])), kernel, identity)
-                pack_b!(packed_b, Tile(vec(B), 0, axis(dK_B, kb[2]), col_B), kernel, identity)
+                pack!(packed_a, Tile(vec(A), 0, row_A, axis(dK_A, kb[1])), sliver_spec(kernel, 1), identity)
+                pack!(packed_b, Tile(vec(B), 0, col_B, axis(dK_B, kb[2])), sliver_spec(kernel, 2), identity)
                 execute_tile!(kernel, destination, packed_a, packed_b, len, alpha, idx == 1 ? beta : 1.0)
             end
             @test reshape(Cstorage, size(Cref)) ≈ alpha .* Cref .+ beta .* Cstart
@@ -46,8 +46,8 @@ end
     packed = zeros(4)
     for base in (10_000, -10_000)
         src = Tile([1.0, 2.0, 3.0, 4.0], base, AffineAxis(0, 1, 2), AffineAxis(0, 2, 2))
-        @test_throws BoundsError pack_a!(packed, src, k, identity)
-        @test_throws BoundsError pack_b!(packed, src, k, identity)
+        @test_throws BoundsError pack!(packed, src, sliver_spec(k, 1), identity)
+        @test_throws BoundsError pack!(packed, src, sliver_spec(k, 2), identity)
     end
     @test all(iszero, packed)
     canary = fill(999.0, 4)

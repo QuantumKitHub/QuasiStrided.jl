@@ -1,10 +1,9 @@
-# pack_a!/pack_b! for real kernels against direct storage indexing. The
-# reference layouts and fixtures here are shared with the two complex packing
-# files included after this one.
+# pack! for real kernels against direct storage indexing. The reference
+# layouts and fixtures here are shared with the two complex packing files
+# included after this one.
 
 using QuasiStrided: RealFormat, PlanarFormat, OneEFormat, InterleavedFormat, PackedPanel,
-    packed_panel, _copies_unchanged,
-    _pack_a_contiguous_eligible
+    packed_panel, packed_length, copies_unchanged, real_contiguous_eligible
 
 # Packed layouts written from the format definitions, not from the offset
 # helpers. `g(t, p)` is the source element at lane `t`, K step `p`; lanes
@@ -37,25 +36,24 @@ end
 resized(ax::AffineAxis, n) = AffineAxis(ax.base, ax.stride, n)
 resized(ax::SubArray, n) = view(parent(ax), 1:n)
 
-# An A (`lane` = rows) or B (`lane` = cols) source over `storage`, and its
-# direct-indexing reader.
-function pack_fixture(side, storage, base, lane, step)
-    src = side === :a ? Tile(storage, base, lane, step) : Tile(storage, base, step, lane)
-    return src, (t, p) -> storage[base + lane[t + 1] + step[p + 1] + 1]
+# A sliver source with lanes along `lane` and K steps along `step` (B's tile
+# transposed), and its direct-indexing reader.
+function pack_fixture(storage, base, lane, step)
+    return Tile(storage, base, lane, step), (t, p) -> storage[base + lane[t + 1] + step[p + 1] + 1]
 end
 
 # Packs `src` into a destination of kind `dst` (canaried unless a bare Vector)
 # and returns the packed prefix and whether the canaries survived.
-function pack_into(pack!, dst, R, len, src, kernel, f)
+function pack_into(dst, R, len, src, spec, f)
     buf = fill(R(-777), len + 12)
     if dst === :vector
         v = buf[1:len]
-        @test pack!(v, src, kernel, f) === v
+        @test pack!(v, src, spec, f) === v
         return v, true
     end
     GC.@preserve buf begin
         d = packed_panel(buf, 5, len)
-        @test pack!(d, src, kernel, f) === d
+        @test pack!(d, src, spec, f) === d
     end
     return buf[5:(4 + len)], all(==(R(-777)), buf[1:4]) && all(==(R(-777)), buf[(5 + len):end])
 end
@@ -63,9 +61,7 @@ end
 const SCATTER_LANES = [5, 30, 1, 17, 9, 44, 2, 23, 11, 38, 7, 60, 14, 51, 3, 29]
 const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
 
-@testset "pack_a!/pack_b! ($T): every stride kind and tail width vs direct indexing" for
-    T in (Float64, Float32)
-
+@testset "pack! ($T): every stride kind and tail width vs direct indexing" for T in (Float64, Float32)
     MR, NR, k_block_length = 8, 6, 5
     kernel = Descriptor(Val(MR), Val(NR), T)
     storage = T.(collect(1.0:2000.0))
@@ -76,84 +72,94 @@ const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
         view(SCATTER_LANES, 1:8),
     ]
     steps = Any[AffineAxis(0, 64, k_block_length), AffineAxis(700, -97, k_block_length), view(SCATTER_STEPS, 1:k_block_length)]
-    for (side, pack!, PD) in ((:a, pack_a!, MR), (:b, pack_b!, NR)),
-            lane in lanes, step in steps, valid in (PD, 1, 0), dst in (:vector, :panel)
-        src, g = pack_fixture(side, storage, 11, resized(lane, valid), step)
+    for (spec, L) in ((sliver_spec(kernel, 1), MR), (sliver_spec(kernel, 2), NR)),
+            lane in lanes, step in steps, valid in (L, 1, 0), dst in (:vector, :panel)
+        src, g = pack_fixture(storage, 11, resized(lane, valid), step)
         calls[] = 0
-        got, canaries = pack_into(pack!, dst, T, PD * k_block_length, src, kernel, counting)
-        @test got == ref_pack(RealFormat(), T, PD, k_block_length, valid, g, x -> 3x + 1000)
+        got, canaries = pack_into(dst, T, L * k_block_length, src, spec, counting)
+        @test got == ref_pack(RealFormat(), T, L, k_block_length, valid, g, x -> 3x + 1000)
         @test calls[] == valid * k_block_length
         @test canaries
     end
     # Every tail width, at the minimal and a longer K depth.
     negate = x -> -x
-    for (side, pack!, PD) in ((:a, pack_a!, MR), (:b, pack_b!, NR)), valid in 0:PD, kc1 in (1, 5)
-        src, g = pack_fixture(side, storage, 0, AffineAxis(2, 3, valid), AffineAxis(0, 40, kc1))
-        got, _ = pack_into(pack!, :vector, T, PD * kc1, src, kernel, negate)
-        @test got == ref_pack(RealFormat(), T, PD, kc1, valid, g, negate)
+    for (spec, L) in ((sliver_spec(kernel, 1), MR), (sliver_spec(kernel, 2), NR)), valid in 0:L, kc1 in (1, 5)
+        src, g = pack_fixture(storage, 0, AffineAxis(2, 3, valid), AffineAxis(0, 40, kc1))
+        got, _ = pack_into(:vector, T, L * kc1, src, spec, negate)
+        @test got == ref_pack(RealFormat(), T, L, kc1, valid, g, negate)
     end
 end
 
-@testset "pack_a! contiguous fast path: fires exactly when eligible ($T, MR=$MR)" for
-    T in (Float64, Float32), MR in (4, 16)
+@testset "pack!: B packs as A packs its transposed tile" begin
+    kernel = Descriptor(Val(6), Val(6), Float64)
+    storage = collect(1.0:2000.0)
+    tile_b = Tile(storage, 3, view(SCATTER_STEPS, 1:5), AffineAxis(0, 1, 6))   # K x N
+    got_b, _ = pack_into(:panel, Float64, 30, transpose(tile_b), sliver_spec(kernel, 2), identity)
+    got_a, _ = pack_into(:panel, Float64, 30, transpose(tile_b), sliver_spec(kernel, 1), identity)
+    @test got_b == got_a
+end
 
-    kernel = Descriptor(Val(MR), Val(3), T)
+@testset "pack! contiguous fast path: fires exactly when eligible ($T, L=$L, side $i)" for
+    T in (Float64, Float32), (L, i) in ((4, 1), (16, 1), (6, 2))
+
+    kernel = Descriptor(Val(L), Val(L), T)
     vals = T.(collect(1.0:2000.0))
     mixed = (T === Float64 ? Float32 : Float64).(collect(1.0:2000.0) ./ 3)
     storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals), mixed) : (vals, mixed)
     koffs = [7, 900, 300, 1500]
-    contig = collect(0:(MR - 1))
+    contig = collect(0:(L - 1))
+    spec = sliver_spec(kernel, i)
     for storage in storages
-        steps = Any[AffineAxis(0, MR, 5), AffineAxis(1800, -MR, 6), view(koffs, 1:4)]
+        steps = Any[AffineAxis(0, L, 5), AffineAxis(1800, -L, 6), view(koffs, 1:4)]
         lanes = Any[
-            (AffineAxis(0, 1, MR), true), (AffineAxis(5, 1, MR), true),
-            (AffineAxis(0, 2, MR), false), (AffineAxis(MR + 3, -1, MR), false),
-            (AffineAxis(0, 1, MR - 1), false), (view(contig, 1:MR), false),
+            (AffineAxis(0, 1, L), true), (AffineAxis(5, 1, L), true),
+            (AffineAxis(0, 2, L), false), (AffineAxis(L + 3, -1, L), false),
+            (AffineAxis(0, 1, L - 1), false), (view(contig, 1:L), false),
         ]
         for (lane, eligible) in lanes, step in steps, f in (identity, conj, x -> -x)
-            src, g = pack_fixture(:a, storage, 11, lane, step)
+            src, g = pack_fixture(storage, 11, lane, step)
             k_block_length = length(step)
-            pp = packed_panel(zeros(T, 1), 1, 1)
-            @test _pack_a_contiguous_eligible(pp, src, f, length(lane), Val(MR), T) ==
+            @test real_contiguous_eligible(src, spec, f, length(lane)) ==
                 (eligible && (f === identity || f === conj))
-            @test !_pack_a_contiguous_eligible(zeros(T, 1), src, f, length(lane), Val(MR), T)
-            got, canaries = pack_into(pack_a!, :panel, T, MR * k_block_length, src, kernel, f)
-            @test got == ref_pack(RealFormat(), T, MR, k_block_length, length(lane), g, f)
+            got, canaries = pack_into(:panel, T, L * k_block_length, src, spec, f)
+            @test got == ref_pack(RealFormat(), T, L, k_block_length, length(lane), g, f)
             @test canaries
         end
     end
-    @test _copies_unchanged(conj, T)
-    @test !_copies_unchanged(conj, complex(T))   # conj is not the identity on complex
+    @test copies_unchanged(conj, T)
+    @test !copies_unchanged(conj, complex(T))   # conj is not the identity on complex
 end
 
-@testset "pack_a!/pack_b!: k_block_length == 0 reads and writes nothing" begin
+@testset "pack!: k_block_length == 0 reads and writes nothing" begin
     kernel = Descriptor(Val(4), Val(3), Float64)
     storage = fill(3.0, 10)
     read = Ref(false)
     spy = x -> (read[] = true; x)
     packed = fill(-42.0, 8)
-    @test pack_a!(packed, Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 0)), kernel, spy) === packed
-    @test pack_b!(packed, Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 1, 3)), kernel, spy) === packed
+    for i in 1:2
+        @test pack!(packed, Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 0)), sliver_spec(kernel, i), spy) === packed
+    end
     @test packed == fill(-42.0, 8)
     @test !read[]
 end
 
-@testset "pack_a!/pack_b!: invalid metadata rejected before mutation" begin
+@testset "pack!: invalid metadata rejected before mutation" begin
     kernel = Descriptor(Val(4), Val(3), Float64)
     kernel32 = Descriptor(Val(4), Val(3), Float32)
     storage = fill(9.0, 20)
     tile(m, n, base = 0) = Tile(storage, base, AffineAxis(0, 1, m), AffineAxis(0, 1, n))
-    for (pack!, bad, ok, short) in ((pack_a!, tile(5, 3), tile(4, 3), 11), (pack_b!, tile(3, 4), tile(3, 3), 8))
+    for (i, bad, ok, short) in ((1, tile(5, 3), tile(4, 3), 11), (2, tile(4, 3), tile(3, 3), 8))
+        spec = sliver_spec(kernel, i)
         canary = fill(-1.0, 100)
-        @test_throws ArgumentError pack!(canary, bad, kernel, identity)     # m > MR / n > NR
-        @test_throws ArgumentError pack!(canary, ok, kernel32, identity)    # eltype mismatch
-        @test_throws DimensionMismatch pack!(fill(-1.0, short), ok, kernel, identity)
-        @test_throws BoundsError pack!(canary, tile(size(ok)..., 18), kernel, identity)
+        @test_throws ArgumentError pack!(canary, bad, spec, identity)                      # lanes > L
+        @test_throws ArgumentError pack!(canary, ok, sliver_spec(kernel32, i), identity)   # eltype mismatch
+        @test_throws DimensionMismatch pack!(fill(-1.0, short), ok, spec, identity)
+        @test_throws BoundsError pack!(canary, tile(size(ok)..., 18), spec, identity)
         @test canary == fill(-1.0, 100)
     end
 end
 
-@testset "pack_a!/pack_b!: zero steady-state allocation" begin
+@testset "pack!: zero steady-state allocation" begin
     nontrivial(x) = 2x + 1
     # Every destination kind, affine/scattered axes, tails and
     # k_block_length == 0; the ScalarKernel/SIMDKernel forwarding methods on a subset.
@@ -163,41 +169,24 @@ end
         storage = rand(T, 4000)
         koffs = [0, MR, 3MR, 2MR, 5MR, 4MR, 6MR]
         lanes = collect(0:(max(MR, NR) - 1)) .* 3
-        bufa = zeros(T, MR * k_block_length + 8)
-        bufb = zeros(T, NR * k_block_length + 8)
         bytes = Int[]
-        GC.@preserve bufa bufb begin
-            pa = packed_panel(bufa, 1, MR * k_block_length)
-            dsts_a = (bufa, pa)
-            dsts_b = (bufb, packed_panel(bufb, 1, NR * k_block_length))
+        for (i, L) in ((1, MR), (2, NR))
+            spec = sliver_spec(kernel, i)
+            buf = zeros(T, L * k_block_length + 8)
             pk = view(koffs, 1:k_block_length)
-            srcs_a = (
-                Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length)),
-                Tile(storage, 0, AffineAxis(0, 1, MR), pk),
-                Tile(storage, 0, AffineAxis(0, 2, MR - 1), AffineAxis(0, 2MR, k_block_length)),
-                Tile(storage, 0, view(lanes, 1:MR), view(koffs, 1:k_block_length)),
-                Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
+            srcs = (
+                Tile(storage, 0, AffineAxis(0, 1, L), AffineAxis(0, L, k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, L), pk),
+                Tile(storage, 0, AffineAxis(0, 2, L - 1), AffineAxis(0, 2L, k_block_length)),
+                Tile(storage, 0, view(lanes, 1:L), pk),
+                Tile(storage, 0, AffineAxis(0, 1, L), AffineAxis(0, L, 0)),
             )
-            srcs_b = (
-                Tile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR)),
-                Tile(storage, 0, pk, AffineAxis(0, k_block_length, NR - 1)),
-                Tile(storage, 0, view(koffs, 1:k_block_length), view(lanes, 1:NR)),
-                Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, k_block_length, NR)),
-            )
-            if !full
-                srcs_a, srcs_b = srcs_a[1:1], srcs_b[1:1]
-            end
-            for d in dsts_a
-                for s in srcs_a
-                    push!(bytes, steady_pack_allocs(pack_a!, d, s, kernel, identity))
+            GC.@preserve buf for d in (buf, packed_panel(buf, 1, L * k_block_length))
+                for s in (full ? srcs : srcs[1:1]), f in (identity, conj)
+                    push!(bytes, steady_pack_allocs(d, s, spec, f))
                 end
-                push!(bytes, steady_pack_allocs(pack_a!, d, srcs_a[1], kernel, nontrivial))
+                push!(bytes, steady_pack_allocs(d, srcs[1], spec, nontrivial))
             end
-            for d in dsts_b, s in srcs_b
-                push!(bytes, steady_pack_allocs(pack_b!, d, s, kernel, identity))
-            end
-            push!(bytes, steady_pack_allocs(pack_b!, dsts_b[1], srcs_b[1], kernel, nontrivial))
-            push!(bytes, steady_pack_allocs(pack_a!, pa, srcs_a[1], kernel, conj))
         end
         return bytes
     end

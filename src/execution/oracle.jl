@@ -61,12 +61,12 @@ function execute_tilewise!(plan::ContractPlan{T}, alpha::Number, beta::Number) w
 
                     # Whole single-sliver buffers, so no `_sliver_panel`.
                     _pack_sliver!(
-                        pack_a!, ws.tw_packed_a, plan.Astorage, plan.Abase, rowsA, colsK_A,
-                        kernel, plan.atransform
+                        pack!, ws.tw_packed_a, plan.Astorage, plan.Abase, rowsA, colsK_A,
+                        sliver_spec(kernel, 1), plan.atransform
                     )
                     _pack_sliver!(
-                        pack_b!, ws.tw_packed_b, plan.Bstorage, plan.Bbase, rowsK_B, colsB,
-                        kernel, plan.btransform
+                        pack!, ws.tw_packed_b, plan.Bstorage, plan.Bbase, colsB, rowsK_B,
+                        sliver_spec(kernel, 2), plan.btransform
                     )
 
                     beta_eff = firstpanel ? betaT : one(T)

@@ -66,8 +66,8 @@ end
             GC.@preserve pa pb begin
                 dpa = panel ? packed_panel(pa, 1, length(pa)) : pa
                 dpb = panel ? packed_panel(pb, 1, length(pb)) : pb
-                pack_a!(dpa, srcA, k, f)
-                pack_b!(dpb, srcB, k, f)
+                pack!(dpa, srcA, sliver_spec(k, 1), f)
+                pack!(dpb, transpose(srcB), sliver_spec(k, 2), f)
             end
             @test isequal((pa, pb), mk_pack(k, TA.(A), TB.(B)))
             alpha, beta = T(1.5, -0.5), T(0.25, 1)
