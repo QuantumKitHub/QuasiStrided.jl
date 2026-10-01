@@ -199,9 +199,8 @@ end
     allocs_tw = _steady_allocs!(execute_tilewise!, plans[4], Cmat)
     @test Cmat ≈ Amat * Bmat
     @test allocs_tw == 0 skip = (VERSION < v"1.11")
-    # ScalarKernel's accumulator is a Matrix: bounded, one per tile call.
     ps = _mm_plan(Cmat, Amat, Bmat; kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 8, k_block = 6, n_block = 7)
-    @test _steady_allocs!(execute!, ps, Cmat) <= 176 * cld(Ma, 4) * cld(Na, 3) * cld(Ka, 6) + 1
+    @test _steady_allocs!(execute!, ps, Cmat) == 0 skip = (VERSION < v"1.11")
 end
 
 _ws_union_members(t) = t isa Union ? (_ws_union_members(t.a)..., _ws_union_members(t.b)...) : (t,)

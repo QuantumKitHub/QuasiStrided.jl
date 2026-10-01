@@ -25,13 +25,13 @@ Interleaved-accumulator complex microkernel using x86 `vfmaddsub`, over
 `2MR` must be a multiple of `W`, and `W` must be even. The default for small-M
 complex contractions on AVX-512.
 """
-struct FMAddSubKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
+struct FMAddSubKernel{MR, NR, T, W} <: Microkernel{MR, NR, T}
     descriptor::Descriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
 
     function FMAddSubKernel{MR, NR, T, W}(
             descriptor::Descriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
         ) where {MR, NR, T, W}
-        _check_vector_shape("FMAddSubKernel", 2 * MR, W, true)
+        check_vector_shape("FMAddSubKernel", 2 * MR, W, true)
         return new{MR, NR, T, W}(descriptor)
     end
 end
@@ -46,7 +46,7 @@ end
 function FMAddSubKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T}
     T <: Complex ||
         throw(ArgumentError("FMAddSubKernel requires a complex element type, got $T"))
-    return FMAddSubKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
+    return FMAddSubKernel(Val(MR), Val(NR), T, Val(default_lanewidth(real(T))))
 end
 
 complex_method(::FMAddSubKernel) = FMAddSubMethod()
@@ -105,7 +105,7 @@ end
         packed_a::PA, packed_b::PB, p::Int
     ) where {MR, NR, T, W, R, NA, PA, PB}
     MV = (2 * MR) ÷ W
-    _check_acc(:_accumulate_step_fmaddsub, R, T, NA, MV * NR)
+    check_acc(:_accumulate_step_fmaddsub, R, T, NA, MV * NR)
 
     av = [Symbol(:a, v) for v in 0:(MV - 1)]
     sv = [Symbol(:s, v) for v in 0:(MV - 1)]
@@ -153,12 +153,12 @@ end
     end
 end
 
-function Base.accumulate(
+function add_tile(
         kernel::FMAddSubKernel{MR, NR, T, W}, acc::NTuple{NA, Vec{W, R}},
         packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, W, R, NA, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
-    k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
+    k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
     @inbounds for p in 1:k_block_length
         acc = _accumulate_step_fmaddsub(kernel, acc, packed_a, packed_b, p)
     end
@@ -199,7 +199,7 @@ end
 # Same unroll and full-block / row-tail split as `_store_tile_planar_vector!`.
 @generated function _store_tile_fmaddsub_vector!(
         destination::Tile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, R}},
-        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
+        alpha::T, beta::T, kernel::Microkernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NV}
     # The pointer reinterpretation is only sound on dense rank-1 complex storage.
@@ -208,7 +208,7 @@ end
     RC = real(eltype(S))
     iseven(W) || throw(ArgumentError("_store_tile_fmaddsub_vector!: requires an even W, got $W"))
     MV = (2 * MR) ÷ W
-    _check_acc(:_store_tile_fmaddsub_vector!, R, T, NV, MV * NR)
+    check_acc(:_store_tile_fmaddsub_vector!, R, T, NV, MV * NR)
     HW = W ÷ 2
 
     blocks = Any[]
@@ -227,7 +227,7 @@ end
                         for u in 1:$HW
                             i = $(v * HW) + u
                             i <= m || break
-                            _axpby_at!(
+                            axpby_at!(
                                 storage, colbase + i, alpha,
                                 Complex(vec[2 * u - 1], vec[2 * u]), beta
                             )
@@ -270,7 +270,7 @@ function store_tile!(
         destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::FMAddSubKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
-    m, n = _store_prologue!(destination, alpha, beta)
+    m, n = store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
 
     if _complex_vector_eligible(destination, T)

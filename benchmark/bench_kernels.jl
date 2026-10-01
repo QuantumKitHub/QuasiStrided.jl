@@ -5,7 +5,7 @@
 #       [--shapes 64x64x64,2048x2048x2048] [--reps 11] [--outdir DIR]
 #
 # Arms:
-#   kernel  (real dtypes) the ceiling of each menu tile: `unsafe_execute_tile!`
+#   kernel  (real dtypes) the ceiling of each menu tile: `@inbounds execute_tile!`
 #           on one L1-resident packed A and B sliver at the tile's default `k_block`.
 #   engine  per dtype and shape: OpenBLAS, the default plan, and every menu
 #           kernel (of every complex method, for complex dtypes) at its own
@@ -22,7 +22,7 @@
 include(joinpath(@__DIR__, "harness.jl"))
 
 using QuasiStrided: RealMethod, PlanarMethod, OneMMethod, FMAddSubMethod, kernel_shapes,
-    _kernel_from_shape, default_blocking, packed_panel, unsafe_execute_tile!,
+    _kernel_from_shape, default_blocking, packed_panel, execute_tile!,
     Tile, AffineAxis, target_profile
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32,ComplexF64,ComplexF32"))
@@ -62,7 +62,7 @@ function kernel_hot!(kernel, C, apack, bpack, k_block, reps)
         bp = packed_panel(bpack, 1, length(bpack))
         dest = Tile(C, 0, AffineAxis(0, 1, tile_size(kernel, 1)), AffineAxis(0, tile_size(kernel)...))
         for _ in 1:reps
-            unsafe_execute_tile!(kernel, dest, ap, bp, k_block, one(eltype(C)), one(eltype(C)))
+            @inbounds execute_tile!(kernel, dest, ap, bp, k_block, one(eltype(C)), one(eltype(C)))
         end
     end
     return nothing

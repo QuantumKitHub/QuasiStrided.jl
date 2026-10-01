@@ -30,27 +30,17 @@ end
     )
 )
 
-# `transform` is applied to each loaded (complex) element before it is split
-# into the packed format; padding lanes are literal zeros and never read the
-# source or call `transform`. All validation happens before any write.
-pack!(panel::V, tile::Tile, spec::SliverSpec, transform::F) where {V, F} =
-    pack_tile!(panel, tile, spec, transform, Val(true))
+"""
+    pack!(panel, tile::Tile, spec::SliverSpec, transform) -> panel
 
-# The packer writes only `PackedPanel`s; a `DenseVector` is borrowed as one.
-function pack!(panel::V, tile::Tile, spec::SliverSpec, transform::F) where {V <: DenseVector, F}
-    GC.@preserve panel pack!(packed_panel(panel, 1, length(panel)), tile, spec, transform)
-    return panel
-end
-
-# Skips only `checked_tile_storage_bounds(tile)`: the caller (`_execute_nest!`)
-# has already validated the whole macro block the sliver belongs to. `@inline`
-# because out of line each call marshals the `Tile` through the stack.
-@inline unsafe_pack!(panel::V, tile::Tile, spec::SliverSpec, transform::F) where {V, F} =
-    pack_tile!(panel, tile, spec, transform, Val(false))
-
-@inline function pack_tile!(
-        panel::V, tile::Tile, spec::SliverSpec{I, L}, transform::F, ::Val{BOUNDS}
-    ) where {V, I, L, F, BOUNDS}
+Pack one sliver of `tile` (lanes along its rows, K steps along its columns)
+into `panel` in `spec`'s format. `transform` is applied to each loaded
+element before it is split into the format; padding lanes are literal zeros
+and never read the source or call `transform`. All validation happens before
+any write. Under `@inbounds` (the call inlined) the storage bounds check of
+`tile` is skipped; the eltype, lane count and panel length checks stay.
+"""
+@inline function pack!(panel::V, tile::Tile, spec::SliverSpec{I, L}, transform::F) where {V, I, L, F}
     check_packed_eltype(panel, spec)
     lanes, k_block_length = size(tile)
     (0 <= lanes <= L) || throw_pack_extent(I, lanes, L)
@@ -59,13 +49,21 @@ end
     # `<= 0`, not `== 0` (counts are never negative): LLVM may then assume
     # `k_block_length >= 1` in the loops below.
     k_block_length <= 0 && return panel
-    BOUNDS && checked_tile_storage_bounds(tile)
+    @boundscheck checked_tile_storage_bounds(tile)
     if real_contiguous_eligible(tile, spec, transform, lanes)
         return pack_real_contiguous!(panel, tile, spec, k_block_length)
     elseif complex_contiguous_eligible(tile, spec, transform, lanes)
         return pack_complex_contiguous!(panel, tile, spec, k_block_length, transform)
     end
     return pack_scalar!(panel, tile, spec, transform, lanes, k_block_length)
+end
+
+# The packer writes only `PackedPanel`s; a `DenseVector` is borrowed as one.
+Base.@propagate_inbounds function pack!(
+        panel::V, tile::Tile, spec::SliverSpec, transform::F
+    ) where {V <: DenseVector, F}
+    GC.@preserve panel pack!(packed_panel(panel, 1, length(panel)), tile, spec, transform)
+    return panel
 end
 
 # What a packed element converts to: the real operand of a mixed-domain kernel

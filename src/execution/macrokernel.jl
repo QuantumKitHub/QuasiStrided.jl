@@ -18,33 +18,22 @@ end
 @noinline _throw_irregular_ramp_descriptor() =
     throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))
 
-# `pack!` is `pack!` or `unsafe_pack!`; B passes its axes swapped (its
-# `transpose`). GUARDRAIL: `transform` needs its own bound type parameter, or
-# it costs a dynamic dispatch per call.
-@inline function _pack_sliver!(
-        pack!::PF, packed::PK, storage::S, base::Int,
+# B passes its axes swapped (its `transpose`). GUARDRAIL: `transform` needs its
+# own bound type parameter, or it costs a dynamic dispatch per call.
+Base.@propagate_inbounds function _pack_sliver!(
+        packed::PK, storage::S, base::Int,
         lanes::R, steps::C, spec, transform::TF
-    ) where {PF, PK, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}, TF}
+    ) where {PK, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}, TF}
     pack!(packed, Tile(storage, base, lanes, steps), spec, transform)
     return nothing
 end
 
-@inline function _execute_micro_tile!(
+Base.@propagate_inbounds function _execute_micro_tile!(
         kernel, storage::S, base::Int, rows::R, cols::C,
         packed_a::PA, packed_b::PB, k_block_length::Int, alpha, beta
     ) where {PA, PB, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
     destination = Tile(storage, base, rows, cols)
     execute_tile!(kernel, destination, packed_a, packed_b, k_block_length, alpha, beta)
-    return nothing
-end
-
-# The caller has bounds-checked the whole macro block this tile belongs to.
-@inline function unsafe_execute_micro_tile!(
-        kernel, storage::S, base::Int, rows::R, cols::C,
-        packed_a::PA, packed_b::PB, k_block_length::Int, alpha, beta
-    ) where {PA, PB, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
-    destination = Tile(storage, base, rows, cols)
-    unsafe_execute_tile!(kernel, destination, packed_a, packed_b, k_block_length, alpha, beta)
     return nothing
 end
 

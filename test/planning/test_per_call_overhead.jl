@@ -219,8 +219,11 @@ Base.IndexStyle(::Type{<:CountingStorage}) = IndexLinear()
     _pcf_exec(p, 1.0, 0.0)
     @test reshape(cstore.data, Ma, Na) ≈ Amat * Bmat
 
-    @test cstore.n == 1
-    @test astore.n == 1
+    # `--check-bounds=yes` (as under `Pkg.test`) also runs the per-tile and
+    # per-sliver checks that `@inbounds` skips.
+    forced = Base.JLOptions().check_bounds == 1
+    @test cstore.n == 1 + forced * ntiles
+    @test astore.n == 1 + forced * m_tiles
     @test bstore.n == 1
 
     # The oracle checks per tile.
@@ -345,36 +348,26 @@ end
     @test_throws BoundsError _pcf_exec(plow, 1.0, 0.0)
 end
 
-@testset "per-call floor: unsafe_pack! keeps every non-bounds check" begin
+# `@inbounds` reaches the storage check only through an inlined call.
+pcf_inbounds_pack!(args...) = @inbounds pack!(args...)
+pcf_inbounds_execute_tile!(args...) = @inbounds execute_tile!(args...)
+
+@testset "per-call floor: @inbounds skips only the storage bounds check" begin
     kernel = SIMDKernel(Val(8), Val(6), Float64)
     src = Tile(collect(1.0:64.0), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 4))
-    packed = zeros(8 * 4)
-
     a = sliver_spec(kernel, 1)
-    ref = zeros(8 * 4)
-    pack!(ref, src, a, identity)
-    GC.@preserve packed unsafe_pack!(QS.packed_panel(packed, 1, length(packed)), src, a, identity)
-    @test packed == ref
-
-    # Only the bounds checks are skipped.
-    @test_throws DimensionMismatch unsafe_pack!(zeros(3), src, a, identity)
-    @test_throws ArgumentError unsafe_pack!(zeros(Float32, 64), src, a, identity)
+    @test_throws DimensionMismatch pcf_inbounds_pack!(zeros(3), src, a, identity)
+    @test_throws ArgumentError pcf_inbounds_pack!(zeros(Float32, 64), src, a, identity)
     toowide = Tile(collect(1.0:200.0), 0, AffineAxis(0, 1, 9), AffineAxis(0, 16, 4))
-    @test_throws ArgumentError unsafe_pack!(zeros(200), toowide, a, identity)
+    @test_throws ArgumentError pcf_inbounds_pack!(zeros(200), toowide, a, identity)
 
     dest = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
-    @test_throws DimensionMismatch QS.unsafe_execute_tile!(
+    @test_throws DimensionMismatch pcf_inbounds_execute_tile!(
         kernel, dest, zeros(3), zeros(6 * 4), 4, 1.0, 0.0
     )
-    @test_throws ArgumentError QS.unsafe_execute_tile!(
+    @test_throws ArgumentError pcf_inbounds_execute_tile!(
         kernel, dest, zeros(8 * 4), zeros(6 * 4), -1, 1.0, 0.0
     )
-    d1 = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
-    d2 = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
-    packedB = collect(1.0:24.0)
-    execute_tile!(kernel, d1, ref, packedB, 4, 1.0, 0.0)
-    QS.unsafe_execute_tile!(kernel, d2, ref, packedB, 4, 1.0, 0.0)
-    @test d1.storage == d2.storage
 end
 
 @testset "per-call floor: affine_ramp classifies exactly the rank-<=1 folds" begin

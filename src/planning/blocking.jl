@@ -22,8 +22,10 @@ end
 # Complex blocking is the real row divided by the packed reals per element of
 # each operand, so every method gets the same packed BYTE budget (1m's
 # `m_block` is half planar's).
-@inline _scale_blocking(base::Blocking, m::ComplexMethod) =
-    Blocking(max(1, base.m_block ÷ a_reals(m)), base.k_block, max(1, base.n_block ÷ b_reals(m)))
+@inline function _scale_blocking(base::Blocking, m::KernelMethod)
+    a_reals, b_reals = map(reals_per_element, pack_formats(m))
+    return Blocking(max(1, base.m_block ÷ a_reals), base.k_block, max(1, base.n_block ÷ b_reals))
+end
 
 # For a host whose L1d or L2 size is undetected.
 _fallback_blocking(::Type{Float64}) = Blocking(128, 256, 768)

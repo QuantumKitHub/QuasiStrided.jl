@@ -22,7 +22,7 @@ _default_method(::Type{T}, ::Type{<:Real}, ::Type{<:Complex}) where {T <: Comple
 const NR_DEFAULT = 6
 
 # An (8, 6) tile at one 256-bit register's lane width: the shape wherever no rule applies.
-_fallback_shape(::Type{T}) where {T} = (8, NR_DEFAULT, _default_lanewidth(real(T)))
+_fallback_shape(::Type{T}) where {T} = (8, NR_DEFAULT, default_lanewidth(real(T)))
 
 # Closed menus of `(MR, NR, W)` shapes, so the compiled specializations stay
 # bounded. Complex `MR` counts complex rows and `W` real lanes; 1m runs a real
@@ -45,7 +45,7 @@ const KERNEL_SHAPES_C64_FMADDSUB = ((12, 8, 8), (8, 8, 8), (4, 6, 4), (4, 5, 4))
 const KERNEL_SHAPES_C32_FMADDSUB = ((24, 8, 16), (16, 8, 16), (8, 6, 8), (8, 5, 8))
 
 """
-    kernel_shapes(T, method::ComplexMethod = _default_method(T)) -> NTuple{<:Any,NTuple{3,Int}}
+    kernel_shapes(T, method::KernelMethod = _default_method(T)) -> NTuple{<:Any,NTuple{3,Int}}
 
 The closed menu of `(MR, NR, W)` register shapes the engine may build for
 element type `T` under `method`.
@@ -130,7 +130,7 @@ _kernel_from_shape(shape::Tuple{Int, Int, Int}, ::Type{T}) where {T} =
 
 # Per-ISA shapes, consulted first. None for real types: the rule below is the optimum.
 _shape_override(key::Val, ::Type{T}) where {T} = _shape_override(key, T, _default_method(T))
-_shape_override(::Val, ::Type, ::ComplexMethod) = nothing
+_shape_override(::Val, ::Type, ::KernelMethod) = nothing
 # On AVX-512 the rule's planar `MR = 2W, NR = 6` spills; `NR = 3` tiles do not.
 _shape_override(::Val{:avx512}, ::Type{ComplexF64}, ::PlanarMethod) = (24, 3, 8)
 _shape_override(::Val{:avx512}, ::Type{ComplexF32}, ::PlanarMethod) = (48, 3, 16)
@@ -150,7 +150,7 @@ _shape_override(::Val{:avx2}, ::Type{ComplexF64}, ::OneMMethod) = (4, 6, 4)
 _rule_applies(::Val{:avx512}, ::RealMethod) = true
 _rule_applies(::Val{:avx512}, ::Union{PlanarMethod, OneMMethod}) = true
 _rule_applies(::Val{:avx2}, ::RealMethod) = true
-_rule_applies(::Val, ::ComplexMethod) = false
+_rule_applies(::Val, ::KernelMethod) = false
 
 # `W` real lanes per register, `MV` A vectors per column.
 _rule_shape(vb::Int, ::Type{T}, mv::Int) where {T} =
@@ -160,7 +160,7 @@ _rule_shape(vb::Int, ::Type{T}, mv::Int) where {T} =
 # cores with 2 FMA ports, and 4*6 accumulators + 4 A vectors + 2 still fit 32
 # registers. Complex methods keep MV = 2 (planar already spills there).
 _rule_mv(::Val{:avx512}, ::RealMethod) = 4
-_rule_mv(::Val, ::ComplexMethod) = 2
+_rule_mv(::Val, ::KernelMethod) = 2
 
 # AMD's AVX-512 cores double-pump 512-bit FMAs, so their MV = 2 tile is not
 # front-end bound and the taller tile only adds edge and store cost.
@@ -204,7 +204,7 @@ _fitted_shape(::TargetProfile, ::Type{T}, method::Union{OneMMethod, FMAddSubMeth
 function _fitted_shape(profile::TargetProfile, ::Type{T}, method::PlanarMethod) where {T}
     R = real(T)
     vb = profile.vector_bytes
-    lanes = (vb > 0 && vb % sizeof(R) == 0) ? vb ÷ sizeof(R) : _default_lanewidth(R)
+    lanes = (vb > 0 && vb % sizeof(R) == 0) ? vb ÷ sizeof(R) : default_lanewidth(R)
     budget = profile.nregisters > 0 ? profile.nregisters : 16
     best = nothing
     for shape in kernel_shapes(T, method)

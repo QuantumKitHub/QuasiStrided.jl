@@ -77,7 +77,7 @@ _default_kernel(::Type{T}) where {T} =
 end
 
 # The automatic `(shape, method)` under `method`, `_default_method(T, TA, TB)`.
-@inline _default_shape(::Type{T}, ::ComplexMethod, m_length::Int, n_length::Int, run::Int) where {T} =
+@inline _default_shape(::Type{T}, ::KernelMethod, m_length::Int, n_length::Int, run::Int) where {T} =
     _default_shape(T, m_length, n_length, run)
 
 # The real default shape of the real problem, mapped: the real extent, store and

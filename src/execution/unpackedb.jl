@@ -8,7 +8,7 @@
 # `p` is storage address `colbase[j] + ksteps[p]` (base included). Padding
 # columns of a tail sliver alias the last valid column, so every address read
 # is inside the hoisted B check; their results are never stored. `length` is
-# the packed-equivalent count that `_execute_tile_prologue!` checks, not the
+# the packed-equivalent count that `execute_tile!` checks, not the
 # storage length.
 struct UnpackedBView{S, K <: AbstractVector{Int}, NR, F}
     storage::S
@@ -70,7 +70,7 @@ const _UNPACKED_B_MMAX = 256
 # The view for one N sliver; `buf`/`n_tile_start` locate an irregular sliver's
 # offsets in `ws.n_buf_B`.
 @inline function _unpacked_b_view(
-        kernel::DescriptorKernel{MR, NR, T}, storage::S, base::Int,
+        kernel::Microkernel{MR, NR, T}, storage::S, base::Int,
         d::BlockDescriptor, buf::Vector{Int}, n_tile_start::Int, ksteps::K, transform::F
     ) where {MR, NR, T, S, K <: AbstractVector{Int}, F}
     last = d.count - 1
@@ -104,7 +104,8 @@ end
             m_tile_start = m_tile_index * m_tile
             apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
             rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
-            unsafe_execute_micro_tile!(
+            # Inside the caller's C check.
+            @inbounds _execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
                 apanel, bview, k_block_length, alphaT, beta_eff
             )

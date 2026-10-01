@@ -361,7 +361,8 @@ function _execute_nest!(
 
             # Hoisted bounds checks (B here, A and C per M block): each
             # rectangle is exactly the union of the per-sliver/per-tile
-            # regions, so the `unsafe_*` calls below read nothing unchecked.
+            # regions, and the storage check compares only range extremes, so
+            # the `@inbounds` pack and tile calls below touch nothing unchecked.
             checked_span_bounds(plan.Bbase, rng_kB, rng_nB, lenB)
 
             beta_eff = firstpanel ? betaT : one(T)
@@ -377,8 +378,8 @@ function _execute_nest!(
                     n_tile_start = n_tile_index * n_tile
                     bpanel = _sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
                     colsB = _axis_of(ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, aff_nB)
-                    _pack_sliver!(
-                        unsafe_pack!, bpanel, plan.Bstorage, plan.Bbase, colsB, rowsB_k,
+                    @inbounds _pack_sliver!(
+                        bpanel, plan.Bstorage, plan.Bbase, colsB, rowsB_k,
                         sliver_spec(kernel, 2), btransform
                     )
                 end
@@ -416,8 +417,8 @@ function _execute_nest!(
                         m_tile_start = m_tile_index * m_tile
                         apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
                         rowsA = _axis_of(ws.m_desc_A[m_tile_index + 1], ws.m_buf_A, m_tile_start, aff_mA)
-                        _pack_sliver!(
-                            unsafe_pack!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
+                        @inbounds _pack_sliver!(
+                            apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
                             sliver_spec(kernel, 1), atransform
                         )
                     end
@@ -466,7 +467,8 @@ end
             m_tile_start = m_tile_index * m_tile
             apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
             rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
-            unsafe_execute_micro_tile!(
+            # Inside the caller's C check.
+            @inbounds _execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
                 apanel, bpanel, k_block_length, alphaT, beta_eff
             )

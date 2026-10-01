@@ -16,7 +16,7 @@ Mixed-domain microkernel for complex `A` times real `B`, computing in complex
 `T`: a real `SIMDKernel` of `2MR x NR` over `SIMD.Vec{W,real(T)}` lanes. `2MR`
 must be a multiple of `W`, and `W` must be even.
 """
-struct ComplexRealKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR, NR, T}
+struct ComplexRealKernel{MR, NR, T, W, KI <: SIMDKernel} <: Microkernel{MR, NR, T}
     descriptor::Descriptor{MR, NR, T, InterleavedFormat, RealFormat}
     inner::KI
 
@@ -24,7 +24,7 @@ struct ComplexRealKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR,
             descriptor::Descriptor{MR, NR, T, InterleavedFormat, RealFormat},
             inner::KI
         ) where {MR, NR, T, W, KI <: SIMDKernel}
-        _check_vector_shape("ComplexRealKernel", 2 * MR, W, true)
+        check_vector_shape("ComplexRealKernel", 2 * MR, W, true)
         KI === SIMDKernel{2 * MR, NR, real(T), W} || throw(
             ArgumentError("ComplexRealKernel's inner kernel must be SIMDKernel{$(2 * MR),$NR,$(real(T)),$W}, got $KI")
         )
@@ -39,7 +39,7 @@ Mixed-domain microkernel for real `A` times complex `B`, computing in complex
 `T`: a real `SIMDKernel` of `MR x 2NR` over `SIMD.Vec{W,real(T)}` lanes. `MR`
 must be a multiple of `W`.
 """
-struct RealComplexKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR, NR, T}
+struct RealComplexKernel{MR, NR, T, W, KI <: SIMDKernel} <: Microkernel{MR, NR, T}
     descriptor::Descriptor{MR, NR, T, RealFormat, InterleavedFormat}
     inner::KI
 
@@ -69,9 +69,9 @@ function RealComplexKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR,
 end
 
 ComplexRealKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
-    ComplexRealKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
+    ComplexRealKernel(Val(MR), Val(NR), T, Val(default_lanewidth(real(T))))
 RealComplexKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
-    RealComplexKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
+    RealComplexKernel(Val(MR), Val(NR), T, Val(default_lanewidth(real(T))))
 
 complex_method(::ComplexRealKernel) = ComplexRealMethod()
 complex_method(::RealComplexKernel) = RealComplexMethod()
@@ -79,15 +79,15 @@ lanewidth(kernel::_MixedKernel) = lanewidth(kernel.inner)
 
 zero_accumulator(kernel::_MixedKernel) = zero_accumulator(kernel.inner)
 
-@inline Base.accumulate(kernel::_MixedKernel, acc::NTuple, packed_a::PackedPanel, packed_b, k_block_length::Int) =
-    accumulate(kernel.inner, acc, packed_a, packed_b, k_block_length)
+@inline add_tile(kernel::_MixedKernel, acc::NTuple, packed_a::PackedPanel, packed_b, k_block_length::Int) =
+    add_tile(kernel.inner, acc, packed_a, packed_b, k_block_length)
 
 # Inlined or not as the fmaddsub and planar stores each reuses.
 function store_tile!(
         destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::ComplexRealKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
-    m, n = _store_prologue!(destination, alpha, beta)
+    m, n = store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
 
     if _complex_vector_eligible(destination, T)
@@ -101,7 +101,7 @@ end
         destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::RealComplexKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
-    m, n = _store_prologue!(destination, alpha, beta)
+    m, n = store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
 
     if _complex_vector_eligible(destination, T)

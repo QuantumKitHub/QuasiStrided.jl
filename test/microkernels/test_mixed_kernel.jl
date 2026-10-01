@@ -43,7 +43,7 @@ end
     end
 
     # Packing from storage of another precision, `conj` on both sides.
-    @testset "pack -> accumulate -> store: $(nameof(K)) $T from $SA x $SB" for (K, T, SA, SB, MR, NR, W) in (
+    @testset "pack -> add_tile -> store: $(nameof(K)) $T from $SA x $SB" for (K, T, SA, SB, MR, NR, W) in (
             (ComplexRealKernel, ComplexF32, ComplexF64, Float64, 8, 5, 8),
             (RealComplexKernel, ComplexF32, Float64, ComplexF64, 16, 3, 8),
             (ComplexRealKernel, ComplexF64, ComplexF64, Float32, 12, 8, 8),

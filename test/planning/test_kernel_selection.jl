@@ -312,13 +312,26 @@ end
     ) === nothing
 end
 
+@testset "pack_formats agrees with every kernel's descriptor" begin
+    QS = QuasiStrided
+    kernels = (
+        ScalarKernel(Val(4), Val(2), Float64), SIMDKernel(Val(8), Val(4), Float32),
+        QS.PlanarKernel(Val(4), Val(2), ComplexF64), QS.OneMKernel(Val(4), Val(2), ComplexF64),
+        QS.FMAddSubKernel(Val(4), Val(2), ComplexF64), QS.ComplexRealKernel(Val(4), Val(2), ComplexF64),
+        QS.RealComplexKernel(Val(4), Val(2), ComplexF64),
+    )
+    for k in kernels
+        @test pack_formats(complex_method(k)) === (QS.a_format(k), QS.b_format(k))
+    end
+end
+
 @testset "complex blocking is the real row scaled by packed reals" begin
     for base in (_fallback_blocking(Float64), _fallback_blocking(Float32), Blocking(1, 5, 1))
         for m in (PlanarMethod(), OneMMethod(), FMAddSubMethod())
             b = _scale_blocking(base, m)
             @test b.k_block === base.k_block
-            @test b.m_block === max(1, base.m_block ÷ a_reals(m))
-            @test b.n_block === max(1, base.n_block ÷ b_reals(m))
+            @test b.m_block === max(1, base.m_block ÷ reals_per_element(pack_formats(m)[1]))
+            @test b.n_block === max(1, base.n_block ÷ reals_per_element(pack_formats(m)[2]))
         end
     end
     @test _scale_blocking(_fallback_blocking(Float64), PlanarMethod()) === Blocking(64, 256, 384)

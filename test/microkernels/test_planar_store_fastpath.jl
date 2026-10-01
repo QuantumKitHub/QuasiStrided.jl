@@ -3,7 +3,7 @@
 #
 # Values are pinned two ways. On the elements the fast path vectorizes (full
 # row blocks) it must match, bitwise, an independent transcription of Base's
-# `Complex` `*`/`muladd` expression trees (the arithmetic `_axpby_tile!` does).
+# `Complex` `*`/`muladd` expression trees (the arithmetic `axpby_tile!` does).
 # Against the scalar store it is compared with a tolerance only: LLVM contracts
 # Base's scalar complex `muladd` depending on inlining context, so the scalar
 # path is not bit-reproducible even against itself.
@@ -36,7 +36,7 @@ function ref_axpby(alpha::T, rr::R, ri::R, beta::T, cold::T) where {T, R}
     return Complex(fma(ar, rr, barrier(-fma(ai, ri, -xr))), fma(ar, ri, barrier(fma(ai, rr, xi))))
 end
 
-# Every `_axpby_tile!` branch, plus purely imaginary and real non-unit beta.
+# Every `axpby_tile!` branch, plus purely imaginary and real non-unit beta.
 mk_store_ab(T) = (
     (one(T), zero(T)), (T(-0.5, 0.25), zero(T)), (one(T), one(T)), (T(2, -1), one(T)),
     (T(2.5, -1), T(-1.75, 0.5)), (one(T), T(2, 0)), (T(1, 1), T(0, -3)),

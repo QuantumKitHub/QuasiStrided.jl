@@ -596,7 +596,7 @@ end
     # the flag XOR A's `conj` op.
     d = 4
     for T in (ComplexF64, ComplexF32)
-        W = QuasiStrided._default_lanewidth(real(T))
+        W = QuasiStrided.default_lanewidth(real(T))
         kernel = QuasiStrided.PlanarKernel(Val(W), Val(8), T, Val(W))
         @test tile_size(kernel, 1) <= 16
         (indA, indB, indC), _ = _lo_labels(_LO_CASES[3][2], _LO_CASES[3][3])

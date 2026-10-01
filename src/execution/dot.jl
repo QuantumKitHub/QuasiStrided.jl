@@ -13,7 +13,7 @@ const _DOT_MODE = Ref{Symbol}(:auto)
 @inline function _dot_lanewidth(::Type{T}) where {T}
     R = real(T)
     vb = target_profile().vector_bytes
-    return (vb > 0 && vb % sizeof(R) == 0) ? vb ÷ sizeof(R) : _default_lanewidth(R)
+    return (vb > 0 && vb % sizeof(R) == 0) ? vb ÷ sizeof(R) : default_lanewidth(R)
 end
 
 # Outputs computed together: 8 independent FMA chains cover the FMA latency
@@ -175,7 +175,7 @@ end
         sums = _dot_group(mptr, gptr, mbases, k_block_length, Val(W), Val(NB))
         @inbounds for j in 1:nvalid
             s = MCONJ ? conj(sums[j]) : sums[j]
-            _axpby_at!(Cstorage, cbase + bufC[q + j] + 1, alpha, s, beta)
+            axpby_at!(Cstorage, cbase + bufC[q + j] + 1, alpha, s, beta)
         end
         q += nvalid
     end

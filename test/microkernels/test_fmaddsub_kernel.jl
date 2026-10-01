@@ -68,7 +68,7 @@ const _QSF = QuasiStrided
     end
 
     @testset "instruction selection: vfmaddsub, no separate mul/add/sub, no spill" begin
-        # Exact instruction counts in the hot loop of `accumulate`, so only on
+        # Exact instruction counts in the hot loop of `add_tile`, so only on
         # an FMA3 x86 host and not on hosted CI, whose virtualized CPU feature
         # sets do not reliably match.
         isa = target_profile().isa
@@ -93,7 +93,7 @@ const _QSF = QuasiStrided
             R = real(T)
             asm = sprint() do io
                 code_native(
-                    io, Base.accumulate,
+                    io, QuasiStrided.add_tile,
                     (typeof(k), typeof(zero_accumulator(k)), PackedPanel{R}, PackedPanel{R}, Int);
                     debuginfo = :none, syntax = :intel
                 )

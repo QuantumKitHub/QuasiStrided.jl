@@ -25,7 +25,7 @@ mk_pack_b(k, B) = mk_cols(c -> [real(c); imag(c)], permutedims(B))
 mk_pack(k, A, B) = (mk_pack_a(k, A), mk_pack_b(k, B))
 
 # Element (i, j), zero-based, of an accumulator.
-mk_read(::ScalarKernel, acc, i, j) = acc[i + 1, j + 1]
+mk_read(k::ScalarKernel, acc, i, j) = acc[i + tile_size(k, 1) * j + 1]
 function mk_read(k::SIMDKernel, acc, i, j)
     W = lanewidth(k)
     return acc[i ÷ W + (tile_size(k, 1) ÷ W) * j + 1][i % W + 1]
@@ -42,7 +42,7 @@ function mk_read(k::Union{OneMKernel, FMAddSubKernel}, acc, i, j)
     return Complex(vec[2u + 1], vec[2u + 2])
 end
 
-mk_fill_acc(k, x) = (acc = zero_accumulator(k); acc isa AbstractMatrix ? fill(x, size(acc)) : map(v -> typeof(v)(x), acc))
+mk_fill_acc(k, x) = map(v -> typeof(v)(x), zero_accumulator(k))
 mk_nan(T) = T <: Complex ? T(NaN, NaN) : T(NaN)
 mk_inf(T) = T <: Complex ? T(Inf, Inf) : T(Inf)
 mk_tol(T) = real(T) === Float64 ? 1.0e-11 : 2.0f-4
@@ -57,10 +57,10 @@ mk_dense(v::AbstractVector{T}) where {T} = copyto!(parent(StridedView(zeros(T, l
 # Element types of the test operands A and B; the mixed-domain kernels differ.
 mk_optypes(k) = (scalartype(k), scalartype(k))
 
-mk_run_acc(k, pa, pb, k_block_length) = accumulate(k, zero_accumulator(k), pa, pb, k_block_length)
+mk_run_acc(k, pa, pb, k_block_length) = add_tile(k, zero_accumulator(k), pa, pb, k_block_length)
 mk_run_exec(k, dst, pa, pb, k_block_length, alpha, beta) = (execute_tile!(k, dst, pa, pb, k_block_length, alpha, beta); nothing)
 
-# `full = false` checks only accumulate against the reference and allocations.
+# `full = false` checks only add_tile against the reference and allocations.
 # Separate functions, so the light check does not compile the full one.
 function mk_contract(k; full::Bool = true)
     return @testset "$(nameof(typeof(k))){$(tile_size(k, 1)),$(tile_size(k, 2)),$(scalartype(k))}" begin
@@ -86,17 +86,15 @@ function mk_contract_light(k)
     # with a partial row block. Julia 1.10 does not keep the tuple
     # accumulator in registers.
     m = max(1, MR - 1)
-    if !(k isa ScalarKernel)
-        skip = VERSION < v"1.11"
-        ab = (T(2), T(0.5))
-        scat = Tile(zeros(T, MR * NR), 0, view(collect(0:(MR - 1)), 1:MR), AffineAxis(0, MR, NR))
-        part = Tile(mk_dense(zeros(T, m * NR)), 0, AffineAxis(0, 1, m), AffineAxis(0, m, NR))
-        mk_run_acc(k, pa, pb, k_block_length)
-        @test (@allocated mk_run_acc(k, pa, pb, k_block_length)) == 0 skip = skip
-        for dst in (scat, part)
-            mk_run_exec(k, dst, pa, pb, k_block_length, ab...)
-            @test (@allocated mk_run_exec(k, dst, pa, pb, k_block_length, ab...)) == 0 skip = skip
-        end
+    skip = VERSION < v"1.11"
+    ab = (T(2), T(0.5))
+    scat = Tile(zeros(T, MR * NR), 0, view(collect(0:(MR - 1)), 1:MR), AffineAxis(0, MR, NR))
+    part = Tile(mk_dense(zeros(T, m * NR)), 0, AffineAxis(0, 1, m), AffineAxis(0, m, NR))
+    mk_run_acc(k, pa, pb, k_block_length)
+    @test (@allocated mk_run_acc(k, pa, pb, k_block_length)) == 0 skip = skip
+    for dst in (scat, part)
+        mk_run_exec(k, dst, pa, pb, k_block_length, ab...)
+        @test (@allocated mk_run_exec(k, dst, pa, pb, k_block_length, ab...)) == 0 skip = skip
     end
     return nothing
 end
@@ -116,13 +114,13 @@ function mk_contract_full(k)
 
     acc0 = zero_accumulator(k)
     @test all(iszero(mk_read(k, acc0, i, j)) for i in 0:(MR - 1), j in 0:(NR - 1))
-    @test accumulate(k, acc0, R[], R[], 0) === acc0
-    @test_throws ArgumentError accumulate(k, acc0, R[], R[], -1)
+    @test add_tile(k, acc0, R[], R[], 0) === acc0
+    @test_throws ArgumentError add_tile(k, acc0, R[], R[], -1)
     # Splitting k_block_length across calls composes.
     la, lb = length(pa) ÷ k_block_length, length(pb) ÷ k_block_length
     accs = zero_accumulator(k)
     for p in 0:(k_block_length - 1)
-        accs = accumulate(k, accs, pa[(p * la + 1):((p + 1) * la)], pb[(p * lb + 1):((p + 1) * lb)], 1)
+        accs = add_tile(k, accs, pa[(p * la + 1):((p + 1) * la)], pb[(p * lb + 1):((p + 1) * lb)], 1)
     end
     @test all(mk_read(k, accs, i, j) ≈ mk_read(k, acc, i, j) for i in 0:(MR - 1), j in 0:(NR - 1))
 

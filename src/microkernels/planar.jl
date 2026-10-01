@@ -12,13 +12,13 @@ Split-complex microkernel for `T = ComplexF32/ComplexF64` over
 `SIMD.Vec{W,real(T)}` lanes. `MR`/`NR` are complex extents; `MR` must be a
 multiple of `W`, which counts reals.
 """
-struct PlanarKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
+struct PlanarKernel{MR, NR, T, W} <: Microkernel{MR, NR, T}
     descriptor::Descriptor{MR, NR, T, PlanarFormat, PlanarFormat}
 
     function PlanarKernel{MR, NR, T, W}(
             descriptor::Descriptor{MR, NR, T, PlanarFormat, PlanarFormat}
         ) where {MR, NR, T, W}
-        _check_vector_shape("PlanarKernel", MR, W)
+        check_vector_shape("PlanarKernel", MR, W)
         return new{MR, NR, T, W}(descriptor)
     end
 end
@@ -31,7 +31,7 @@ end
 function PlanarKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T}
     T <: Complex ||
         throw(ArgumentError("PlanarKernel requires a complex element type, got $T"))
-    return PlanarKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(real(T))))
+    return PlanarKernel(Val(MR), Val(NR), T, Val(default_lanewidth(real(T))))
 end
 
 complex_method(::PlanarKernel) = PlanarMethod()
@@ -61,7 +61,7 @@ end
     ) where {MR, NR, T, W, R, NA, PA, PB}
     MV = MR ÷ W
     NV = MV * NR
-    _check_acc(:_accumulate_step_planar, R, T, NA, 2NV)
+    check_acc(:_accumulate_step_planar, R, T, NA, 2NV)
 
     arv = [Symbol(:ar, v) for v in 0:(MV - 1)]
     aiv = [Symbol(:ai, v) for v in 0:(MV - 1)]
@@ -122,12 +122,12 @@ end
     end
 end
 
-function Base.accumulate(
+function add_tile(
         kernel::PlanarKernel{MR, NR, T, W}, acc::NTuple{NA, Vec{W, R}},
         packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, W, R, NA, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
-    k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
+    k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
     @inbounds for p in 1:k_block_length
         acc = _accumulate_step_planar(kernel, acc, packed_a, packed_b, p)
     end
@@ -147,12 +147,12 @@ end
 # Scalar fallback store, for every destination the vector store cannot take.
 @generated function _store_tile_planar!(
         destination::Tile, acc::NTuple{NA, Vec{W, R}},
-        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
+        alpha::T, beta::T, kernel::Microkernel{MR, NR, T},
         m::Int, n::Int
     ) where {MR, NR, T, W, R, NA}
     MV = MR ÷ W
     NV = MV * NR
-    _check_acc(:_store_tile_planar!, R, T, NA, 2NV)
+    check_acc(:_store_tile_planar!, R, T, NA, 2NV)
 
     blocks = Any[]
     for j in 1:NR, v in 0:(MV - 1)
@@ -165,7 +165,7 @@ end
                     for lane in 1:$W
                         i = $(v * W) + lane
                         i <= m || break
-                        _axpby_tile!(
+                        axpby_tile!(
                             destination, i, $j, alpha,
                             Complex(revec[lane], imvec[lane]), beta
                         )
@@ -210,7 +210,7 @@ end
 
 # One full `W`-row block; `at` is the zero-based index of its first real.
 # The arithmetic transcribes Base's `Complex` expression trees (the ones
-# `_axpby_tile!` reaches), so full blocks match them bitwise: `*` is unfused,
+# `axpby_tile!` reaches), so full blocks match them bitwise: `*` is unfused,
 # `muladd(z, w, x) = (muladd(zr, wr, -muladd(zi, wi, -xr)), muladd(zr, wi,
 # muladd(zi, wr, xi)))`. Against the scalar fallback it is exact at
 # `beta == 0/1` and ~1 ULP otherwise, because LLVM contracts Base's scalar
@@ -244,7 +244,7 @@ end
 # block of `2W` reals. The raw pointer is only dereferenced inside `GC.@preserve`.
 @generated function _store_tile_planar_vector!(
         destination::Tile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
-        alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
+        alpha::T, beta::T, kernel::Microkernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NA}
     # The pointer reinterpretation is only sound on dense rank-1 complex storage.
@@ -253,7 +253,7 @@ end
     RC = real(eltype(S))
     MV = MR ÷ W
     NV = MV * NR
-    _check_acc(:_store_tile_planar_vector!, R, T, NA, 2NV)
+    check_acc(:_store_tile_planar_vector!, R, T, NA, 2NV)
 
     blocks = Any[]
     for j in 1:NR
@@ -273,7 +273,7 @@ end
                         for lane in 1:$W
                             i = $(v * W) + lane
                             i <= m || break
-                            _axpby_at!(
+                            axpby_at!(
                                 storage, colbase + i, alpha,
                                 Complex(revec[lane], imvec[lane]), beta
                             )
@@ -316,7 +316,7 @@ end
         destination::Tile, acc::NTuple{NA, Vec{W, R}},
         alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NA}
-    m, n = _store_prologue!(destination, alpha, beta)
+    m, n = store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
 
     if _complex_vector_eligible(destination, T)

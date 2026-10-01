@@ -15,11 +15,11 @@ using SIMD: Vec, vload, vstore
 Explicit-SIMD real microkernel over `SIMD.Vec{W,T}` lanes. `MR` must be a
 multiple of `W` (default: one 256-bit register, 4 for `Float64`, 8 for `Float32`).
 """
-struct SIMDKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
+struct SIMDKernel{MR, NR, T, W} <: Microkernel{MR, NR, T}
     descriptor::RealDescriptor{MR, NR, T}
 
     function SIMDKernel{MR, NR, T, W}(descriptor::RealDescriptor{MR, NR, T}) where {MR, NR, T, W}
-        _check_vector_shape("SIMDKernel", MR, W)
+        check_vector_shape("SIMDKernel", MR, W)
         return new{MR, NR, T, W}(descriptor)
     end
 end
@@ -27,7 +27,7 @@ end
 SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W} =
     SIMDKernel{MR, NR, T, W}(Descriptor(Val(MR), Val(NR), T))
 SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
-    SIMDKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(T)))
+    SIMDKernel(Val(MR), Val(NR), T, Val(default_lanewidth(T)))
 
 lanewidth(::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
 
@@ -48,7 +48,7 @@ end
         packed_a::PA, packed_b::PB, p::Int
     ) where {MR, NR, T, W, NV, PA, PB}
     NVECA = MR ÷ W
-    _check_acc(:_accumulate_step, T, T, NV, NVECA * NR)
+    check_acc(:_accumulate_step, T, T, NV, NVECA * NR)
 
     avars = [Symbol(:a, v) for v in 0:(NVECA - 1)]
     bvars = [Symbol(:b, j) for j in 1:NR]
@@ -78,12 +78,12 @@ end
     end
 end
 
-@inline function Base.accumulate(
+@inline function add_tile(
         kernel::SIMDKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, T}},
         packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {MR, NR, T, W, NV, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
-    k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
+    k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
     @inbounds for p in 1:k_block_length
         acc = _accumulate_step(kernel, acc, packed_a, packed_b, p)
     end
@@ -112,7 +112,7 @@ end
                     for lane in 1:$W
                         i = $(v * W) + lane
                         i <= m || break
-                        _axpby_tile!(destination, i, $j, alpha, vec[lane], beta)
+                        axpby_tile!(destination, i, $j, alpha, vec[lane], beta)
                     end
                 end
             end
@@ -160,7 +160,7 @@ end
                         for lane in 1:$W
                             i = $(v * W) + lane
                             i <= m || break
-                            _axpby_at!(storage, colbase + i, alpha, vec[lane], beta)
+                            axpby_at!(storage, colbase + i, alpha, vec[lane], beta)
                         end
                     end
                 end
@@ -194,7 +194,7 @@ end
         destination::Tile, acc::NTuple{NV, Vec{W, T}},
         alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, NV}
-    m, n = _store_prologue!(destination, alpha, beta)
+    m, n = store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
 
     if _vector_store_eligible(destination, T)

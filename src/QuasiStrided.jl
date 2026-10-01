@@ -24,7 +24,7 @@ include("packing/panel.jl")
 include("packing/pack.jl")
 include("packing/pack_contiguous.jl")
 
-# --- Microkernels: accumulate over one packed K panel, store into C ---
+# --- Microkernels: add one packed K block to a register tile, store into C ---
 include("microkernels/interface.jl")
 include("microkernels/scalar.jl")
 include("microkernels/simd.jl")

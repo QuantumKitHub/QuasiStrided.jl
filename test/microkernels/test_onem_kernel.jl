@@ -28,7 +28,7 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEForm
         @test_throws ArgumentError OneMKernel{12, 8, ComplexF64, 8, typeof(wrong)}(d, wrong)
         # The error reports the logical k_block_length, not the doubled real one.
         err = try
-            accumulate(k, zero_accumulator(k), Float64[], Float64[], -3)
+            add_tile(k, zero_accumulator(k), Float64[], Float64[], -3)
         catch e
             e
         end

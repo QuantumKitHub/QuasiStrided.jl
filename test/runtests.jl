@@ -5,15 +5,15 @@ using QuasiStrided
 using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
     describe_block, block_descriptors!, Descriptor, tile_size,
     scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
-    AffineAxis, Tile, checked_tile_storage_bounds, pack!, unsafe_pack!, sliver_spec,
-    zero_accumulator, accumulate, store_tile!, execute_tile!, lanewidth, contract!,
+    AffineAxis, Tile, checked_tile_storage_bounds, pack!, sliver_spec,
+    zero_accumulator, add_tile, store_tile!, execute_tile!, lanewidth, contract!,
     Blocking, default_blocking, ScalarKernel, SIMDKernel, TargetProfile, CacheLevel,
     target_profile, cache_topology, unknown_target, detect_isa, detect_target,
     _derived_shape, _fallback_shape, _shape_override, _kernel_for, _default_kernel,
     _fallback_blocking, kernel_shapes, parse_size, count_cpu_list, NR_DEFAULT,
     _rule_applies, isa_nregisters, sliver_width, realtype,
-    complex_method, RealMethod, PlanarMethod, OneMMethod, accumulator_planes, a_reals,
-    b_reals, FMAddSubMethod, _modelled_blocking, _scale_blocking, _real_blocking_row,
+    complex_method, RealMethod, PlanarMethod, OneMMethod, accumulator_planes, pack_formats,
+    reals_per_element, FMAddSubMethod, _modelled_blocking, _scale_blocking, _real_blocking_row,
     _planar_pressure, _pack_split, _NestPath
 # plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 
