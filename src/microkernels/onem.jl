@@ -16,13 +16,13 @@ over `SIMD.Vec{W,real(T)}` lanes. `2MR` must be a multiple of `W`, and `W`
 must be even. Used only when named in `plan_contract(...; kernel = ...)`.
 """
 struct OneMKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR, NR, T}
-    descriptor::ComplexKernelDescriptor{MR, NR, T, OneEFormat, PlanarFormat}
+    descriptor::Descriptor{MR, NR, T, OneEFormat, PlanarFormat}
     # `KI` stands in for `SIMDKernel{2MR,NR,real(T),W}`, which is not a legal
     # field type; the constructor pins it to exactly that.
     inner::KI
 
     function OneMKernel{MR, NR, T, W, KI}(
-            descriptor::ComplexKernelDescriptor{MR, NR, T, OneEFormat, PlanarFormat},
+            descriptor::Descriptor{MR, NR, T, OneEFormat, PlanarFormat},
             inner::KI
         ) where {MR, NR, T, W, KI <: SIMDKernel}
         _check_vector_shape("OneMKernel", 2 * MR, W, true)
@@ -36,7 +36,7 @@ end
 function OneMKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W}
     T <: Complex ||
         throw(ArgumentError("OneMKernel requires a complex element type, got $T"))
-    descriptor = ComplexKernelDescriptor(Val(MR), Val(NR), T, OneEFormat(), PlanarFormat())
+    descriptor = Descriptor(Val(MR), Val(NR), T, OneEFormat(), PlanarFormat())
     inner = SIMDKernel(Val(2 * MR), Val(NR), real(T), Val(W))
     return OneMKernel{MR, NR, T, W, typeof(inner)}(descriptor, inner)
 end
@@ -54,7 +54,7 @@ zero_accumulator(kernel::OneMKernel) = zero_accumulator(kernel.inner)
 function Base.accumulate(
         kernel::OneMKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, R}},
         packed_a::PA, packed_b::PB, k_block_length::Int
-    ) where {MR, NR, T, W, R, NV, PA, PB}
+    ) where {MR, NR, T, W, R, NV, PA <: PackedPanel, PB}
     # Checked here so the message reports the logical k_block_length, not the
     # doubled one.
     k_block_length >= 0 || throw(ArgumentError("accumulate requires k_block_length >= 0, got k_block_length = $k_block_length"))

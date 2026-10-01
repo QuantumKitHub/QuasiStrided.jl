@@ -23,7 +23,7 @@ const COMPLEX_FORMATS = (
     T in (ComplexF64, ComplexF32), (fa, fb) in COMPLEX_FORMATS
 
     MR, NR = 4, 3
-    kernel = ComplexKernelDescriptor(Val(MR), Val(NR), T, fa, fb)
+    kernel = Descriptor(Val(MR), Val(NR), T, fa, fb)
     R = real(T)
     storage = complex_storage(T, 4000)
     calls = Ref(0)
@@ -42,7 +42,7 @@ const COMPLEX_FORMATS = (
                 @test all(isequal.(got, ref_pack(fmt, T, PD, k_block_length, valid, g, f)))
             end
             calls[] = 0
-            got, canaries = pack_into(pack!, :view, R, len, src, kernel, counting)
+            got, canaries = pack_into(pack!, :panel, R, len, src, kernel, counting)
             @test all(isequal.(got, ref_pack(fmt, T, PD, k_block_length, valid, g, z -> 2z + one(T))))
             @test calls[] == valid * k_block_length   # once per element, not per real half
             @test canaries
@@ -51,7 +51,7 @@ const COMPLEX_FORMATS = (
 end
 
 @testset "complex packing: validation before any write, k_block_length == 0 is a no-op" begin
-    kernel = ComplexKernelDescriptor(Val(4), Val(3), ComplexF64, PlanarFormat(), PlanarFormat())
+    kernel = Descriptor(Val(4), Val(3), ComplexF64, PlanarFormat(), PlanarFormat())
     storage = fill(ComplexF64(3, 4), 100)
     src = Tile(storage, 0, AffineAxis(0, 1, 4), AffineAxis(0, 8, 2))
     # The buffer holds realtype(kernel), not scalartype(kernel).
@@ -80,7 +80,7 @@ end
 
     function run(::Type{T}, fa, fb) where {T}
         MR, NR, k_block_length = 8, 6, 4
-        kernel = ComplexKernelDescriptor(Val(MR), Val(NR), T, fa, fb)
+        kernel = Descriptor(Val(MR), Val(NR), T, fa, fb)
         R = real(T)
         storage = rand(T, 4000)
         bufa = zeros(R, packed_a_length(kernel, k_block_length))

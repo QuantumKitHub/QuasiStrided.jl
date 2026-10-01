@@ -3,7 +3,7 @@
 # files included after this one.
 
 using QuasiStrided: RealFormat, PlanarFormat, OneEFormat, InterleavedFormat, PackedPanel,
-    packed_panel, ComplexKernelDescriptor, _copies_unchanged,
+    packed_panel, _copies_unchanged,
     _pack_a_contiguous_eligible
 
 # Packed layouts written from the format definitions, not from the offset
@@ -54,7 +54,7 @@ function pack_into(pack!, dst, R, len, src, kernel, f)
         return v, true
     end
     GC.@preserve buf begin
-        d = dst === :view ? view(buf, 5:(4 + len)) : packed_panel(buf, 5, len)
+        d = packed_panel(buf, 5, len)
         @test pack!(d, src, kernel, f) === d
     end
     return buf[5:(4 + len)], all(==(R(-777)), buf[1:4]) && all(==(R(-777)), buf[(5 + len):end])
@@ -67,7 +67,7 @@ const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
     T in (Float64, Float32)
 
     MR, NR, k_block_length = 8, 6, 5
-    kernel = KernelDescriptor(Val(MR), Val(NR), T)
+    kernel = Descriptor(Val(MR), Val(NR), T)
     storage = T.(collect(1.0:2000.0))
     calls = Ref(0)
     counting = x -> (calls[] += 1; 3x + 1000)   # nonzero at zero: padding must bypass it
@@ -77,7 +77,7 @@ const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
     ]
     steps = Any[AffineAxis(0, 64, k_block_length), AffineAxis(700, -97, k_block_length), view(SCATTER_STEPS, 1:k_block_length)]
     for (side, pack!, PD) in ((:a, pack_a!, MR), (:b, pack_b!, NR)),
-            lane in lanes, step in steps, valid in (PD, 1, 0), dst in (:vector, :view)
+            lane in lanes, step in steps, valid in (PD, 1, 0), dst in (:vector, :panel)
         src, g = pack_fixture(side, storage, 11, resized(lane, valid), step)
         calls[] = 0
         got, canaries = pack_into(pack!, dst, T, PD * k_block_length, src, kernel, counting)
@@ -97,7 +97,7 @@ end
 @testset "pack_a! contiguous fast path: fires exactly when eligible ($T, MR=$MR)" for
     T in (Float64, Float32), MR in (4, 16)
 
-    kernel = KernelDescriptor(Val(MR), Val(3), T)
+    kernel = Descriptor(Val(MR), Val(3), T)
     vals = T.(collect(1.0:2000.0))
     mixed = (T === Float64 ? Float32 : Float64).(collect(1.0:2000.0) ./ 3)
     storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals), mixed) : (vals, mixed)
@@ -127,7 +127,7 @@ end
 end
 
 @testset "pack_a!/pack_b!: k_block_length == 0 reads and writes nothing" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
+    kernel = Descriptor(Val(4), Val(3), Float64)
     storage = fill(3.0, 10)
     read = Ref(false)
     spy = x -> (read[] = true; x)
@@ -139,8 +139,8 @@ end
 end
 
 @testset "pack_a!/pack_b!: invalid metadata rejected before mutation" begin
-    kernel = KernelDescriptor(Val(4), Val(3), Float64)
-    kernel32 = KernelDescriptor(Val(4), Val(3), Float32)
+    kernel = Descriptor(Val(4), Val(3), Float64)
+    kernel32 = Descriptor(Val(4), Val(3), Float32)
     storage = fill(9.0, 20)
     tile(m, n, base = 0) = Tile(storage, base, AffineAxis(0, 1, m), AffineAxis(0, 1, n))
     for (pack!, bad, ok, short) in ((pack_a!, tile(5, 3), tile(4, 3), 11), (pack_b!, tile(3, 4), tile(3, 3), 8))
@@ -168,8 +168,8 @@ end
         bytes = Int[]
         GC.@preserve bufa bufb begin
             pa = packed_panel(bufa, 1, MR * k_block_length)
-            dsts_a = (bufa, view(bufa, 3:(2 + MR * k_block_length)), pa)
-            dsts_b = (bufb, view(bufb, 3:(2 + NR * k_block_length)), packed_panel(bufb, 1, NR * k_block_length))
+            dsts_a = (bufa, pa)
+            dsts_b = (bufb, packed_panel(bufb, 1, NR * k_block_length))
             pk = view(koffs, 1:k_block_length)
             srcs_a = (
                 Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length)),
@@ -185,7 +185,7 @@ end
                 Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, k_block_length, NR)),
             )
             if !full
-                srcs_a, srcs_b, dsts_a, dsts_b = srcs_a[1:1], srcs_b[1:1], dsts_a[1:2], dsts_b[1:2]
+                srcs_a, srcs_b = srcs_a[1:1], srcs_b[1:1]
             end
             for d in dsts_a
                 for s in srcs_a
@@ -201,8 +201,8 @@ end
         end
         return bytes
     end
-    @test all(iszero, run(KernelDescriptor, Float64, 16, 6, true))
-    @test all(iszero, run(KernelDescriptor, Float32, 32, 6, true))
+    @test all(iszero, run(Descriptor, Float64, 16, 6, true))
+    @test all(iszero, run(Descriptor, Float32, 32, 6, true))
     @test all(iszero, run(ScalarKernel, Float64, 8, 6, false))
     @test all(iszero, run(SIMDKernel, Float64, 8, 6, false))
 end

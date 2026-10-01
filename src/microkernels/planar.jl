@@ -13,10 +13,10 @@ Split-complex microkernel for `T = ComplexF32/ComplexF64` over
 multiple of `W`, which counts reals.
 """
 struct PlanarKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
-    descriptor::ComplexKernelDescriptor{MR, NR, T, PlanarFormat, PlanarFormat}
+    descriptor::Descriptor{MR, NR, T, PlanarFormat, PlanarFormat}
 
     function PlanarKernel{MR, NR, T, W}(
-            descriptor::ComplexKernelDescriptor{MR, NR, T, PlanarFormat, PlanarFormat}
+            descriptor::Descriptor{MR, NR, T, PlanarFormat, PlanarFormat}
         ) where {MR, NR, T, W}
         _check_vector_shape("PlanarKernel", MR, W)
         return new{MR, NR, T, W}(descriptor)
@@ -25,7 +25,7 @@ end
 
 function PlanarKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W}
     return PlanarKernel{MR, NR, T, W}(
-        ComplexKernelDescriptor(Val(MR), Val(NR), T, PlanarFormat(), PlanarFormat())
+        Descriptor(Val(MR), Val(NR), T, PlanarFormat(), PlanarFormat())
     )
 end
 function PlanarKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T}
@@ -47,8 +47,8 @@ end
 # B column `j` at K step `p` as `(re, im)`; `UnpackedBView` overrides it.
 # Shared with the fmaddsub kernel.
 @inline _b_step_load2(packed_b::PB, kernel, j::Int, p::Int) where {PB} = (
-    panel_load(packed_b, packed_b_plane_offset(kernel, 0, j, p)),
-    panel_load(packed_b, packed_b_plane_offset(kernel, 1, j, p)),
+    panel_load(packed_b, packed_b_offset(kernel, j, p)),
+    panel_load(packed_b, packed_b_offset(kernel, j, p, 1)),
 )
 
 # GUARDRAIL: the real part is `muladd(-ai, bi, muladd(ar, br, c))`. `c - ai*bi`
@@ -75,7 +75,7 @@ end
             load_a,
             :(
                 $(arv[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 0, $(v * W + 1), p)
+                    Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p)
                 )
             )
         )
@@ -83,7 +83,7 @@ end
             load_a,
             :(
                 $(aiv[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 1, $(v * W + 1), p)
+                    Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p, 1)
                 )
             )
         )
@@ -125,7 +125,7 @@ end
 function Base.accumulate(
         kernel::PlanarKernel{MR, NR, T, W}, acc::NTuple{NA, Vec{W, R}},
         packed_a::PA, packed_b::PB, k_block_length::Int
-    ) where {MR, NR, T, W, R, NA, PA, PB}
+    ) where {MR, NR, T, W, R, NA, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
     @inbounds for p in 1:k_block_length

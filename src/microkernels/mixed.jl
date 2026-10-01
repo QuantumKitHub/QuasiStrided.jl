@@ -17,11 +17,11 @@ Mixed-domain microkernel for complex `A` times real `B`, computing in complex
 must be a multiple of `W`, and `W` must be even.
 """
 struct ComplexRealKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR, NR, T}
-    descriptor::ComplexKernelDescriptor{MR, NR, T, InterleavedFormat, RealFormat}
+    descriptor::Descriptor{MR, NR, T, InterleavedFormat, RealFormat}
     inner::KI
 
     function ComplexRealKernel{MR, NR, T, W, KI}(
-            descriptor::ComplexKernelDescriptor{MR, NR, T, InterleavedFormat, RealFormat},
+            descriptor::Descriptor{MR, NR, T, InterleavedFormat, RealFormat},
             inner::KI
         ) where {MR, NR, T, W, KI <: SIMDKernel}
         _check_vector_shape("ComplexRealKernel", 2 * MR, W, true)
@@ -40,11 +40,11 @@ Mixed-domain microkernel for real `A` times complex `B`, computing in complex
 must be a multiple of `W`.
 """
 struct RealComplexKernel{MR, NR, T, W, KI <: SIMDKernel} <: DescriptorKernel{MR, NR, T}
-    descriptor::ComplexKernelDescriptor{MR, NR, T, RealFormat, InterleavedFormat}
+    descriptor::Descriptor{MR, NR, T, RealFormat, InterleavedFormat}
     inner::KI
 
     function RealComplexKernel{MR, NR, T, W, KI}(
-            descriptor::ComplexKernelDescriptor{MR, NR, T, RealFormat, InterleavedFormat},
+            descriptor::Descriptor{MR, NR, T, RealFormat, InterleavedFormat},
             inner::KI
         ) where {MR, NR, T, W, KI <: SIMDKernel}
         KI === SIMDKernel{MR, 2 * NR, real(T), W} || throw(
@@ -57,13 +57,13 @@ end
 const _MixedKernel = Union{ComplexRealKernel, RealComplexKernel}
 
 function ComplexRealKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W}
-    descriptor = ComplexKernelDescriptor(Val(MR), Val(NR), T, InterleavedFormat(), RealFormat())
+    descriptor = Descriptor(Val(MR), Val(NR), T, InterleavedFormat(), RealFormat())
     inner = SIMDKernel(Val(2 * MR), Val(NR), real(T), Val(W))
     return ComplexRealKernel{MR, NR, T, W, typeof(inner)}(descriptor, inner)
 end
 
 function RealComplexKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W}
-    descriptor = ComplexKernelDescriptor(Val(MR), Val(NR), T, RealFormat(), InterleavedFormat())
+    descriptor = Descriptor(Val(MR), Val(NR), T, RealFormat(), InterleavedFormat())
     inner = SIMDKernel(Val(MR), Val(2 * NR), real(T), Val(W))
     return RealComplexKernel{MR, NR, T, W, typeof(inner)}(descriptor, inner)
 end
@@ -79,7 +79,7 @@ lanewidth(kernel::_MixedKernel) = lanewidth(kernel.inner)
 
 zero_accumulator(kernel::_MixedKernel) = zero_accumulator(kernel.inner)
 
-@inline Base.accumulate(kernel::_MixedKernel, acc::NTuple, packed_a, packed_b, k_block_length::Int) =
+@inline Base.accumulate(kernel::_MixedKernel, acc::NTuple, packed_a::PackedPanel, packed_b, k_block_length::Int) =
     accumulate(kernel.inner, acc, packed_a, packed_b, k_block_length)
 
 # Inlined or not as the fmaddsub and planar stores each reuses.

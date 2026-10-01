@@ -352,7 +352,7 @@ end
 
     ref = zeros(8 * 4)
     pack_a!(ref, src, kernel, identity)
-    QS.unsafe_pack_a!(packed, src, kernel, identity)
+    GC.@preserve packed QS.unsafe_pack_a!(QS.packed_panel(packed, 1, length(packed)), src, kernel, identity)
     @test packed == ref
 
     # Only the bounds checks are skipped.
@@ -365,7 +365,7 @@ end
     refB = zeros(6 * 4)
     packedB = zeros(6 * 4)
     pack_b!(refB, srcB, kernel, identity)
-    QS.unsafe_pack_b!(packedB, srcB, kernel, identity)
+    GC.@preserve packedB QS.unsafe_pack_b!(QS.packed_panel(packedB, 1, length(packedB)), srcB, kernel, identity)
     @test packedB == refB
     @test_throws DimensionMismatch QS.unsafe_pack_b!(zeros(3), srcB, kernel, identity)
 

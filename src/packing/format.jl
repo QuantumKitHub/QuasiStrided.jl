@@ -1,12 +1,10 @@
 # The contract between packing and the microkernels: the packed-panel formats
 # and the descriptor fixing a kernel's register tile, element type and panel
-# formats. Complex panels are "N planes of real(T)"; every format puts lane `i`
-# of plane `plane` at K step `p` (one-based `i`, `p`) at zero-based offset
+# formats. Complex panels are "N planes of real(T)". A sliver of register
+# extent `R` (`MR` for A, `NR` for B) puts lane `i` of plane `plane` at K step
+# `p` (one-based `i`, `p`) at zero-based offset, in reals,
 #
-#     (p - 1) * MR * reals_per_element  +  plane * MR  +  (i - 1)
-#
-# which at RealFormat (one real per element, plane 0) reduces to
-# `(i - 1) + MR * (p - 1)`.
+#     (p - 1) * R * reals_per_element  +  plane * R  +  (i - 1)
 
 abstract type PackFormat end
 
@@ -30,44 +28,38 @@ reals_per_element(::OneEFormat) = 4
 # length and offset below takes the logical `k_block_length` and counts reals.
 struct Descriptor{MR, NR, T, FA <: PackFormat, FB <: PackFormat}
     function Descriptor{MR, NR, T, FA, FB}() where {MR, NR, T, FA, FB}
-        _check_descriptor(MR, NR, T, FA, FB)
+        check_descriptor(MR, NR, T, FA, FB)
         return new{MR, NR, T, FA, FB}()
     end
 end
 
-const KernelDescriptor{MR, NR, T} = Descriptor{MR, NR, T, RealFormat, RealFormat}
-const ComplexKernelDescriptor{MR, NR, T <: Complex, FA, FB} = Descriptor{MR, NR, T, FA, FB}
+const RealDescriptor{MR, NR, T} = Descriptor{MR, NR, T, RealFormat, RealFormat}
 
-KernelDescriptor(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} = KernelDescriptor{MR, NR, T}()
+Descriptor(
+    ::Val{MR}, ::Val{NR}, ::Type{T}, a_format::PackFormat = RealFormat(), b_format::PackFormat = RealFormat()
+) where {MR, NR, T} = Descriptor{MR, NR, T, typeof(a_format), typeof(b_format)}()
 
-function ComplexKernelDescriptor(
-        ::Val{MR}, ::Val{NR}, ::Type{T}, ::FA, ::FB
-    ) where {MR, NR, T, FA <: PackFormat, FB <: PackFormat}
-    return Descriptor{MR, NR, T, FA, FB}()
-end
-
-function _check_descriptor(MR, NR, T, FA, FB)
+function check_descriptor(MR, NR, T, FA, FB)
     real_formats = FA === RealFormat && FB === RealFormat
-    name = real_formats ? "KernelDescriptor" : "ComplexKernelDescriptor"
     MR isa Int && NR isa Int ||
-        throw(ArgumentError("$name requires Int type parameters MR, NR"))
-    MR > 0 || throw(ArgumentError("$name requires MR > 0, got MR = $MR"))
-    NR > 0 || throw(ArgumentError("$name requires NR > 0, got NR = $NR"))
+        throw(ArgumentError("Descriptor requires Int type parameters MR, NR"))
+    MR > 0 || throw(ArgumentError("Descriptor requires MR > 0, got MR = $MR"))
+    NR > 0 || throw(ArgumentError("Descriptor requires NR > 0, got NR = $NR"))
     if real_formats
         T === Float32 || T === Float64 ||
-            throw(ArgumentError("KernelDescriptor requires T ∈ (Float32, Float64), got $T"))
+            throw(ArgumentError("Descriptor with real formats requires T ∈ (Float32, Float64), got $T"))
     else
         # A real operand of a complex `T` only in the mixed-domain pairings.
         mixed = (FA, FB) === (InterleavedFormat, RealFormat) ||
             (FA, FB) === (RealFormat, InterleavedFormat)
         !mixed && (FA === RealFormat || FB === RealFormat) && throw(
             ArgumentError(
-                "ComplexKernelDescriptor requires complex formats on both operands, " *
+                "Descriptor requires complex formats on both operands, " *
                     "or (InterleavedFormat, RealFormat) / (RealFormat, InterleavedFormat), got ($FA, $FB)"
             )
         )
         T === ComplexF32 || T === ComplexF64 || throw(
-            ArgumentError("ComplexKernelDescriptor requires T in (ComplexF32, ComplexF64), got $T")
+            ArgumentError("Descriptor with complex formats requires T in (ComplexF32, ComplexF64), got $T")
         )
     end
     return nothing
@@ -92,11 +84,7 @@ packed_b_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 2) * k_blo
 # Zero-based offsets, in reals, of one-based coordinates. For 1e and
 # interleaved, `i`/`j` runs over reals (1:2MR) and 1e's second region is
 # `plane == 2`.
-@inline packed_a_plane_offset(d::Descriptor{MR}, plane::Int, i::Int, p::Int) where {MR} =
+@inline packed_a_offset(d::Descriptor{MR}, i::Int, p::Int, plane::Int = 0) where {MR} =
     (p - 1) * sliver_width(d, 1) + plane * MR + (i - 1)
-@inline packed_b_plane_offset(d::Descriptor{MR, NR}, plane::Int, j::Int, p::Int) where {MR, NR} =
+@inline packed_b_offset(d::Descriptor{MR, NR}, j::Int, p::Int, plane::Int = 0) where {MR, NR} =
     (p - 1) * sliver_width(d, 2) + plane * NR + (j - 1)
-
-# Real descriptors only: a complex element has no single offset.
-packed_a_offset(kernel::KernelDescriptor{MR}, i::Int, p::Int) where {MR} = (i - 1) + MR * (p - 1)
-packed_b_offset(kernel::KernelDescriptor{MR, NR}, j::Int, p::Int) where {MR, NR} = (j - 1) + NR * (p - 1)

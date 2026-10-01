@@ -3,7 +3,7 @@ using Random
 using QuasiStrided
 # Internal names the test files use unqualified.
 using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
-    describe_block, block_descriptors!, KernelDescriptor, tile_size,
+    describe_block, block_descriptors!, Descriptor, tile_size,
     scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
     AffineAxis, Tile, checked_tile_storage_bounds, pack_a!, pack_b!,
     zero_accumulator, accumulate, store_tile!, execute_tile!, lanewidth, contract!,

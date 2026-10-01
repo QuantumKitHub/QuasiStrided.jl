@@ -16,16 +16,16 @@ Explicit-SIMD real microkernel over `SIMD.Vec{W,T}` lanes. `MR` must be a
 multiple of `W` (default: one 256-bit register, 4 for `Float64`, 8 for `Float32`).
 """
 struct SIMDKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
-    descriptor::KernelDescriptor{MR, NR, T}
+    descriptor::RealDescriptor{MR, NR, T}
 
-    function SIMDKernel{MR, NR, T, W}(descriptor::KernelDescriptor{MR, NR, T}) where {MR, NR, T, W}
+    function SIMDKernel{MR, NR, T, W}(descriptor::RealDescriptor{MR, NR, T}) where {MR, NR, T, W}
         _check_vector_shape("SIMDKernel", MR, W)
         return new{MR, NR, T, W}(descriptor)
     end
 end
 
 SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W} =
-    SIMDKernel{MR, NR, T, W}(KernelDescriptor(Val(MR), Val(NR), T))
+    SIMDKernel{MR, NR, T, W}(Descriptor(Val(MR), Val(NR), T))
 SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
     SIMDKernel(Val(MR), Val(NR), T, Val(_default_lanewidth(T)))
 
@@ -81,7 +81,7 @@ end
 @inline function Base.accumulate(
         kernel::SIMDKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, T}},
         packed_a::PA, packed_b::PB, k_block_length::Int
-    ) where {MR, NR, T, W, NV, PA, PB}
+    ) where {MR, NR, T, W, NV, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
     @inbounds for p in 1:k_block_length

@@ -55,20 +55,16 @@ a_format(k::DescriptorKernel) = a_format(k.descriptor)
 b_format(k::DescriptorKernel) = b_format(k.descriptor)
 tile_size(k::DescriptorKernel) = tile_size(k.descriptor)
 scalartype(k::DescriptorKernel) = scalartype(k.descriptor)
-packed_a_offset(k::DescriptorKernel, i::Int, p::Int) = packed_a_offset(k.descriptor, i, p)
-packed_b_offset(k::DescriptorKernel, j::Int, p::Int) = packed_b_offset(k.descriptor, j, p)
+@inline packed_a_offset(k::DescriptorKernel, i::Int, p::Int, plane::Int = 0) =
+    packed_a_offset(k.descriptor, i, p, plane)
+@inline packed_b_offset(k::DescriptorKernel, j::Int, p::Int, plane::Int = 0) =
+    packed_b_offset(k.descriptor, j, p, plane)
 packed_a_length(k::DescriptorKernel, k_block_length::Int) = packed_a_length(k.descriptor, k_block_length)
 packed_b_length(k::DescriptorKernel, k_block_length::Int) = packed_b_length(k.descriptor, k_block_length)
-# Only these resolve for a complex descriptor; the single-plane offsets above
-# are a MethodError there, by design.
-@inline packed_a_plane_offset(k::DescriptorKernel, plane::Int, i::Int, p::Int) =
-    packed_a_plane_offset(k.descriptor, plane, i, p)
-@inline packed_b_plane_offset(k::DescriptorKernel, plane::Int, j::Int, p::Int) =
-    packed_b_plane_offset(k.descriptor, plane, j, p)
 
 # GUARDRAIL: every forwarded argument needs its OWN bound type parameter; an
 # unbound one makes the call dynamically dispatched and allocating on every
-# pack. `V` is unconstrained so a `PackedPanel` forwards too.
+# pack. `V` is unconstrained so a `DenseVector` forwards too.
 pack_a!(
     packed::V, source::Tile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
@@ -202,6 +198,17 @@ end
     length(packed_b) >= need_b || _throw_packed_short(:b, length(packed_b), need_b, k_block_length)
 
     return (true, alphaT, betaT)
+end
+
+# The kernels read only `PackedPanel`s; the checked entry points borrow a
+# `DenseVector` as one.
+function Base.accumulate(
+        kernel::K, acc::A, packed_a::PA, packed_b::PB, k_block_length::Int
+    ) where {K <: DescriptorKernel, A, PA <: DenseVector, PB <: DenseVector}
+    return GC.@preserve packed_a packed_b accumulate(
+        kernel, acc, packed_panel(packed_a, 1, length(packed_a)),
+        packed_panel(packed_b, 1, length(packed_b)), k_block_length
+    )
 end
 
 # One checked K panel: `zero_accumulator`, `accumulate`, `store_tile!`.

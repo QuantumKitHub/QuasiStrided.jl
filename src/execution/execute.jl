@@ -368,7 +368,7 @@ function _execute_nest!(
 
             if split_b
                 _pack_block_transposed!(
-                    packed_b_plane_offset, b_format(kernel),
+                    packed_b_offset, b_format(kernel),
                     packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), kernel, Val(tile_size(kernel, 2)), b_sliver_width,
                     plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, n_block_length, k_block_length,
                     plan.npack
@@ -408,7 +408,7 @@ function _execute_nest!(
 
                 if split_a
                     _pack_block_transposed!(
-                        packed_a_plane_offset, a_format(kernel),
+                        packed_a_offset, a_format(kernel),
                         packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), kernel, Val(tile_size(kernel, 1)), a_sliver_width,
                         plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, m_block_length, k_block_length,
                         plan.mpack

@@ -26,10 +26,10 @@ Interleaved-accumulator complex microkernel using x86 `vfmaddsub`, over
 complex contractions on AVX-512.
 """
 struct FMAddSubKernel{MR, NR, T, W} <: DescriptorKernel{MR, NR, T}
-    descriptor::ComplexKernelDescriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
+    descriptor::Descriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
 
     function FMAddSubKernel{MR, NR, T, W}(
-            descriptor::ComplexKernelDescriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
+            descriptor::Descriptor{MR, NR, T, InterleavedFormat, PlanarFormat}
         ) where {MR, NR, T, W}
         _check_vector_shape("FMAddSubKernel", 2 * MR, W, true)
         return new{MR, NR, T, W}(descriptor)
@@ -40,7 +40,7 @@ function FMAddSubKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR
     T <: Complex ||
         throw(ArgumentError("FMAddSubKernel requires a complex element type, got $T"))
     return FMAddSubKernel{MR, NR, T, W}(
-        ComplexKernelDescriptor(Val(MR), Val(NR), T, InterleavedFormat(), PlanarFormat())
+        Descriptor(Val(MR), Val(NR), T, InterleavedFormat(), PlanarFormat())
     )
 end
 function FMAddSubKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T}
@@ -118,7 +118,7 @@ end
             load_a,
             :(
                 $(av[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 0, $(v * W + 1), p)
+                    Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p)
                 )
             )
         )
@@ -156,7 +156,7 @@ end
 function Base.accumulate(
         kernel::FMAddSubKernel{MR, NR, T, W}, acc::NTuple{NA, Vec{W, R}},
         packed_a::PA, packed_b::PB, k_block_length::Int
-    ) where {MR, NR, T, W, R, NA, PA, PB}
+    ) where {MR, NR, T, W, R, NA, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
     @inbounds for p in 1:k_block_length

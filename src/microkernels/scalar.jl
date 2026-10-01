@@ -4,11 +4,11 @@
 Scalar reference microkernel for register tile `(MR, NR)` and element type `T`.
 """
 struct ScalarKernel{MR, NR, T} <: DescriptorKernel{MR, NR, T}
-    descriptor::KernelDescriptor{MR, NR, T}
+    descriptor::RealDescriptor{MR, NR, T}
 end
 
 ScalarKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
-    ScalarKernel(KernelDescriptor(Val(MR), Val(NR), T))
+    ScalarKernel(Descriptor(Val(MR), Val(NR), T))
 
 zero_accumulator(kernel::ScalarKernel{MR, NR, T}) where {MR, NR, T} = zeros(T, MR, NR)
 
@@ -16,7 +16,7 @@ zero_accumulator(kernel::ScalarKernel{MR, NR, T}) where {MR, NR, T} = zeros(T, M
 function Base.accumulate(
         kernel::ScalarKernel{MR, NR, T}, acc::AbstractMatrix{T},
         packed_a::PA, packed_b::PB, k_block_length::Int
-    ) where {MR, NR, T, PA, PB}
+    ) where {MR, NR, T, PA <: PackedPanel, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || throw(ArgumentError("accumulate requires k_block_length >= 0, got k_block_length = $k_block_length"))
     @inbounds for p in 1:k_block_length

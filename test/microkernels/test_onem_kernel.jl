@@ -1,5 +1,5 @@
 using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEFormat,
-    PlanarFormat, ComplexKernelDescriptor, complex_method, lanewidth, kernel_shapes,
+    PlanarFormat, complex_method, lanewidth, kernel_shapes,
     _kernel_from_shape, _default_method
 
 @testset "OneMKernel" begin
@@ -24,7 +24,7 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEForm
         @test_throws ArgumentError OneMKernel(Val(8), Val(4), Float64)
         @test_throws ArgumentError OneMKernel(Val(8), Val(4), Float64, Val(4))
         wrong = SIMDKernel(Val(12), Val(8), Float64, Val(4))
-        d = ComplexKernelDescriptor(Val(12), Val(8), ComplexF64, OneEFormat(), PlanarFormat())
+        d = Descriptor(Val(12), Val(8), ComplexF64, OneEFormat(), PlanarFormat())
         @test_throws ArgumentError OneMKernel{12, 8, ComplexF64, 8, typeof(wrong)}(d, wrong)
         # The error reports the logical k_block_length, not the doubled real one.
         err = try

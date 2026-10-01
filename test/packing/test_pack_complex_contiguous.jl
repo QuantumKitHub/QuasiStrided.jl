@@ -36,7 +36,7 @@ function check_panel(side, kernel, T, PD, fmt, lane, step, f; S = T)
 end
 
 @testset "complex pack fast path: A panel, $T / $(typeof(fa)) / MR=$MR" for (T, fa, MR) in FAST_A_CASES
-    kernel = ComplexKernelDescriptor(Val(MR), Val(3), T, fa, PlanarFormat())
+    kernel = Descriptor(Val(MR), Val(3), T, fa, PlanarFormat())
     for f in (identity, conj), S in (T, T === ComplexF64 ? ComplexF32 : ComplexF64)
         storage, src = check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), AffineAxis(0, 997, 5), f; S)
         pp = packed_panel(zeros(real(T), 1), 1, 1)
@@ -46,7 +46,7 @@ end
 end
 
 @testset "complex pack fast path: B panel, $T / NR=$NR" for T in (ComplexF64, ComplexF32), NR in FAST_B_NRS
-    kernel = ComplexKernelDescriptor(Val(4), Val(NR), T, PlanarFormat(), PlanarFormat())
+    kernel = Descriptor(Val(4), Val(NR), T, PlanarFormat(), PlanarFormat())
     for f in (identity, conj), S in (T, T === ComplexF64 ? ComplexF32 : ComplexF64)
         storage, src = check_panel(:b, kernel, T, NR, PlanarFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, 5), f; S)
         pp = packed_panel(zeros(real(T), 1), 1, 1)
@@ -59,7 +59,7 @@ end
     MR, NR, k_block_length = 8, 6, 6
     koffs = [((p * 5) % 7) * 1013 + 3p for p in 0:(k_block_length - 1)]
     for fa in (PlanarFormat(), OneEFormat(), InterleavedFormat()), f in (identity, conj)
-        kernel = ComplexKernelDescriptor(Val(MR), Val(NR), T, fa, OneEFormat())
+        kernel = Descriptor(Val(MR), Val(NR), T, fa, OneEFormat())
         # The lane axis must be unit-stride; the step axis may scatter.
         check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), view(koffs, 1:k_block_length), f)
         check_panel(:b, kernel, T, NR, OneEFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, k_block_length), f)

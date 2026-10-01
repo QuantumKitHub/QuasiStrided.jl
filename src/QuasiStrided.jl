@@ -23,7 +23,6 @@ include("packing/format.jl")
 include("packing/panel.jl")
 include("packing/pack.jl")
 include("packing/pack_contiguous.jl")
-include("packing/transposed.jl")
 
 # --- Microkernels: accumulate over one packed K panel, store into C ---
 include("microkernels/interface.jl")

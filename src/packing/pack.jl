@@ -42,6 +42,23 @@ function pack_b!(
     return _pack_b!(packed, source, kernel, transform, Val(true))
 end
 
+# The packers write only `PackedPanel`s; a `DenseVector` is borrowed as one.
+function pack_a!(
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        transform::F
+    ) where {V <: DenseVector, MR, NR, T2, FA, FB, F}
+    GC.@preserve packed pack_a!(packed_panel(packed, 1, length(packed)), source, kernel, transform)
+    return packed
+end
+
+function pack_b!(
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        transform::F
+    ) where {V <: DenseVector, MR, NR, T2, FA, FB, F}
+    GC.@preserve packed pack_b!(packed_panel(packed, 1, length(packed)), source, kernel, transform)
+    return packed
+end
+
 # Skips only `checked_tile_storage_bounds(source)`: the caller (`_execute_nest!`)
 # has already validated the whole macro block the sliver belongs to. `@inline`
 # because out of line each call marshals the `Tile` through the stack.
@@ -109,7 +126,7 @@ end
         )
     end
     load = (i, p) -> @inbounds source[i, p]
-    plane_offset = (plane, i, p) -> packed_a_plane_offset(kernel, plane, i, p)
+    plane_offset = (plane, i, p) -> packed_a_offset(kernel, i, p, plane)
     return _pack_panel!(packed, _element_type(format, T2), format, Val(MR), k_block_length, m, transform, load, plane_offset)
 end
 
@@ -126,7 +143,7 @@ end
         )
     end
     load = (j, p) -> @inbounds source[p, j]
-    plane_offset = (plane, j, p) -> packed_b_plane_offset(kernel, plane, j, p)
+    plane_offset = (plane, j, p) -> packed_b_offset(kernel, j, p, plane)
     return _pack_panel!(packed, _element_type(format, T2), format, Val(NR), k_block_length, n, transform, load, plane_offset)
 end
 

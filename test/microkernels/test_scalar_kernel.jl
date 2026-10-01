@@ -122,7 +122,7 @@ function mk_contract_full(k)
     la, lb = length(pa) ÷ k_block_length, length(pb) ÷ k_block_length
     accs = zero_accumulator(k)
     for p in 0:(k_block_length - 1)
-        accs = accumulate(k, accs, view(pa, (p * la + 1):((p + 1) * la)), view(pb, (p * lb + 1):((p + 1) * lb)), 1)
+        accs = accumulate(k, accs, pa[(p * la + 1):((p + 1) * la)], pb[(p * lb + 1):((p + 1) * lb)], 1)
     end
     @test all(mk_read(k, accs, i, j) ≈ mk_read(k, acc, i, j) for i in 0:(MR - 1), j in 0:(NR - 1))
 
