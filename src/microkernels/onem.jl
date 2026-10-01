@@ -65,7 +65,7 @@ end
 # and `2MR` a multiple of `W`, complex row `i = v*(W÷2) + u` is lanes `2u+1`
 # (re) and `2u+2` (im) of vector `v` -- never split across two vectors.
 @generated function _store_tile_lanepair!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, R}},
+        destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {MR, NR, T, W, R, NV}
@@ -103,7 +103,7 @@ end
 
 # Scalar only: 1m has no vector store. Not `@inline`, as for fmaddsub.
 function store_tile!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, R}},
+        destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::OneMKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
     m, n = _store_prologue!(destination, alpha, beta)

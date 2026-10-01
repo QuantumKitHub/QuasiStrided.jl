@@ -10,7 +10,7 @@
 # every address read is inside the hoisted B check; their results are never
 # stored. `length` is the packed-equivalent count that
 # `_execute_tile_prologue!` checks, not the storage length.
-struct UnpackedBView{S, K <: Axis, NR, F}
+struct UnpackedBView{S, K <: AbstractVector{Int}, NR, F}
     storage::S
     colbase::NTuple{NR, Int}
     ksteps::K
@@ -18,7 +18,7 @@ struct UnpackedBView{S, K <: Axis, NR, F}
     transform::F
 end
 
-Base.length(u::UnpackedBView) = u.per_k * axis_length(u.ksteps)
+Base.length(u::UnpackedBView) = u.per_k * length(u.ksteps)
 
 # `@inbounds`: the caller has checked the whole B panel region.
 @inline function _unpacked_b_element(u::UnpackedBView{S, K, NR, F}, j::Int, p::Int) where {S, K, NR, F}
@@ -72,7 +72,7 @@ const _UNPACKED_B_MMAX = 256
 @inline function _unpacked_b_view(
         kernel::DescriptorKernel{MR, NR, T}, storage::S, base::Int,
         d::BlockDescriptor, buf::Vector{Int}, n_tile_start::Int, ksteps::K, transform::F
-    ) where {MR, NR, T, S, K <: Axis, F}
+    ) where {MR, NR, T, S, K <: AbstractVector{Int}, F}
     last = d.count - 1
     colbase = ntuple(Val(NR)) do j1
         jj = min(j1 - 1, last)
@@ -90,24 +90,28 @@ end
         kernel::K, plan::ContractPlan, ws, rowsB_k::KA, m_tiles::Int, n_tiles::Int,
         m_tile::Int, n_tile::Int, a_sliver_width::Int, k_block_length::Int, alphaT, beta_eff,
         aff_mC::Val{MC}, aff_nC::Val{NC}
-    ) where {K, KA <: Axis, MC, NC}
+    ) where {K, KA <: AbstractVector{Int}, MC, NC}
     Bstorage = plan.Bstorage
     Bbase = plan.Bbase
     btransform = plan.btransform
     for n_tile_index in 0:(n_tiles - 1)
         n_tile_start = n_tile_index * n_tile
-        colsC = _axis_of(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC)
         bview = _unpacked_b_view(
             kernel, Bstorage, Bbase, ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, rowsB_k, btransform
         )
-        for m_tile_index in 0:(m_tiles - 1)
-            m_tile_start = m_tile_index * m_tile
-            rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
-            apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-            unsafe_execute_micro_tile!(
-                kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                apanel, bview, k_block_length, alphaT, beta_eff
-            )
+        _with_axis(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC) do colsC
+            @inline
+            for m_tile_index in 0:(m_tiles - 1)
+                m_tile_start = m_tile_index * m_tile
+                apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
+                _with_axis(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC) do rowsC
+                    @inline
+                    unsafe_execute_micro_tile!(
+                        kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
+                        apanel, bview, k_block_length, alphaT, beta_eff
+                    )
+                end
+            end
         end
     end
     return nothing

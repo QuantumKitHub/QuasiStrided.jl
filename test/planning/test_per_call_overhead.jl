@@ -97,12 +97,12 @@ end
         reg = rand(1:4)                      # sliver height
         nsliv = cld(nrow, reg)
 
-        cols = ScatterAxis(coloffs, ncol)
+        cols = view(coloffs, 1:ncol)
         persliver = true
         for s in 0:(nsliv - 1)
             first = s * reg
             cnt = min(reg, nrow - first)
-            rows = ScatterAxis(view(rowoffs, (first + 1):(first + cnt)), cnt)
+            rows = view(rowoffs, (first + 1):(first + cnt))
             ok = try
                 checked_tile_storage_bounds(base, rows, cols, len)
                 true
@@ -164,7 +164,7 @@ end
     @test QS.descriptor_offset_range(d1[3], buf1, 12) == (1, 1)
 end
 
-@testset "per-call floor: descriptor_offset_range agrees with axis_offset_range" begin
+@testset "per-call floor: descriptor_offset_range agrees with extrema" begin
     Random.seed!(7)
     for trial in 1:100
         n = rand(1:8)
@@ -172,7 +172,7 @@ end
         rand() < 0.4 && (buf = [3 + 5 * (t - 1) for t in 1:n])   # force a regular run
         d = describe_block(buf, 0, n)
         ax = QS._axis_of(d, buf, 0)
-        @test QS.descriptor_offset_range(d, buf, 0) == axis_offset_range(ax)
+        @test QS.descriptor_offset_range(d, buf, 0) == extrema(ax)
     end
     @test QS.descriptor_offset_range(BlockDescriptor(0, 0, 0, true), Int[], 0) == (0, -1)
 end
@@ -348,7 +348,7 @@ end
 
 @testset "per-call floor: the unsafe_* packers keep every non-bounds check" begin
     kernel = SIMDKernel(Val(8), Val(6), Float64)
-    src = SourceTile(collect(1.0:64.0), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 4))
+    src = Tile(collect(1.0:64.0), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 4))
     packed = zeros(8 * 4)
 
     ref = zeros(8 * 4)
@@ -359,10 +359,10 @@ end
     # Only the bounds checks are skipped.
     @test_throws DimensionMismatch QS.unsafe_pack_a!(zeros(3), src, kernel, identity)
     @test_throws ArgumentError QS.unsafe_pack_a!(zeros(Float32, 64), src, kernel, identity)
-    toowide = SourceTile(collect(1.0:200.0), 0, AffineAxis(0, 1, 9), AffineAxis(0, 16, 4))
+    toowide = Tile(collect(1.0:200.0), 0, AffineAxis(0, 1, 9), AffineAxis(0, 16, 4))
     @test_throws ArgumentError QS.unsafe_pack_a!(zeros(200), toowide, kernel, identity)
 
-    srcB = SourceTile(collect(1.0:64.0), 0, AffineAxis(0, 1, 4), AffineAxis(0, 4, 6))
+    srcB = Tile(collect(1.0:64.0), 0, AffineAxis(0, 1, 4), AffineAxis(0, 4, 6))
     refB = zeros(6 * 4)
     packedB = zeros(6 * 4)
     pack_b!(refB, srcB, kernel, identity)
@@ -370,15 +370,15 @@ end
     @test packedB == refB
     @test_throws DimensionMismatch QS.unsafe_pack_b!(zeros(3), srcB, kernel, identity)
 
-    dest = DestinationTile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
+    dest = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
     @test_throws DimensionMismatch QS.unsafe_execute_tile!(
         kernel, dest, zeros(3), zeros(6 * 4), 4, 1.0, 0.0
     )
     @test_throws ArgumentError QS.unsafe_execute_tile!(
         kernel, dest, zeros(8 * 4), zeros(6 * 4), -1, 1.0, 0.0
     )
-    d1 = DestinationTile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
-    d2 = DestinationTile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
+    d1 = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
+    d2 = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
     execute_tile!(kernel, d1, ref, refB, 4, 1.0, 0.0)
     QS.unsafe_execute_tile!(kernel, d2, ref, refB, 4, 1.0, 0.0)
     @test d1.storage == d2.storage
@@ -542,4 +542,13 @@ end
     allocs_s = @allocated _pcf_exec(ps, 1.0, 0.0)
     @test Cs ≈ Ap * Bn
     @test allocs_s == 0 skip = (VERSION < v"1.11")
+
+    # M, N and K composites ordered differently per operand: scattered tile axes.
+    A4 = randn(5, 6, 7, 9); B4 = randn(7, 6, 11, 3); C4 = zeros(3, 9, 11, 5)
+    p4 = _pcf_plan(
+        StridedView(C4), StridedView(A4), (1, 2, 3, 4), StridedView(B4), (3, 2, 5, 6), (6, 4, 5, 1)
+    )
+    _pcf_exec(p4, 1.0, 0.5)
+    _pcf_exec(p4, 1.0, 0.5)
+    @test (@allocated _pcf_exec(p4, 1.0, 0.5)) == 0 skip = (VERSION < v"1.11")
 end

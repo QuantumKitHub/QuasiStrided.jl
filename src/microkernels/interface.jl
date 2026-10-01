@@ -70,19 +70,19 @@ packed_b_length(k::DescriptorKernel, k_block_length::Int) = packed_b_length(k.de
 # unbound one makes the call dynamically dispatched and allocating on every
 # pack. `V` is unconstrained so a `PackedPanel` forwards too.
 pack_a!(
-    packed::V, source::QSTile, kernel::K, transform::F
+    packed::V, source::Tile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
     pack_a!(packed, source, kernel.descriptor, transform)
 pack_b!(
-    packed::V, source::QSTile, kernel::K, transform::F
+    packed::V, source::Tile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
     pack_b!(packed, source, kernel.descriptor, transform)
 @inline unsafe_pack_a!(
-    packed::V, source::QSTile, kernel::K, transform::F
+    packed::V, source::Tile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
     unsafe_pack_a!(packed, source, kernel.descriptor, transform)
 @inline unsafe_pack_b!(
-    packed::V, source::QSTile, kernel::K, transform::F
+    packed::V, source::Tile, kernel::K, transform::F
 ) where {V, MR, NR, T, K <: DescriptorKernel{MR, NR, T}, F} =
     unsafe_pack_b!(packed, source, kernel.descriptor, transform)
 
@@ -113,31 +113,28 @@ _default_lanewidth(::Type{Float64}) = 4
 _default_lanewidth(::Type{Float32}) = 8
 
 # `beta == 0` writes zeros without reading `C`; `beta == 1` is a no-op.
-function scale_tile!(destination::QSTile, beta::T) where {T}
-    m = nrows(destination)
-    n = ncols(destination)
+function scale_tile!(destination::Tile, beta::T) where {T}
+    m, n = size(destination)
     (m == 0 || n == 0) && return destination
     if isone(beta)
         return destination
     elseif iszero(beta)
         @inbounds for j in 0:(n - 1), i in 0:(m - 1)
-            tile_store!(destination, i, j, zero(T))
+            destination[i, j] = zero(T)
         end
     else
         @inbounds for j in 0:(n - 1), i in 0:(m - 1)
-            tile_store!(destination, i, j, convert(T, tile_load(destination, i, j)) * beta)
+            destination[i, j] = convert(T, destination[i, j]) * beta
         end
     end
     return destination
 end
 
 # `C = alpha*r + beta*C` at one element. Ternaries, so `beta == 0` never reads C.
-@inline _axpby_tile!(dest, i::Int, j::Int, alpha, r, beta::T) where {T} = tile_store!(
-    dest, i, j,
+@inline _axpby_tile!(dest, i::Int, j::Int, alpha, r, beta::T) where {T} = @inbounds dest[i, j] =
     iszero(beta) ? alpha * r :
-        isone(beta) ? muladd(alpha, r, convert(T, tile_load(dest, i, j))) :
-        muladd(alpha, r, beta * convert(T, tile_load(dest, i, j)))
-)
+    isone(beta) ? muladd(alpha, r, convert(T, dest[i, j])) :
+    muladd(alpha, r, beta * convert(T, dest[i, j]))
 
 @inline _axpby_at!(storage, idx::Int, alpha, r, beta::T) where {T} = @inbounds storage[idx] =
     iszero(beta) ? alpha * r :
@@ -146,9 +143,8 @@ end
 
 # The `(m, n)` to store over, or `(0, 0)` when already done (empty destination,
 # or `alpha == 0` handled by `scale_tile!`).
-@inline function _store_prologue!(destination::QSTile, alpha, beta)
-    m = nrows(destination)
-    n = ncols(destination)
+@inline function _store_prologue!(destination::Tile, alpha, beta)
+    m, n = size(destination)
     if m == 0 || n == 0
         return (0, 0)
     elseif iszero(alpha)
@@ -180,11 +176,10 @@ end
 # bounds check at compile time (`unsafe_execute_tile!` only).
 # GUARDRAIL: `@inline` and one bound type parameter per argument (hot path).
 @inline function _execute_tile_prologue!(
-        kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
+        kernel::K, destination::Tile, packed_a::PA, packed_b::PB,
         k_block_length::Int, alpha, beta, ::Val{BOUNDS}
     ) where {MR, NR, T, K <: DescriptorKernel{MR, NR, T}, PA, PB, BOUNDS}
-    m = nrows(destination)
-    n = ncols(destination)
+    m, n = size(destination)
     m <= MR || _throw_tile_extent(:row, m, MR)
     n <= NR || _throw_tile_extent(:column, n, NR)
     k_block_length >= 0 || _throw_negative_k_block_length(:execute_tile!, k_block_length)
@@ -211,7 +206,7 @@ end
 
 # One checked K panel: `zero_accumulator`, `accumulate`, `store_tile!`.
 function execute_tile!(
-        kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
+        kernel::K, destination::Tile, packed_a::PA, packed_b::PB,
         k_block_length::Int, alpha, beta
     ) where {MR, NR, T, K <: DescriptorKernel{MR, NR, T}, PA, PB}
     run, alphaT, betaT = _execute_tile_prologue!(
@@ -228,7 +223,7 @@ end
 # `checked_span_bounds`, which is equivalent because the check only compares
 # range extremes.
 @inline function unsafe_execute_tile!(
-        kernel::K, destination::QSTile, packed_a::PA, packed_b::PB,
+        kernel::K, destination::Tile, packed_a::PA, packed_b::PB,
         k_block_length::Int, alpha, beta
     ) where {K, PA, PB}
     run, alphaT, betaT = _execute_tile_prologue!(

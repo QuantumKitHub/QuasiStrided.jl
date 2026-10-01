@@ -23,14 +23,14 @@ using StridedViews: StridedView
             m, n = 8, 8
             rows, cols = AffineAxis(0, 1, m), AffineAxis(0, m, n)
             mem = parent(StridedView(zeros(T, m * n)))  # `Memory{T}` on Julia >= 1.11
-            @test _vector_store_eligible(DestinationTile(mem, 0, rows, cols), T)
-            @test _vector_store_eligible(DestinationTile(zeros(T, m * n), 0, rows, cols), T)
-            @test !_vector_store_eligible(DestinationTile(view(zeros(T, m * n + 4), 3:(m * n + 2)), 0, rows, cols), T)
-            @test !_vector_store_eligible(DestinationTile(zeros(T, m, n), 0, rows, cols), T)
-            @test !_vector_store_eligible(DestinationTile(zeros(T, 2m * n), 0, AffineAxis(0, 2, m), AffineAxis(0, 2m, n)), T)
-            @test !_vector_store_eligible(DestinationTile(mem, 0, ScatterAxis(collect(0:(m - 1)), m), cols), T)
-            @test _vector_store_eligible(DestinationTile(mem, 0, rows, cols), T === Float64 ? Float32 : Float64)
-            @test !_vector_store_eligible(DestinationTile(zeros(complex(T), m * n), 0, rows, cols), T)
+            @test _vector_store_eligible(Tile(mem, 0, rows, cols), T)
+            @test _vector_store_eligible(Tile(zeros(T, m * n), 0, rows, cols), T)
+            @test !_vector_store_eligible(Tile(view(zeros(T, m * n + 4), 3:(m * n + 2)), 0, rows, cols), T)
+            @test !_vector_store_eligible(Tile(zeros(T, m, n), 0, rows, cols), T)
+            @test !_vector_store_eligible(Tile(zeros(T, 2m * n), 0, AffineAxis(0, 2, m), AffineAxis(0, 2m, n)), T)
+            @test !_vector_store_eligible(Tile(mem, 0, view(collect(0:(m - 1)), 1:m), cols), T)
+            @test _vector_store_eligible(Tile(mem, 0, rows, cols), T === Float64 ? Float32 : Float64)
+            @test !_vector_store_eligible(Tile(zeros(complex(T), m * n), 0, rows, cols), T)
         end
     end
 
@@ -41,11 +41,11 @@ using StridedViews: StridedView
             acc = map(v -> typeof(v)(ntuple(_ -> T(2rand(rng) - 1), lanewidth(k))), zero_accumulator(k))
             cold = S.(2 .* rand(rng, m * n) .- 1)
             fast = mk_dense(cold)
-            dfast = DestinationTile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
+            dfast = Tile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
             @test _vector_store_eligible(dfast, T)
             store_tile!(dfast, acc, alpha, beta, k)
             scal = copy(cold)
-            store_tile!(DestinationTile(scal, 0, ScatterAxis(collect(0:(m - 1)), m), AffineAxis(0, m, n)), acc, alpha, beta, k)
+            store_tile!(Tile(scal, 0, view(collect(0:(m - 1)), 1:m), AffineAxis(0, m, n)), acc, alpha, beta, k)
             @test mk_close(fast, scal, Float32)
         end
     end

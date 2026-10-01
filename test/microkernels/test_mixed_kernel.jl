@@ -55,8 +55,8 @@ end
         k_block_length, lda = 6, MR + 2
         Av, Bv = rand(rng, SA, lda * k_block_length + 1), rand(rng, SB, k_block_length * NR)
         for f in (identity, conj), (m, n) in ((MR, NR), (MR - 1, NR - 1)), panel in (false, true)
-            srcA = SourceTile(Av, 1, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
-            srcB = SourceTile(Bv, 0, AffineAxis(0, NR, k_block_length), AffineAxis(0, 1, n))
+            srcA = Tile(Av, 1, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
+            srcB = Tile(Bv, 0, AffineAxis(0, NR, k_block_length), AffineAxis(0, 1, n))
             A = zeros(T, MR, k_block_length)
             B = zeros(T, k_block_length, NR)
             A[1:m, :] = f.(reshape(Av[2:(1 + lda * k_block_length)], lda, k_block_length)[1:m, :])
@@ -73,7 +73,7 @@ end
             alpha, beta = T(1.5, -0.5), T(0.25, 1)
             C0 = rand(rng, T, m * n)
             got = mk_dense(copy(C0))
-            execute_tile!(k, DestinationTile(got, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n)), pa, pb, k_block_length, alpha, beta)
+            execute_tile!(k, Tile(got, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n)), pa, pb, k_block_length, alpha, beta)
             @test mk_close(got, alpha .* vec((A * B)[1:m, 1:n]) .+ beta .* C0, T)
         end
     end

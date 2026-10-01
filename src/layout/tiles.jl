@@ -1,8 +1,10 @@
-# Tile axes and tiles. Coordinates and addresses are zero-based (storage index
-# = address + 1); a tile's `base` is the address of its logical origin.
+# Tile axes and tiles. Addresses are zero-based (storage index = address + 1);
+# a tile's `base` is the address of its logical origin. A tile axis is the
+# vector of offsets of its rows or columns: an `AffineAxis`, or a `view` of an
+# offset buffer.
 
-# `t -> base + t*stride`.
-struct AffineAxis
+# Offsets `base + (t - 1) * stride`. Not a `StepRange`: the stride may be zero.
+struct AffineAxis <: AbstractVector{Int}
     base::Int
     stride::Int
     count::Int
@@ -13,47 +15,22 @@ struct AffineAxis
     end
 end
 
-# `t -> offsets[t+1]`, borrowing `offsets`.
-struct ScatterAxis{V <: AbstractVector{Int}}
-    offsets::V
-    count::Int
+Base.size(ax::AffineAxis) = (ax.count,)
+Base.IndexStyle(::Type{AffineAxis}) = IndexLinear()
 
-    function ScatterAxis(offsets::V, count::Int) where {V <: AbstractVector{Int}}
-        count >= 0 || throw(ArgumentError("ScatterAxis count must be nonnegative, got $count"))
-        count <= length(offsets) ||
-            throw(
-            DimensionMismatch(
-                "ScatterAxis: offsets has length $(length(offsets)), " *
-                    "need at least count = $count"
-            )
-        )
-        return new{V}(offsets, count)
-    end
+@inline function Base.getindex(ax::AffineAxis, t::Int)
+    @boundscheck checkbounds(ax, t)
+    return ax.base + (t - 1) * ax.stride
 end
 
-# `ScatterAxis` over a borrowed raw pointer, so that it is `isbits` and
-# `Union{AffineAxis, PtrScatterAxis}` needs no heap box in the driver.
-struct PtrScatterAxis
-    offsets::Ptr{Int}
-    count::Int
-
-    function PtrScatterAxis(offsets::Ptr{Int}, count::Int)
-        count >= 0 ||
-            throw(ArgumentError("PtrScatterAxis count must be nonnegative, got $count"))
-        return new(offsets, count)
-    end
+function Base.extrema(ax::AffineAxis)
+    isempty(ax) && throw(ArgumentError("extrema of an empty AffineAxis"))
+    last = Base.Checked.checked_add(ax.base, Base.Checked.checked_mul(ax.count - 1, ax.stride))
+    return minmax(ax.base, last)
 end
 
-const Axis = Union{AffineAxis, ScatterAxis, PtrScatterAxis}
-
-axis_length(ax::AffineAxis) = ax.count
-axis_length(ax::ScatterAxis) = ax.count
-axis_length(ax::PtrScatterAxis) = ax.count
-
-@inline axis_offset(ax::AffineAxis, t::Int) = ax.base + t * ax.stride
-@inline axis_offset(ax::ScatterAxis, t::Int) = @inbounds ax.offsets[t + 1]
-@inline axis_offset(ax::PtrScatterAxis, t::Int) =
-    unsafe_load(ax.offsets + sizeof(Int) * t)
+# Zero-based until coordinates become one-based.
+@inline axis_offset(ax::AbstractVector{Int}, t::Int) = @inbounds ax[t + 1]
 
 # An offset interval of one map: `regular` iff `buffer[t+1] == base + t*stride`
 # for all `t < count`; otherwise read the buffer (valid until it is refilled).
@@ -98,84 +75,33 @@ function block_descriptors!(
     return ntuple(p -> describe_block(buffers[p], count), Val(P))
 end
 
-function axis_from_descriptor(descriptor::BlockDescriptor, buffer::Vector{Int}, first::Int)
-    if descriptor.regular
-        return AffineAxis(descriptor.base, descriptor.stride, descriptor.count)
-    else
-        return ScatterAxis(view(buffer, (first + 1):(first + descriptor.count)), descriptor.count)
-    end
-end
-
-axis_from_descriptor(descriptor::BlockDescriptor, buffer::Vector{Int}) =
-    axis_from_descriptor(descriptor, buffer, 0)
-
-# Logical `(i, j)` addresses `base + row_offset(i) + col_offset(j)`.
-struct QSTile{S, R <: Axis, C <: Axis}
+# Logical `(i, j)` addresses `base + rows[i] + cols[j]`.
+struct Tile{S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
     storage::S
     base::Int
     rows::R
     cols::C
 end
 
-const SourceTile = QSTile
-const DestinationTile = QSTile
+Base.size(tile::Tile) = (length(tile.rows), length(tile.cols))
 
-nrows(tile::QSTile) = axis_length(tile.rows)
-ncols(tile::QSTile) = axis_length(tile.cols)
+# Zero-based until coordinates become one-based.
+Base.@propagate_inbounds Base.getindex(tile::Tile, i::Int, j::Int) =
+    tile.storage[tile.base + tile.rows[i + 1] + tile.cols[j + 1] + 1]
 
-@inline function tile_offset(tile::QSTile, i::Int, j::Int)
-    return tile.base + axis_offset(tile.rows, i) + axis_offset(tile.cols, j)
-end
-
-@inline function tile_load(tile::QSTile, i::Int, j::Int)
-    return @inbounds tile.storage[tile_offset(tile, i, j) + 1]
-end
-
-@inline function tile_store!(tile::QSTile, i::Int, j::Int, v)
-    @inbounds tile.storage[tile_offset(tile, i, j) + 1] = v
+Base.@propagate_inbounds function Base.setindex!(tile::Tile, v, i::Int, j::Int)
+    tile.storage[tile.base + tile.rows[i + 1] + tile.cols[j + 1] + 1] = v
     return tile
 end
 
 # Bounds checks run once per tile (or per macro block) before the unchecked
 # hot paths. Offset ranges are `(lo, hi)`, `(0, -1)` when empty.
 
-function axis_offset_range(ax::AffineAxis)
-    ax.count == 0 && return (0, -1)
-    lo128 = Int128(ax.base)
-    hi128 = Int128(ax.base) + Int128(ax.count - 1) * Int128(ax.stride)
-    lo128, hi128 = minmax(lo128, hi128)
-    (typemin(Int) <= lo128 && hi128 <= typemax(Int)) ||
-        throw(OverflowError("axis_offset_range: affine axis range not representable as Int"))
-    return (Int(lo128), Int(hi128))
-end
-
-function axis_offset_range(ax::ScatterAxis)
-    ax.count == 0 && return (0, -1)
-    prefix = view(ax.offsets, 1:ax.count)
-    return (Int(minimum(prefix)), Int(maximum(prefix)))
-end
-
-function axis_offset_range(ax::PtrScatterAxis)
-    ax.count == 0 && return (0, -1)
-    lo = hi = unsafe_load(ax.offsets)
-    for t in 1:(ax.count - 1)
-        v = axis_offset(ax, t)
-        lo, hi = min(lo, v), max(hi, v)
-    end
-    return (lo, hi)
-end
-
-# `axis_offset_range` of the axis `d` describes, without materializing it.
+# `extrema` of the axis `d` describes, without materializing it.
 function descriptor_offset_range(d::BlockDescriptor, buffer::Vector{Int}, first::Int)
     d.count == 0 && return (0, -1)
-    d.regular && return axis_offset_range(AffineAxis(d.base, d.stride, d.count))
-    lo = hi = buffer[first + 1]
-    for t in 1:(d.count - 1)
-        v = buffer[first + t + 1]
-        lo = min(lo, v)
-        hi = max(hi, v)
-    end
-    return (lo, hi)
+    d.regular && return extrema(AffineAxis(d.base, d.stride, d.count))
+    return extrema(@view buffer[(first + 1):(first + d.count)])
 end
 
 # Exact, not conservative, for any rectangular (row-set x column-set) region:
@@ -194,18 +120,16 @@ function checked_span_bounds(
     return nothing
 end
 
-function checked_tile_storage_bounds(base::Int, rows::Axis, cols::Axis, storage_length::Int)
-    (axis_length(rows) == 0 || axis_length(cols) == 0) && return nothing
-    return checked_span_bounds(
-        base, axis_offset_range(rows), axis_offset_range(cols), storage_length
+function checked_tile_storage_bounds(
+        base::Int, rows::AbstractVector{Int}, cols::AbstractVector{Int}, storage_length::Int
     )
+    (isempty(rows) || isempty(cols)) && return nothing
+    return checked_span_bounds(base, extrema(rows), extrema(cols), storage_length)
 end
 
-checked_tile_storage_bounds(tile::QSTile) =
+checked_tile_storage_bounds(tile::Tile) =
     checked_tile_storage_bounds(tile.base, tile.rows, tile.cols, length(tile.storage))
 
-# Whether an axis steps through storage one element at a time. Deliberately no
-# fallback method: an unknown axis type must be a MethodError, not `false`.
-_unit_stride_rows(ax::AffineAxis) = ax.stride == 1
-_unit_stride_rows(::ScatterAxis) = false
-_unit_stride_rows(::PtrScatterAxis) = false
+# Whether an axis steps through storage one element at a time.
+is_unit_stride(ax::AffineAxis) = ax.stride == 1
+is_unit_stride(::AbstractVector{Int}) = false

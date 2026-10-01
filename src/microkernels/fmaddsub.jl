@@ -198,7 +198,7 @@ end
 
 # Same unroll and full-block / row-tail split as `_store_tile_planar_vector!`.
 @generated function _store_tile_fmaddsub_vector!(
-        destination::QSTile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, R}},
+        destination::Tile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NV}
@@ -249,7 +249,7 @@ end
     return quote
         storage = destination.storage
         cols = destination.cols
-        rowbase0 = destination.base + destination.rows.base
+        rowbase0 = destination.base + axis_offset(destination.rows, 0)
         ar = Vec{$W, $R}(real(alpha))
         ai = Vec{$W, $R}(imag(alpha))
         br = Vec{$W, $R}(real(beta))
@@ -267,7 +267,7 @@ end
 # Not `@inline`, unlike the real and planar stores: inlining it cost time
 # (code growth).
 function store_tile!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, R}},
+        destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::FMAddSubKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
     m, n = _store_prologue!(destination, alpha, beta)

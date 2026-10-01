@@ -29,14 +29,14 @@ end
 # into the packed format; padding lanes are literal zeros and never read the
 # source or call `transform`. All validation happens before any write.
 function pack_a!(
-        packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F
     ) where {V, MR, NR, T2, FA, FB, F}
     return _pack_a!(packed, source, kernel, transform, Val(true))
 end
 
 function pack_b!(
-        packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F
     ) where {V, MR, NR, T2, FA, FB, F}
     return _pack_b!(packed, source, kernel, transform, Val(true))
@@ -44,28 +44,27 @@ end
 
 # Skips only `checked_tile_storage_bounds(source)`: the caller (`_execute_nest!`)
 # has already validated the whole macro block the sliver belongs to. `@inline`
-# because out of line each call marshals the `QSTile` through the stack.
+# because out of line each call marshals the `Tile` through the stack.
 @inline function unsafe_pack_a!(
-        packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F
     ) where {V, MR, NR, T2, FA, FB, F}
     return _pack_a!(packed, source, kernel, transform, Val(false))
 end
 
 @inline function unsafe_pack_b!(
-        packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F
     ) where {V, MR, NR, T2, FA, FB, F}
     return _pack_b!(packed, source, kernel, transform, Val(false))
 end
 
 @inline function _pack_a!(
-        packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F, ::Val{BOUNDS}
     ) where {V, MR, NR, T2, FA, FB, F, BOUNDS}
     _check_packed_eltype(packed, kernel)
-    m = nrows(source)
-    k_block_length = ncols(source)
+    m, k_block_length = size(source)
     (0 <= m <= MR) || _throw_pack_extent(:pack_a, :row, m, MR)
     needed = packed_a_length(kernel, k_block_length)
     length(packed) >= needed || _throw_pack_short(:pack_a, length(packed), needed, k_block_length)
@@ -77,12 +76,11 @@ end
 end
 
 @inline function _pack_b!(
-        packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2, FA, FB},
+        packed::V, source::Tile, kernel::Descriptor{MR, NR, T2, FA, FB},
         transform::F, ::Val{BOUNDS}
     ) where {V, MR, NR, T2, FA, FB, F, BOUNDS}
     _check_packed_eltype(packed, kernel)
-    k_block_length = nrows(source)
-    n = ncols(source)
+    k_block_length, n = size(source)
     (0 <= n <= NR) || _throw_pack_extent(:pack_b, :column, n, NR)
     needed = packed_b_length(kernel, k_block_length)
     length(packed) >= needed || _throw_pack_short(:pack_b, length(packed), needed, k_block_length)
@@ -94,40 +92,40 @@ end
 # A's packed index runs along `source.rows`, B's along `source.cols`; each
 # contiguous fast path needs that lane axis to be unit-stride.
 @inline function _pack_a_sliver!(
-        format::FMT, packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2},
+        format::FMT, packed::V, source::Tile, kernel::Descriptor{MR, NR, T2},
         transform::F, m::Int, k_block_length::Int
     ) where {FMT, V, MR, NR, T2, F}
     if format isa RealFormat
         if _pack_a_contiguous_eligible(packed, source, transform, m, Val(MR), real(T2))
-            rowbase = source.base + source.rows.base
+            rowbase = source.base + axis_offset(source.rows, 0)
             return _pack_a_contiguous!(packed, source.storage, rowbase, source.cols, Val(MR), k_block_length)
         end
     elseif _pack_complex_contiguous_eligible(
             packed, source.storage, source.rows, transform, format, m, Val(MR), T2
         )
-        elembase = source.base + source.rows.base
+        elembase = source.base + axis_offset(source.rows, 0)
         return _pack_complex_contiguous!(
             format, packed, source.storage, elembase, source.cols, Val(MR), k_block_length, transform
         )
     end
-    load = (i, p) -> tile_load(source, i, p)
+    load = (i, p) -> @inbounds source[i, p]
     plane_offset = (plane, i, p) -> packed_a_plane_offset(kernel, plane, i, p)
     return _pack_panel!(packed, _element_type(format, T2), format, Val(MR), k_block_length, m, transform, load, plane_offset)
 end
 
 @inline function _pack_b_sliver!(
-        format::FMT, packed::V, source::QSTile, kernel::Descriptor{MR, NR, T2},
+        format::FMT, packed::V, source::Tile, kernel::Descriptor{MR, NR, T2},
         transform::F, n::Int, k_block_length::Int
     ) where {FMT, V, MR, NR, T2, F}
     if _pack_complex_contiguous_eligible(
             packed, source.storage, source.cols, transform, format, n, Val(NR), T2
         )
-        elembase = source.base + source.cols.base
+        elembase = source.base + axis_offset(source.cols, 0)
         return _pack_complex_contiguous!(
             format, packed, source.storage, elembase, source.rows, Val(NR), k_block_length, transform
         )
     end
-    load = (j, p) -> tile_load(source, p, j)
+    load = (j, p) -> @inbounds source[p, j]
     plane_offset = (plane, j, p) -> packed_b_plane_offset(kernel, plane, j, p)
     return _pack_panel!(packed, _element_type(format, T2), format, Val(NR), k_block_length, n, transform, load, plane_offset)
 end
@@ -168,7 +166,7 @@ end
 end
 
 # Per-lane stores of one element. `real`/`imag` on the loaded element are the
-# only accessors: a `QSTile` may address scattered storage, so the source is
+# only accessors: a `Tile` may address scattered storage, so the source is
 # never `reinterpret`ed.
 @inline function _pack_emit!(
         packed::V, ::RealFormat, plane_offset::P, t::Int, p::Int, z::T

@@ -8,7 +8,7 @@
         plane_offset::PO, format::FMT, buffer::PK, descriptor::DS, ::Val{R}, Rp::Int,
         storage::ST, base::Int, fbuf::Vector{Int}, kaxis::KA, transform::F,
         fcount::Int, k_block_length::Int, split
-    ) where {PO, FMT <: PackFormat, PK, DS, R, ST, KA <: Axis, F}
+    ) where {PO, FMT <: PackFormat, PK, DS, R, ST, KA <: AbstractVector{Int}, F}
     E, L = Int(split.E), Int(split.L)
     G = E * L
     # The sliver and lane come from a per-element divrem by the constant `R`;

@@ -92,11 +92,11 @@ end
 # Vector store eligibility: unit-stride rows into rank-1 dense real storage,
 # exactly what SIMD.jl's array `vload`/`vstore` accept. Must admit `Memory{T}`:
 # that is the `parent` of an Array-backed `StridedView` on Julia >= 1.11.
-@inline _vector_store_eligible(tile::QSTile, ::Type{T}) where {T} =
-    _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T)
+@inline _vector_store_eligible(tile::Tile, ::Type{T}) where {T} =
+    is_unit_stride(tile.rows) && _dense_lanes(tile.storage, T)
 
 @generated function _store_tile_scattered!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, T}},
+        destination::Tile, acc::NTuple{NV, Vec{W, T}},
         alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W},
         m::Int, n::Int
     ) where {MR, NR, T, W, NV}
@@ -129,7 +129,7 @@ end
 # stored lane by lane, so nothing outside the valid rectangle is touched.
 # `rows::AffineAxis` in the signature: an ineligible tile is a MethodError.
 @generated function _store_tile_vector!(
-        destination::QSTile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, T}},
+        destination::Tile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, T}},
         alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, NV}
@@ -178,7 +178,7 @@ end
         Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
-        rowbase0 = destination.base + destination.rows.base
+        rowbase0 = destination.base + axis_offset(destination.rows, 0)
         @inbounds begin
             $(blocks...)
         end
@@ -190,7 +190,7 @@ end
 # to the stack and reloaded on every micro-tile. The scattered store stays out
 # of line: it is scalar anyway, and inlining it bloats the tile function.
 @inline function store_tile!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, T}},
+        destination::Tile, acc::NTuple{NV, Vec{W, T}},
         alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, NV}
     m, n = _store_prologue!(destination, alpha, beta)

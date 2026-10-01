@@ -33,7 +33,7 @@ function Base.accumulate(
 end
 
 function store_tile!(
-        destination::QSTile, acc::AbstractMatrix{T},
+        destination::Tile, acc::AbstractMatrix{T},
         alpha::T, beta::T, kernel::ScalarKernel
     ) where {T}
     m, n = _store_prologue!(destination, alpha, beta)

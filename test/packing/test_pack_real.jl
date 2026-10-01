@@ -3,7 +3,7 @@
 # files included after this one.
 
 using QuasiStrided: RealFormat, PlanarFormat, OneEFormat, InterleavedFormat, PackedPanel,
-    packed_panel, PtrScatterAxis, ComplexKernelDescriptor, _copies_unchanged,
+    packed_panel, ComplexKernelDescriptor, _copies_unchanged,
     _pack_a_contiguous_eligible
 
 # Packed layouts written from the format definitions, not from the offset
@@ -34,19 +34,14 @@ function ref_pack(fmt, ::Type{T}, vr, k_block_length, valid, g, f) where {T}
     return out
 end
 
-ref_offs(ax::AffineAxis) = [ax.base + t * ax.stride for t in 0:(ax.count - 1)]
-ref_offs(ax::ScatterAxis) = collect(ax.offsets[1:ax.count])
-ref_offs(ax::PtrScatterAxis) = [unsafe_load(ax.offsets, t + 1) for t in 0:(ax.count - 1)]
 resized(ax::AffineAxis, n) = AffineAxis(ax.base, ax.stride, n)
-resized(ax::ScatterAxis, n) = ScatterAxis(ax.offsets, n)
-resized(ax::PtrScatterAxis, n) = PtrScatterAxis(ax.offsets, n)
+resized(ax::SubArray, n) = view(parent(ax), 1:n)
 
 # An A (`lane` = rows) or B (`lane` = cols) source over `storage`, and its
 # direct-indexing reader.
 function pack_fixture(side, storage, base, lane, step)
-    lo, so = ref_offs(lane), ref_offs(step)
-    src = side === :a ? SourceTile(storage, base, lane, step) : SourceTile(storage, base, step, lane)
-    return src, (t, p) -> storage[base + lo[t + 1] + so[p + 1] + 1]
+    src = side === :a ? Tile(storage, base, lane, step) : Tile(storage, base, step, lane)
+    return src, (t, p) -> storage[base + lane[t + 1] + step[p + 1] + 1]
 end
 
 # Packs `src` into a destination of kind `dst` (canaried unless a bare Vector)
@@ -78,9 +73,9 @@ const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
     counting = x -> (calls[] += 1; 3x + 1000)   # nonzero at zero: padding must bypass it
     lanes = Any[
         AffineAxis(0, 1, 8), AffineAxis(3, 7, 8), AffineAxis(40, -1, 8), AffineAxis(20, 0, 8),
-        ScatterAxis(SCATTER_LANES, 8),
+        view(SCATTER_LANES, 1:8),
     ]
-    steps = Any[AffineAxis(0, 64, k_block_length), AffineAxis(700, -97, k_block_length), ScatterAxis(SCATTER_STEPS, k_block_length)]
+    steps = Any[AffineAxis(0, 64, k_block_length), AffineAxis(700, -97, k_block_length), view(SCATTER_STEPS, 1:k_block_length)]
     for (side, pack!, PD) in ((:a, pack_a!, MR), (:b, pack_b!, NR)),
             lane in lanes, step in steps, valid in (PD, 1, 0), dst in (:vector, :view)
         src, g = pack_fixture(side, storage, 11, resized(lane, valid), step)
@@ -108,22 +103,22 @@ end
     storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals), mixed) : (vals, mixed)
     koffs = [7, 900, 300, 1500]
     contig = collect(0:(MR - 1))
-    GC.@preserve koffs contig for storage in storages
-        steps = Any[AffineAxis(0, MR, 5), AffineAxis(1800, -MR, 6), PtrScatterAxis(pointer(koffs), 4)]
+    for storage in storages
+        steps = Any[AffineAxis(0, MR, 5), AffineAxis(1800, -MR, 6), view(koffs, 1:4)]
         lanes = Any[
             (AffineAxis(0, 1, MR), true), (AffineAxis(5, 1, MR), true),
             (AffineAxis(0, 2, MR), false), (AffineAxis(MR + 3, -1, MR), false),
-            (AffineAxis(0, 1, MR - 1), false), (PtrScatterAxis(pointer(contig), MR), false),
+            (AffineAxis(0, 1, MR - 1), false), (view(contig, 1:MR), false),
         ]
         for (lane, eligible) in lanes, step in steps, f in (identity, conj, x -> -x)
             src, g = pack_fixture(:a, storage, 11, lane, step)
-            k_block_length = axis_length(step)
+            k_block_length = length(step)
             pp = packed_panel(zeros(T, 1), 1, 1)
-            @test _pack_a_contiguous_eligible(pp, src, f, nrows(src), Val(MR), T) ==
+            @test _pack_a_contiguous_eligible(pp, src, f, length(lane), Val(MR), T) ==
                 (eligible && (f === identity || f === conj))
-            @test !_pack_a_contiguous_eligible(zeros(T, 1), src, f, nrows(src), Val(MR), T)
+            @test !_pack_a_contiguous_eligible(zeros(T, 1), src, f, length(lane), Val(MR), T)
             got, canaries = pack_into(pack_a!, :panel, T, MR * k_block_length, src, kernel, f)
-            @test got == ref_pack(RealFormat(), T, MR, k_block_length, nrows(src), g, f)
+            @test got == ref_pack(RealFormat(), T, MR, k_block_length, length(lane), g, f)
             @test canaries
         end
     end
@@ -137,8 +132,8 @@ end
     read = Ref(false)
     spy = x -> (read[] = true; x)
     packed = fill(-42.0, 8)
-    @test pack_a!(packed, SourceTile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 0)), kernel, spy) === packed
-    @test pack_b!(packed, SourceTile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 1, 3)), kernel, spy) === packed
+    @test pack_a!(packed, Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 1, 0)), kernel, spy) === packed
+    @test pack_b!(packed, Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 1, 3)), kernel, spy) === packed
     @test packed == fill(-42.0, 8)
     @test !read[]
 end
@@ -147,20 +142,20 @@ end
     kernel = KernelDescriptor(Val(4), Val(3), Float64)
     kernel32 = KernelDescriptor(Val(4), Val(3), Float32)
     storage = fill(9.0, 20)
-    tile(m, n, base = 0) = SourceTile(storage, base, AffineAxis(0, 1, m), AffineAxis(0, 1, n))
+    tile(m, n, base = 0) = Tile(storage, base, AffineAxis(0, 1, m), AffineAxis(0, 1, n))
     for (pack!, bad, ok, short) in ((pack_a!, tile(5, 3), tile(4, 3), 11), (pack_b!, tile(3, 4), tile(3, 3), 8))
         canary = fill(-1.0, 100)
         @test_throws ArgumentError pack!(canary, bad, kernel, identity)     # m > MR / n > NR
         @test_throws ArgumentError pack!(canary, ok, kernel32, identity)    # eltype mismatch
         @test_throws DimensionMismatch pack!(fill(-1.0, short), ok, kernel, identity)
-        @test_throws BoundsError pack!(canary, tile(nrows(ok), ncols(ok), 18), kernel, identity)
+        @test_throws BoundsError pack!(canary, tile(size(ok)..., 18), kernel, identity)
         @test canary == fill(-1.0, 100)
     end
 end
 
 @testset "pack_a!/pack_b!: zero steady-state allocation" begin
     nontrivial(x) = 2x + 1
-    # Every destination kind, affine/scattered/pointer-scattered axes, tails and
+    # Every destination kind, affine/scattered axes, tails and
     # k_block_length == 0; the ScalarKernel/SIMDKernel forwarding methods on a subset.
     function run(ctor, ::Type{T}, MR, NR, full) where {T}
         kernel = ctor(Val(MR), Val(NR), T)
@@ -171,23 +166,23 @@ end
         bufa = zeros(T, MR * k_block_length + 8)
         bufb = zeros(T, NR * k_block_length + 8)
         bytes = Int[]
-        GC.@preserve bufa bufb koffs begin
+        GC.@preserve bufa bufb begin
             pa = packed_panel(bufa, 1, MR * k_block_length)
             dsts_a = (bufa, view(bufa, 3:(2 + MR * k_block_length)), pa)
             dsts_b = (bufb, view(bufb, 3:(2 + NR * k_block_length)), packed_panel(bufb, 1, NR * k_block_length))
-            pk = PtrScatterAxis(pointer(koffs), k_block_length)
+            pk = view(koffs, 1:k_block_length)
             srcs_a = (
-                SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length)),
-                SourceTile(storage, 0, AffineAxis(0, 1, MR), pk),
-                SourceTile(storage, 0, AffineAxis(0, 2, MR - 1), AffineAxis(0, 2MR, k_block_length)),
-                SourceTile(storage, 0, ScatterAxis(lanes, MR), ScatterAxis(koffs, k_block_length)),
-                SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
+                Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, MR), pk),
+                Tile(storage, 0, AffineAxis(0, 2, MR - 1), AffineAxis(0, 2MR, k_block_length)),
+                Tile(storage, 0, view(lanes, 1:MR), view(koffs, 1:k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
             )
             srcs_b = (
-                SourceTile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR)),
-                SourceTile(storage, 0, pk, AffineAxis(0, k_block_length, NR - 1)),
-                SourceTile(storage, 0, ScatterAxis(koffs, k_block_length), ScatterAxis(lanes, NR)),
-                SourceTile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, k_block_length, NR)),
+                Tile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR)),
+                Tile(storage, 0, pk, AffineAxis(0, k_block_length, NR - 1)),
+                Tile(storage, 0, view(koffs, 1:k_block_length), view(lanes, 1:NR)),
+                Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, k_block_length, NR)),
             )
             if !full
                 srcs_a, srcs_b, dsts_a, dsts_b = srcs_a[1:1], srcs_b[1:1], dsts_a[1:2], dsts_b[1:2]

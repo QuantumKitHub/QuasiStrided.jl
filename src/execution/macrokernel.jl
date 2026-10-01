@@ -1,22 +1,26 @@
 # Macro-kernel helpers for the five-loop nest: function barriers over the
 # tile axis types, packed-sliver addressing, and sliver classification.
 
-# GUARDRAIL: `_axis_of` returns a `Union{AffineAxis,PtrScatterAxis}` (both
-# isbits, so unboxed), and each consumer below is a barrier specialised per
-# concrete axis type, so no partially-typed, heap-boxed `QSTile` is ever
-# built. Do not inline these helpers into their callers.
-@inline function _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int)
-    return d.regular ? AffineAxis(d.base, d.stride, d.count) :
-        PtrScatterAxis(pointer(buffer, first + 1), d.count)
-end
+# The axis `d` describes: an `AffineAxis` when regular, else a `view` of its
+# offsets in `buffer`.
+@inline _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int) =
+    d.regular ? AffineAxis(d.base, d.stride, d.count) : view(buffer, (first + 1):(first + d.count))
 
-# The same with the axis type fixed by the path: `Val(true)` for a ramp map,
-# whose descriptors are always regular (checked).
-@inline _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{false}) =
-    _axis_of(d, buffer, first)
-@inline function _axis_of(d::BlockDescriptor, ::Vector{Int}, ::Int, ::Val{true})
-    d.regular || _throw_irregular_ramp_descriptor()
-    return AffineAxis(d.base, d.stride, d.count)
+# GUARDRAIL: `f(_axis_of(d, buffer, first))` with each axis type in its own
+# branch, which the nest uses instead of `_axis_of`: a `Union` holding a `view`
+# (not `isbits`) is heap-boxed. Each consumer below binds each axis type as its
+# own parameter, so it builds a concretely typed `Tile`. `Val(true)`: a ramp
+# map, whose descriptors are always regular (checked), so only the affine
+# branch is compiled.
+@inline function _with_axis(
+        f::F, d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{AFF} = Val(false)
+    ) where {F, AFF}
+    if AFF
+        d.regular || _throw_irregular_ramp_descriptor()
+    elseif !d.regular
+        return f(view(buffer, (first + 1):(first + d.count)))
+    end
+    return f(AffineAxis(d.base, d.stride, d.count))
 end
 @noinline _throw_irregular_ramp_descriptor() =
     throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))
@@ -27,16 +31,16 @@ end
 @inline function _pack_sliver!(
         pack!::PF, packed::PK, storage::S, base::Int,
         rows::R, cols::C, kernel, transform::TF
-    ) where {PF, PK, S, R <: Axis, C <: Axis, TF}
-    pack!(packed, SourceTile(storage, base, rows, cols), kernel, transform)
+    ) where {PF, PK, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}, TF}
+    pack!(packed, Tile(storage, base, rows, cols), kernel, transform)
     return nothing
 end
 
 @inline function _execute_micro_tile!(
         kernel, storage::S, base::Int, rows::R, cols::C,
         packed_a::PA, packed_b::PB, k_block_length::Int, alpha, beta
-    ) where {PA, PB, S, R <: Axis, C <: Axis}
-    destination = DestinationTile(storage, base, rows, cols)
+    ) where {PA, PB, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
+    destination = Tile(storage, base, rows, cols)
     execute_tile!(kernel, destination, packed_a, packed_b, k_block_length, alpha, beta)
     return nothing
 end
@@ -45,16 +49,16 @@ end
 @inline function unsafe_execute_micro_tile!(
         kernel, storage::S, base::Int, rows::R, cols::C,
         packed_a::PA, packed_b::PB, k_block_length::Int, alpha, beta
-    ) where {PA, PB, S, R <: Axis, C <: Axis}
-    destination = DestinationTile(storage, base, rows, cols)
+    ) where {PA, PB, S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
+    destination = Tile(storage, base, rows, cols)
     unsafe_execute_tile!(kernel, destination, packed_a, packed_b, k_block_length, alpha, beta)
     return nothing
 end
 
 @inline function _scale_micro_tile!(
         storage::S, base::Int, rows::R, cols::C, beta
-    ) where {S, R <: Axis, C <: Axis}
-    destination = DestinationTile(storage, base, rows, cols)
+    ) where {S, R <: AbstractVector{Int}, C <: AbstractVector{Int}}
+    destination = Tile(storage, base, rows, cols)
     scale_tile!(destination, beta)
     return nothing
 end

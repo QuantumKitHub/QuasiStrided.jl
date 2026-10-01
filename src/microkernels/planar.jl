@@ -145,7 +145,7 @@ end
 
 # Scalar fallback store, for every destination the vector store cannot take.
 @generated function _store_tile_planar!(
-        destination::QSTile, acc::NTuple{NA, Vec{W, R}},
+        destination::Tile, acc::NTuple{NA, Vec{W, R}},
         alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {MR, NR, T, W, R, NA}
@@ -184,8 +184,8 @@ end
 # Vector store: unit-stride rows into rank-1 dense `Complex` storage (so the
 # storage can be reinterpreted as `2W` consecutive reals per `W` rows), on an
 # ISA the complex fast paths ship for (shared with the complex pack fast path).
-@inline _complex_vector_eligible(tile::QSTile, ::Type{T}) where {T} =
-    _unit_stride_rows(tile.rows) && _dense_lanes(tile.storage, T) &&
+@inline _complex_vector_eligible(tile::Tile, ::Type{T}) where {T} =
+    is_unit_stride(tile.rows) && _dense_lanes(tile.storage, T) &&
     complex_fastpath_isa_eligible()
 
 # Shuffle patterns built from `W` at specialization time, never hardcoded to
@@ -242,7 +242,7 @@ end
 # Same unroll and full-block / row-tail split as `_store_tile_vector!`, with a
 # block of `2W` reals. The raw pointer is only dereferenced inside `GC.@preserve`.
 @generated function _store_tile_planar_vector!(
-        destination::QSTile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
+        destination::Tile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
         alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
         m::Int, n::Int
     ) where {S, MR, NR, T, W, R, NA}
@@ -295,7 +295,7 @@ end
         Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
-        rowbase0 = destination.base + destination.rows.base
+        rowbase0 = destination.base + axis_offset(destination.rows, 0)
         ar = Vec{$W, $R}(real(alpha))
         ai = Vec{$W, $R}(imag(alpha))
         br = Vec{$W, $R}(real(beta))
@@ -312,7 +312,7 @@ end
 
 # `@inline` with the vector store, for the reason at the real `store_tile!`.
 @inline function store_tile!(
-        destination::QSTile, acc::NTuple{NA, Vec{W, R}},
+        destination::Tile, acc::NTuple{NA, Vec{W, R}},
         alpha::T, beta::T, kernel::PlanarKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NA}
     m, n = _store_prologue!(destination, alpha, beta)

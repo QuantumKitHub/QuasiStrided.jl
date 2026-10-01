@@ -206,7 +206,7 @@ end
 
 _ws_union_members(t) = t isa Union ? (_ws_union_members(t.a)..., _ws_union_members(t.b)...) : (t,)
 
-# Every non-concrete QSTile/ContractWorkspace type in `f`'s unoptimized typed
+# Every non-concrete Tile/ContractWorkspace type in `f`'s unoptimized typed
 # IR, directly or as a union member (`Union{}` is a throw, not an instability).
 function _ws_nonconcrete_types(f, argtypes)
     bad = Any[]
@@ -218,7 +218,7 @@ function _ws_nonconcrete_types(f, argtypes)
             t isa Type || continue
             for m in _ws_union_members(t)
                 (m isa Type && m !== Union{}) || continue
-                if (m <: QuasiStrided.QSTile || m <: QuasiStrided.ContractWorkspace) && !isconcretetype(m)
+                if (m <: QuasiStrided.Tile || m <: QuasiStrided.ContractWorkspace) && !isconcretetype(m)
                     push!(bad, t)
                     break
                 end

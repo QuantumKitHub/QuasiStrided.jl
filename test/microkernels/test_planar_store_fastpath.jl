@@ -11,7 +11,7 @@
 # The fast path ships for AVX-512 only; every expectation derives from the live
 # profile, so `test/forced_isa_runner.jl` checks the other ISAs too.
 
-using QuasiStrided: PlanarKernel, FMAddSubKernel, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, PtrScatterAxis, TargetProfile, CacheLevel,
+using QuasiStrided: PlanarKernel, FMAddSubKernel, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, TargetProfile, CacheLevel,
     target_profile, unknown_target, KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 
 const STORE_FASTPATH_ON = QuasiStrided.complex_fastpath_isa_eligible()
@@ -64,11 +64,11 @@ function mk_store_fastpath(K, T, shapes; beta0_exact = false, S = T)
             cold = [S(2rand(rng) - 1, 2rand(rng) - 1) for _ in 1:(m * n)]
             for (alpha, beta) in mk_store_ab(T)
                 fast = mk_dense(cold)
-                dfast = DestinationTile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
+                dfast = Tile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
                 @test QuasiStrided._complex_vector_eligible(dfast, T) == STORE_FASTPATH_ON
                 store_tile!(dfast, acc, alpha, beta, k)
                 scal = copy(cold)  # scattered rows: always the scalar store
-                store_tile!(DestinationTile(scal, 0, ScatterAxis(collect(0:(m - 1)), m), AffineAxis(0, m, n)), acc, alpha, beta, k)
+                store_tile!(Tile(scal, 0, view(collect(0:(m - 1)), 1:m), AffineAxis(0, m, n)), acc, alpha, beta, k)
                 want = [S(ref_axpby(alpha, reim(mk_read(k, acc, i, j))..., beta, T(cold[i + j * m + 1]))) for i in 0:(m - 1), j in 0:(n - 1)]
                 got = reshape(collect(fast), m, n)
                 vectorized = STORE_FASTPATH_ON ? (1:((m ÷ blk) * blk)) : (1:0)
@@ -92,13 +92,11 @@ end
         m, n = 16, 4
         storage = zeros(T, 4 * m * n)
         eligible(s, rows, cols = AffineAxis(0, m, n)) =
-            QuasiStrided._complex_vector_eligible(DestinationTile(s, 0, rows, cols), T)
+            QuasiStrided._complex_vector_eligible(Tile(s, 0, rows, cols), T)
         @test eligible(storage, AffineAxis(0, 1, m)) == STORE_FASTPATH_ON
         @test !eligible(storage, AffineAxis(0, 2, m), AffineAxis(0, 2m, n))
-        @test !QuasiStrided._complex_vector_eligible(DestinationTile(storage, m - 1, AffineAxis(0, -1, m), AffineAxis(0, m, n)), T)
-        @test !eligible(storage, ScatterAxis(collect(0:(m - 1)), m))
-        ptr_rows = collect(0:(m - 1))
-        GC.@preserve ptr_rows @test !eligible(storage, PtrScatterAxis(pointer(ptr_rows), m))
+        @test !QuasiStrided._complex_vector_eligible(Tile(storage, m - 1, AffineAxis(0, -1, m), AffineAxis(0, m, n)), T)
+        @test !eligible(storage, view(collect(0:(m - 1)), 1:m))
         @test !eligible(view(storage, 1:(m * n)), AffineAxis(0, 1, m))
         @test !eligible(reshape(storage, 4m, n), AffineAxis(0, 1, m))
         @test eligible(zeros(ComplexF32, m * n), AffineAxis(0, 1, m)) == STORE_FASTPATH_ON

@@ -1,5 +1,5 @@
 using QuasiStrided: FMAddSubKernel, FMAddSubMethod, PlanarKernel, PlanarMethod, OneMKernel,
-    InterleavedFormat, SourceTile, complex_method, lanewidth, kernel_shapes, packed_panel,
+    InterleavedFormat, complex_method, lanewidth, kernel_shapes, packed_panel,
     _kernel_from_shape, _default_method, accumulator_planes, target_profile, PackedPanel
 using SIMD: Vec
 using InteractiveUtils: code_native
@@ -118,7 +118,7 @@ const _QSF = QuasiStrided
             vals[5] = T(0, 0)
             vals[9] = T(R(-0.0), R(0))
             for f in (identity, conj), m in (MR, max(1, MR - 1))
-                src = SourceTile(vals, base, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
+                src = Tile(vals, base, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
                 A = zeros(T, MR, k_block_length)
                 A[1:m, :] = f.(reshape(vals[(base + 1):(base + lda * k_block_length)], lda, k_block_length)[1:m, :])
                 want = mk_pack_a(k, A)
@@ -129,7 +129,7 @@ const _QSF = QuasiStrided
                 GC.@preserve bufp pack_a!(packed_panel(bufp, 1, length(bufp)), src, k, f)
                 @test isequal(bufp, want)
             end
-            src = SourceTile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, k_block_length))
+            src = Tile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, k_block_length))
             bufp = zeros(R, packed_a_length(k, k_block_length))
             GC.@preserve bufp begin
                 pp = packed_panel(bufp, 1, length(bufp))

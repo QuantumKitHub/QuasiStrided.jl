@@ -84,7 +84,7 @@ zero_accumulator(kernel::_MixedKernel) = zero_accumulator(kernel.inner)
 
 # Inlined or not as the fmaddsub and planar stores each reuses.
 function store_tile!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, R}},
+        destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::ComplexRealKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
     m, n = _store_prologue!(destination, alpha, beta)
@@ -98,7 +98,7 @@ function store_tile!(
 end
 
 @inline function store_tile!(
-        destination::QSTile, acc::NTuple{NV, Vec{W, R}},
+        destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::RealComplexKernel{MR, NR, T, W}
     ) where {MR, NR, T, W, R, NV}
     m, n = _store_prologue!(destination, alpha, beta)

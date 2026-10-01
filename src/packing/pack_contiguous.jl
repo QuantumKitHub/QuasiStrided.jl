@@ -20,13 +20,11 @@ _lane_convertible(::Type{<:_LaneFloat}, ::Type{<:_LaneFloat}) = true
 _lane_convertible(::Type{Complex{S}}, ::Type{Complex{T}}) where {S <: _LaneFloat, T <: _LaneFloat} = true
 
 # Everything but `m == MR` and the stride test folds at compile time.
-# `_unit_stride_rows` deliberately has no fallback method: an unknown axis type
-# must be a MethodError.
 @inline function _pack_a_contiguous_eligible(
-        packed::V, source::QSTile, transform::F, m::Int, ::Val{MR}, ::Type{T}
+        packed::V, source::Tile, transform::F, m::Int, ::Val{MR}, ::Type{T}
     ) where {V, F, MR, T}
     return packed isa PackedPanel{T} && _dense_lanes(source.storage, T) &&
-        _copies_unchanged(transform, T) && m == MR && _unit_stride_rows(source.rows)
+        _copies_unchanged(transform, T) && m == MR && is_unit_stride(source.rows)
 end
 
 # Real A: one `Vec{MR}` load/convert/store per K step.
@@ -62,7 +60,7 @@ end
     return !(format isa RealFormat) &&
         packed isa PackedPanel{real(T)} && _dense_lanes(storage, T) &&
         _complex_pack_transform_eligible(transform) &&
-        valid == PD && _unit_stride_rows(lane_axis) &&
+        valid == PD && is_unit_stride(lane_axis) &&
         complex_fastpath_isa_eligible()
 end
 

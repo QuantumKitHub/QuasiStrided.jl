@@ -32,7 +32,7 @@ const COMPLEX_FORMATS = (
         fixtures = (
             (AffineAxis(0, 1, PD), AffineAxis(0, 97, k_block_length)),
             (AffineAxis(40, -1, PD), AffineAxis(3000, -97, k_block_length)),
-            (ScatterAxis(SCATTER_LANES, PD), ScatterAxis(SCATTER_STEPS, k_block_length)),
+            (view(SCATTER_LANES, 1:PD), view(SCATTER_STEPS, 1:k_block_length)),
         )
         len = _ref_rpe(fmt) * PD * k_block_length
         for (lane, step) in fixtures, valid in (PD, 1, 0)
@@ -53,24 +53,24 @@ end
 @testset "complex packing: validation before any write, k_block_length == 0 is a no-op" begin
     kernel = ComplexKernelDescriptor(Val(4), Val(3), ComplexF64, PlanarFormat(), PlanarFormat())
     storage = fill(ComplexF64(3, 4), 100)
-    src = SourceTile(storage, 0, AffineAxis(0, 1, 4), AffineAxis(0, 8, 2))
+    src = Tile(storage, 0, AffineAxis(0, 1, 4), AffineAxis(0, 8, 2))
     # The buffer holds realtype(kernel), not scalartype(kernel).
     @test_throws ArgumentError pack_a!(zeros(ComplexF64, 1000), src, kernel, identity)
     @test_throws ArgumentError pack_b!(zeros(ComplexF64, 1000), src, kernel, identity)
     @test_throws ArgumentError pack_a!(zeros(Float32, 1000), src, kernel, identity)
     canary = fill(-42.0, 1000)
-    @test_throws ArgumentError pack_a!(canary, SourceTile(storage, 0, AffineAxis(0, 1, 5), src.cols), kernel, identity)
-    @test_throws ArgumentError pack_b!(canary, SourceTile(storage, 0, src.cols, AffineAxis(0, 1, 4)), kernel, identity)
+    @test_throws ArgumentError pack_a!(canary, Tile(storage, 0, AffineAxis(0, 1, 5), src.cols), kernel, identity)
+    @test_throws ArgumentError pack_b!(canary, Tile(storage, 0, src.cols, AffineAxis(0, 1, 4)), kernel, identity)
     # A buffer sized as if it held complex elements is half as long as needed.
     @test_throws DimensionMismatch pack_a!(zeros(Float64, 4 * 2), src, kernel, identity)
-    @test_throws BoundsError pack_a!(canary, SourceTile(storage, 90, src.rows, src.cols), kernel, identity)
+    @test_throws BoundsError pack_a!(canary, Tile(storage, 90, src.rows, src.cols), kernel, identity)
     @test all(==(-42.0), canary)
 
     read = Ref(false)
     spy = z -> (read[] = true; z)
     packed = fill(-42.0, 8)
-    @test pack_a!(packed, SourceTile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 8, 0)), kernel, spy) === packed
-    @test pack_b!(packed, SourceTile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 8, 3)), kernel, spy) === packed
+    @test pack_a!(packed, Tile(storage, 0, AffineAxis(0, 1, 3), AffineAxis(0, 8, 0)), kernel, spy) === packed
+    @test pack_b!(packed, Tile(storage, 0, AffineAxis(0, 1, 0), AffineAxis(0, 8, 3)), kernel, spy) === packed
     @test all(==(-42.0), packed)
     @test !read[]
 end
@@ -91,20 +91,20 @@ end
         GC.@preserve bufa bufb begin
             pa = packed_panel(bufa, 1, length(bufa))
             pb = packed_panel(bufb, 1, length(bufb))
-            full_a = SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length))
-            full_b = SourceTile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR))
+            full_a = Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, k_block_length))
+            full_b = Tile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR))
             for f in (identity, conj)   # the contiguous fast path, where the ISA has it
                 push!(fast, steady_pack_allocs(pack_a!, pa, full_a, kernel, f))
                 push!(fast, steady_pack_allocs(pack_b!, pb, full_b, kernel, f))
             end
             srcs_a = (
-                full_a, SourceTile(storage, 0, ScatterAxis(ro, MR), ScatterAxis(co, k_block_length)),
-                SourceTile(storage, 0, AffineAxis(0, 1, MR - 1), AffineAxis(0, MR, k_block_length)),
-                SourceTile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
+                full_a, Tile(storage, 0, view(ro, 1:MR), view(co, 1:k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, MR - 1), AffineAxis(0, MR, k_block_length)),
+                Tile(storage, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, 0)),
             )
             srcs_b = (
-                full_b, SourceTile(storage, 0, ScatterAxis(co, k_block_length), ScatterAxis(ro_b, NR)),
-                SourceTile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR - 1)),
+                full_b, Tile(storage, 0, view(co, 1:k_block_length), view(ro_b, 1:NR)),
+                Tile(storage, 0, AffineAxis(0, 1, k_block_length), AffineAxis(0, k_block_length, NR - 1)),
             )
             for s in srcs_a, f in (identity, conj)
                 push!(slow, steady_pack_allocs(pack_a!, bufa, s, kernel, f))

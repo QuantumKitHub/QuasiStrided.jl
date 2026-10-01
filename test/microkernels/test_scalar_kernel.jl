@@ -6,7 +6,7 @@
 # never through the engine's packers or offset accessors.
 
 using Random
-using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel, QSTile
+using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel
 using SIMD: Vec
 using StridedViews: StridedView
 
@@ -89,8 +89,8 @@ function mk_contract_light(k)
     if !(k isa ScalarKernel)
         skip = VERSION < v"1.11"
         ab = (T(2), T(0.5))
-        scat = DestinationTile(zeros(T, MR * NR), 0, ScatterAxis(collect(0:(MR - 1)), MR), AffineAxis(0, MR, NR))
-        part = DestinationTile(mk_dense(zeros(T, m * NR)), 0, AffineAxis(0, 1, m), AffineAxis(0, m, NR))
+        scat = Tile(zeros(T, MR * NR), 0, view(collect(0:(MR - 1)), 1:MR), AffineAxis(0, MR, NR))
+        part = Tile(mk_dense(zeros(T, m * NR)), 0, AffineAxis(0, 1, m), AffineAxis(0, m, NR))
         mk_run_acc(k, pa, pb, k_block_length)
         @test (@allocated mk_run_acc(k, pa, pb, k_block_length)) == 0 skip = skip
         for dst in (scat, part)
@@ -137,8 +137,8 @@ function mk_contract_full(k)
         Cold = iszero(beta) ? fill(mk_nan(T), m * n) : rand(rng, T, m * n)
         storage = [fill(sentinel, pad); Cold; fill(sentinel, pad)]
         scattered || (storage = mk_dense(storage))
-        rows = scattered ? ScatterAxis(collect(0:(m - 1)), m) : AffineAxis(0, 1, m)
-        execute_tile!(k, DestinationTile(storage, pad, rows, AffineAxis(0, m, n)), pa, pb, k_block_length, alpha, beta)
+        rows = scattered ? view(collect(0:(m - 1)), 1:m) : AffineAxis(0, 1, m)
+        execute_tile!(k, Tile(storage, pad, rows, AffineAxis(0, m, n)), pa, pb, k_block_length, alpha, beta)
         AB = (A * B)[1:m, 1:n]
         want = iszero(beta) ? alpha .* vec(AB) : alpha .* vec(AB) .+ beta .* Cold
         @test mk_close(storage[(pad + 1):(pad + m * n)], want, T)
@@ -154,26 +154,26 @@ function mk_contract_full(k)
     pa, pb = mk_pack(k, A, B)
     acc = mk_run_acc(k, pa, pb, 2)
     @test any(!isfinite(mk_read(k, acc, i, j)) for i in 0:(MR - 1), j in 0:(NR - 1))
-    for (storage, rows) in ((mk_dense(fill(mk_nan(T), m * n)), AffineAxis(0, 1, m)), (fill(mk_nan(T), m * n), ScatterAxis(collect(0:(m - 1)), m)))
-        execute_tile!(k, DestinationTile(storage, 0, rows, AffineAxis(0, m, n)), pa, pb, 2, one(T), zero(T))
+    for (storage, rows) in ((mk_dense(fill(mk_nan(T), m * n)), AffineAxis(0, 1, m)), (fill(mk_nan(T), m * n), view(collect(0:(m - 1)), 1:m)))
+        execute_tile!(k, Tile(storage, 0, rows, AffineAxis(0, m, n)), pa, pb, 2, one(T), zero(T))
         @test mk_close(storage, vec(A[1:m, :] * B[:, 1:n]), T)
     end
 
     # alpha == 0 never reads acc or the panels; k_block_length == 0 never reads the panels.
-    fulltile(s) = DestinationTile(s, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
+    fulltile(s) = Tile(s, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR))
     storage = mk_dense(fill(T(2), MR * NR))
     store_tile!(fulltile(storage), mk_fill_acc(k, R(NaN)), zero(T), T(3), k)
     @test all(==(T(6)), storage)
     execute_tile!(k, fulltile(storage), R[], R[], 5, zero(T), zero(T))
     @test all(iszero, storage)
-    empty = DestinationTile(T[], 0, AffineAxis(0, 1, 0), AffineAxis(0, 0, 0))
+    empty = Tile(T[], 0, AffineAxis(0, 1, 0), AffineAxis(0, 0, 0))
     @test store_tile!(empty, acc, one(T), zero(T), k) === empty
     @test execute_tile!(k, empty, pa, pb, 2, one(T), one(T)) === empty
 
     # Rejected inputs.
     st = zeros(T, (MR + 1) * (NR + 1))
-    @test_throws ArgumentError execute_tile!(k, DestinationTile(st, 0, AffineAxis(0, 1, MR + 1), AffineAxis(0, MR + 1, NR)), pa, pb, 2, one(T), zero(T))
-    @test_throws ArgumentError execute_tile!(k, DestinationTile(st, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR + 1)), pa, pb, 2, one(T), zero(T))
+    @test_throws ArgumentError execute_tile!(k, Tile(st, 0, AffineAxis(0, 1, MR + 1), AffineAxis(0, MR + 1, NR)), pa, pb, 2, one(T), zero(T))
+    @test_throws ArgumentError execute_tile!(k, Tile(st, 0, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR + 1)), pa, pb, 2, one(T), zero(T))
     @test_throws ArgumentError execute_tile!(k, fulltile(st), pa, pb, -1, one(T), zero(T))
     @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa[1:(end - 1)], pb, 2, one(T), zero(T))
     @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa, pb[1:(end - 1)], 2, one(T), zero(T))
@@ -189,15 +189,15 @@ function mk_contract_full(k)
     nanbuf(len) = fill(mk_nan(T), len)
     layouts = (
         # (storage, base, rows, cols, zero-based address of (i, j))
-        (nanbuf(ld * n), 0, ScatterAxis(perm, m), AffineAxis(0, ld, n), (i, j) -> perm[i + 1] + ld * j),
+        (nanbuf(ld * n), 0, view(perm, 1:m), AffineAxis(0, ld, n), (i, j) -> perm[i + 1] + ld * j),
         (mk_dense(nanbuf(ld * n)), (m - 1) + ld * (n - 1), AffineAxis(0, -1, m), AffineAxis(0, -ld, n), (i, j) -> (m - 1 - i) + ld * (n - 1 - j)),
         (mk_dense(nanbuf(2ld * n)), 0, AffineAxis(0, 2, m), AffineAxis(0, 2ld, n), (i, j) -> 2i + 2ld * j),
         (mk_dense(nanbuf(ld * n)), 0, AffineAxis(0, 1, m), AffineAxis(0, ld, n), (i, j) -> i + ld * j),
-        (mk_dense(nanbuf(ld * n)), 0, AffineAxis(0, 1, m), ScatterAxis(cperm, n), (i, j) -> i + cperm[j + 1]),
+        (mk_dense(nanbuf(ld * n)), 0, AffineAxis(0, 1, m), view(cperm, 1:n), (i, j) -> i + cperm[j + 1]),
         (view(nanbuf(ld * n + 4), 3:(ld * n + 2)), 0, AffineAxis(0, 1, m), AffineAxis(0, ld, n), (i, j) -> i + ld * j),
     )
     for (storage, base, rows, cols, addr) in layouts
-        execute_tile!(k, DestinationTile(storage, base, rows, cols), pa, pb, k_block_length, one(T), zero(T))
+        execute_tile!(k, Tile(storage, base, rows, cols), pa, pb, k_block_length, one(T), zero(T))
         got = [storage[addr(i, j) + 1] for i in 0:(m - 1), j in 0:(n - 1)]
         @test mk_close(got, AB[1:m, 1:n], T)
         @test count(!isnan, storage) == m * n

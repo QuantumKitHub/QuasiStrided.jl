@@ -40,7 +40,7 @@ end
 # The five-loop nest. `UNPACKED_B`: B read in place instead of packed. `AFF`:
 # per map, in the order M-in-A, M-in-C, N-in-B, N-in-C, K-in-A, K-in-B,
 # whether it is an affine ramp, so that its sliver axes are statically
-# `AffineAxis` and the `PtrScatterAxis` arm is never compiled. `SPLIT`: whether
+# `AffineAxis` and the offset-buffer `view` arm is never compiled. `SPLIT`: whether
 # A and B are packed line by line (`plan.mpack`/`plan.npack`).
 struct _NestPath{UNPACKED_B, AFF, SPLIT} end
 

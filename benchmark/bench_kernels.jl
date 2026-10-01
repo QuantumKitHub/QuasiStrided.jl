@@ -23,7 +23,7 @@ include(joinpath(@__DIR__, "harness.jl"))
 
 using QuasiStrided: RealMethod, PlanarMethod, OneMMethod, FMAddSubMethod, kernel_shapes,
     _kernel_from_shape, default_blocking, packed_panel, unsafe_execute_tile!,
-    DestinationTile, AffineAxis, target_profile
+    Tile, AffineAxis, target_profile
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32,ComplexF64,ComplexF32"))
 const SHAPES = let s = argval("shapes")
@@ -60,7 +60,7 @@ function kernel_hot!(kernel, C, apack, bpack, k_block, reps)
     GC.@preserve apack bpack begin
         ap = packed_panel(apack, 1, length(apack))
         bp = packed_panel(bpack, 1, length(bpack))
-        dest = DestinationTile(C, 0, AffineAxis(0, 1, tile_size(kernel, 1)), AffineAxis(0, tile_size(kernel)...))
+        dest = Tile(C, 0, AffineAxis(0, 1, tile_size(kernel, 1)), AffineAxis(0, tile_size(kernel)...))
         for _ in 1:reps
             unsafe_execute_tile!(kernel, dest, ap, bp, k_block, one(eltype(C)), one(eltype(C)))
         end

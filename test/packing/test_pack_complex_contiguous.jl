@@ -28,10 +28,10 @@ function check_panel(side, kernel, T, PD, fmt, lane, step, f; S = T)
     storage = S === T ? complex_storage(T, 40000) : S.(complex_storage(ComplexF64, 40000) ./ 3)
     src, g = pack_fixture(side, storage, 17, lane, step)
     pack! = side === :a ? pack_a! : pack_b!
-    len = _ref_rpe(fmt) * PD * axis_length(step)
+    len = _ref_rpe(fmt) * PD * length(step)
     got, canaries = pack_into(pack!, :panel, real(T), len, src, kernel, f)
     @test canaries
-    @test all(isequal.(got, ref_pack(fmt, T, PD, axis_length(step), axis_length(lane), g, f)))
+    @test all(isequal.(got, ref_pack(fmt, T, PD, length(step), length(lane), g, f)))
     return storage, src
 end
 
@@ -61,7 +61,7 @@ end
     for fa in (PlanarFormat(), OneEFormat(), InterleavedFormat()), f in (identity, conj)
         kernel = ComplexKernelDescriptor(Val(MR), Val(NR), T, fa, OneEFormat())
         # The lane axis must be unit-stride; the step axis may scatter.
-        check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), ScatterAxis(koffs, k_block_length), f)
+        check_panel(:a, kernel, T, MR, fa, AffineAxis(0, 1, MR), view(koffs, 1:k_block_length), f)
         check_panel(:b, kernel, T, NR, OneEFormat(), AffineAxis(0, 1, NR), AffineAxis(0, 997, k_block_length), f)
         # Ineligible shapes fall back to the scalar loop, into the same panel.
         for lane in (AffineAxis(20, -1, MR), AffineAxis(0, 3, MR), AffineAxis(0, 1, MR - 3))
@@ -76,7 +76,7 @@ end
     storage = complex_storage(T, 4000)
     buf = zeros(Float64, 64)
     offs = collect(0:(MR - 1))
-    GC.@preserve buf offs begin
+    GC.@preserve buf begin
         pk = packed_panel(buf, 1, length(buf))
         elig(;
             packed = pk, store = storage, ax = AffineAxis(0, 1, MR), tr = identity,
@@ -95,8 +95,7 @@ end
         @test !elig(store = real.(storage))                            # real storage
         @test !elig(ax = AffineAxis(0, 2, MR))
         @test !elig(ax = AffineAxis(0, -1, MR))
-        @test !elig(ax = ScatterAxis(offs, MR))
-        @test !elig(ax = PtrScatterAxis(pointer(offs), MR))
+        @test !elig(ax = view(offs, 1:MR))
         @test !elig(valid = MR - 1)                                    # padding lanes
         @test !elig(tr = z -> 2z)
         @test !elig(fmt = RealFormat())
