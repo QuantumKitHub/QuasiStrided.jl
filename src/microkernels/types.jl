@@ -142,7 +142,8 @@ inline_store(::LanePairLayout) = false
 # Generator-time pieces of the stores. `acc_bindings` names the accumulator
 # vector(s) of row block `v` (zero-based) of column `j`, `lane_value` is the
 # element at row `lane` of the block, `block_store` stores a full block whose
-# first row is at zero-based storage index `first`.
+# first row is at zero-based storage index `first`, for `beta` case `B`
+# (`:zero`, `:one` or `:general`).
 acc_index(MV::Int, v::Int, j::Int) = v + MV * (j - 1) + 1
 split_index(::Type{<:PlanarKernel}, MV::Int, NR::Int, v::Int, j::Int) =
     (acc_index(MV, v, j), MV * NR + acc_index(MV, v, j))
@@ -163,25 +164,18 @@ lane_value(::RealLayout) = :(vec[lane])
 lane_value(::SplitLayout) = :(Complex(revec[lane], imvec[lane]))
 lane_value(::LanePairLayout) = :(Complex(vec[2 * lane - 1], vec[2 * lane]))
 
-function block_store(::RealLayout, first, W::Int, R::Type, RC::Type)
+function block_store(::RealLayout, first, W::Int, R::Type, RC::Type, B::Symbol)
     old = :(convert(Vec{$W, $R}, vload(Vec{$W, $RC}, storage, at)))
+    new = B === :zero ? :(alpha * vec) : B === :one ? :(muladd(alpha, vec, $old)) : :(muladd(alpha, vec, beta * $old))
     return quote
         at = $first + 1
-        vstore(
-            convert(
-                Vec{$W, $RC},
-                iszero(beta) ? alpha * vec :
-                    isone(beta) ? muladd(alpha, vec, $old) :
-                    muladd(alpha, vec, beta * $old)
-            ),
-            storage, at
-        )
+        vstore(convert(Vec{$W, $RC}, $new), storage, at)
     end
 end
-block_store(::SplitLayout, first, W::Int, R::Type, RC::Type) =
-    :(split_store_block!(sp, 2 * $first, revec, imvec, ar, ai, br, bi, beta, Val($W)))
-block_store(::LanePairLayout, first, W::Int, R::Type, RC::Type) =
-    :(lanepair_store_block!(sp, 2 * $first, vec, ar, ai, br, bi, beta))
+block_store(::SplitLayout, first, W::Int, R::Type, RC::Type, B::Symbol) =
+    :(split_store_block!(sp, 2 * $first, revec, imvec, ar, ai, br, bi, Val($W), Val($(QuoteNode(B)))))
+block_store(::LanePairLayout, first, W::Int, R::Type, RC::Type, B::Symbol) =
+    :(lanepair_store_block!(sp, 2 * $first, vec, ar, ai, br, bi, Val($(QuoteNode(B)))))
 
 # The real lane type of the vector store's storage `S`. The complex layouts
 # reinterpret the storage as reals, only sound on dense rank-1 complex storage.
@@ -195,20 +189,14 @@ end
 # The vector store's body around its blocks: the complex layouts broadcast
 # `alpha`/`beta` once and store through a raw pointer, only dereferenced
 # inside `GC.@preserve`.
-store_body(::RealLayout, W::Int, R::Type, RC::Type, blocks) = :(
-    @inbounds begin
-        $(blocks...)
-    end
-)
-store_body(::AccumulatorLayout, W::Int, R::Type, RC::Type, blocks) = quote
+store_body(::RealLayout, W::Int, R::Type, RC::Type, body) = :(@inbounds $body)
+store_body(::AccumulatorLayout, W::Int, R::Type, RC::Type, body) = quote
     ar = Vec{$W, $R}(real(alpha))
     ai = Vec{$W, $R}(imag(alpha))
     br = Vec{$W, $R}(real(beta))
     bi = Vec{$W, $R}(imag(beta))
     GC.@preserve storage begin
         sp = reinterpret(Ptr{$RC}, pointer(storage))
-        @inbounds begin
-            $(blocks...)
-        end
+        @inbounds $body
     end
 end

@@ -95,7 +95,8 @@ end
     return :(shufflevector(re, im, Val($idx)))
 end
 
-# One full `W`-row block; `at` is the zero-based index of its first real.
+# One full `W`-row block for `beta` case `B`; `at` is the zero-based index of
+# its first real.
 # The arithmetic transcribes Base's `Complex` expression trees (the ones
 # `axpby_tile!` reaches), so full blocks match them bitwise: `*` is unfused,
 # `muladd(z, w, x) = (muladd(zr, wr, -muladd(zi, wi, -xr)), muladd(zr, wi,
@@ -105,16 +106,16 @@ end
 @inline function split_store_block!(
         sp::Ptr{RC}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
         ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
-        beta::Complex{R}, ::Val{W}
-    ) where {RC, R, W}
-    if iszero(beta)
+        ::Val{W}, ::Val{B}
+    ) where {RC, R, W, B}
+    if B === :zero
         newre = ar * rev - ai * imv
         newim = ar * imv + ai * rev
     else
         old = convert(Vec{2 * W, R}, vload(Vec{2 * W, RC}, sp + sizeof(RC) * at))
         orv = deinterleave_re(old, Val(W))
         oiv = deinterleave_im(old, Val(W))
-        if isone(beta)
+        if B === :one
             xr, xi = orv, oiv
         else
             xr = br * orv - bi * oiv

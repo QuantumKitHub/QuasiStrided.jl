@@ -130,14 +130,14 @@ end
 @inline function lanepair_store_block!(
         sp::Ptr{RC}, at::Int, r::Vec{W, R},
         ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
-        beta::Complex{R}
-    ) where {RC, R, W}
+        ::Val{B}
+    ) where {RC, R, W, B}
     s = swap_pairs(r)
-    if iszero(beta)
+    if B === :zero
         new = addsub(ar * r, ai * s)
     else
         old = convert(Vec{W, R}, vload(Vec{W, RC}, sp + sizeof(RC) * at))
-        x = isone(beta) ? old : addsub(br * old, bi * swap_pairs(old))
+        x = B === :one ? old : addsub(br * old, bi * swap_pairs(old))
         new = fmaddsub(ar, r, fmaddsub(ai, s, x))
     end
     vstore(convert(Vec{W, RC}, new), sp + sizeof(RC) * at)

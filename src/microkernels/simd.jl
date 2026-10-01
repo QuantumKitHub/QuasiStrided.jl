@@ -142,7 +142,8 @@ end
 end
 
 # Whole row blocks are one vector load/store; a block straddling `m` is stored
-# lane by lane, so nothing outside the valid rectangle is touched.
+# lane by lane, so nothing outside the valid rectangle is touched. The blocks
+# are generated once per `beta` case, so `beta` is tested once per tile.
 # `rows::AffineAxis` in the signature: an ineligible tile is a MethodError.
 @generated function vector_store!(
         destination::Tile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
@@ -155,40 +156,52 @@ end
     check_acc(:vector_store!, R, T, NA, accumulator_length(layout, MV, NR))
     RC = store_lanetype(layout, S, T)
 
-    blocks = Any[]
-    for j in 1:NR
-        vblocks = Any[]
-        for v in 0:(MV - 1)
-            push!(
-                vblocks, quote
-                    $(acc_bindings(layout, kernel, MV, NR, v, j))
-                    if $((v + 1) * rows) <= m
-                        $(block_store(layout, :(colbase + $(v * rows)), W, R, RC))
-                    elseif $(v * rows) < m
-                        for lane in 1:$rows
-                            i = $(v * rows) + lane
-                            i <= m || break
-                            axpby_at!(storage, colbase + i, alpha, $(lane_value(layout)), beta)
+    function blocks(B)
+        out = Any[]
+        for j in 1:NR
+            vblocks = Any[]
+            for v in 0:(MV - 1)
+                push!(
+                    vblocks, quote
+                        $(acc_bindings(layout, kernel, MV, NR, v, j))
+                        if $((v + 1) * rows) <= m
+                            $(block_store(layout, :(colbase + $(v * rows)), W, R, RC, B))
+                        elseif $(v * rows) < m
+                            for lane in 1:$rows
+                                i = $(v * rows) + lane
+                                i <= m || break
+                                axpby_at!(storage, colbase + i, alpha, $(lane_value(layout)), beta)
+                            end
                         end
+                    end
+                )
+            end
+            push!(
+                out, quote
+                    if $j <= n
+                        colbase = rowbase0 + cols[$j]  # the address of (1, j)
+                        $(vblocks...)
                     end
                 end
             )
         end
-        push!(
-            blocks, quote
-                if $j <= n
-                    colbase = rowbase0 + cols[$j]  # the address of (1, j)
-                    $(vblocks...)
-                end
-            end
-        )
+        return out
+    end
+    by_beta = quote
+        if iszero(beta)
+            $(blocks(:zero)...)
+        elseif isone(beta)
+            $(blocks(:one)...)
+        else
+            $(blocks(:general)...)
+        end
     end
     return quote
         $(inline_store(layout) ? :(Base.@_inline_meta) : nothing)
         storage = destination.storage
         cols = destination.cols
         rowbase0 = @inbounds destination.base + destination.rows[1]
-        $(store_body(layout, W, R, RC, blocks))
+        $(store_body(layout, W, R, RC, by_beta))
         return destination
     end
 end
