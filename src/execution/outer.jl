@@ -1,7 +1,7 @@
 # The outer-product path for `K == 1`, real `T`, M unit-stride in A and C:
 # `C[:, n] = alpha * A * B[n] + beta * C[:, n]` as a streaming write. Through
 # the nest a K = 1 contraction is all per-tile fixed cost. The arithmetic is
-# the nest's term for term (`r = a * b`, then `_store_tile_vector!`'s
+# the nest's term for term (`r = a * b`, then `vector_store!`'s
 # expressions), so the two agree bitwise except on a signed zero. Real only:
 # complex K = 1 tiles are not the bottleneck, and the path would need its own
 # interleaved arithmetic.

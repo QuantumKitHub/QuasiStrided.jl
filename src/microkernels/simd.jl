@@ -1,6 +1,6 @@
-# Explicit-SIMD real microkernel. The accumulator is an immutable tuple of
-# `Vec{W,T}` so it stays in registers, and every K step and store is
-# `@generated` straight-line code.
+# The vector kernels' shared `add_tile` and stores, and the explicit-SIMD real
+# K step. The accumulator is an immutable tuple of `Vec`s so it stays in
+# registers, and every K step and store is `@generated` straight-line code.
 #
 # GUARDRAIL (all kernels): every `acc[...]` must be a *literal* tuple index.
 # Indexing an `NTuple` dynamically forces it to memory, and above 16 vectors
@@ -9,46 +9,42 @@
 
 using SIMD: Vec, vload, vstore
 
-"""
-    SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}[, ::Val{W}])
+function zero_accumulator(kernel::VectorKernel{MR, NR, T, W}) where {MR, NR, T, W}
+    layout = accumulator_layout(kernel)
+    z = zero(Vec{W, real(T)})
+    return ntuple(_ -> z, Val(accumulator_length(layout, MR ÷ rows_per_vector(layout, W), NR)))
+end
 
-Explicit-SIMD real microkernel over `SIMD.Vec{W,T}` lanes. `MR` must be a
-multiple of `W` (default: one 256-bit register, 4 for `Float64`, 8 for `Float32`).
-"""
-struct SIMDKernel{MR, NR, T, W} <: Microkernel{MR, NR, T}
-    descriptor::RealDescriptor{MR, NR, T}
+k_steps(::VectorKernel, k_block_length::Int) = k_block_length
 
-    function SIMDKernel{MR, NR, T, W}(descriptor::RealDescriptor{MR, NR, T}) where {MR, NR, T, W}
-        check_vector_shape("SIMDKernel", MR, W)
-        return new{MR, NR, T, W}(descriptor)
+@inline function add_tile(
+        kernel::VectorKernel, acc::NTuple{NA, Vec{W, R}},
+        packed_a::PA, packed_b::PB, k_block_length::Int
+    ) where {NA, W, R, PA <: PackedPanel, PB}
+    k_block_length == 0 && return acc
+    k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
+    @inbounds for p in 1:k_steps(kernel, k_block_length)
+        acc = accumulate_step(kernel, acc, packed_a, packed_b, p)
     end
+    return acc
 end
 
-SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {MR, NR, T, W} =
-    SIMDKernel{MR, NR, T, W}(Descriptor(Val(MR), Val(NR), T))
-SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
-    SIMDKernel(Val(MR), Val(NR), T, Val(default_lanewidth(T)))
-
-lanewidth(::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
-
-# `(MR÷W)*NR` vectors; vector `v` (zero-based) of column `j` is at
-# `v + (MR÷W)*(j - 1) + 1`.
-function zero_accumulator(kernel::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W}
-    z = zero(Vec{W, T})
-    return ntuple(_ -> z, Val((MR ÷ W) * NR))
-end
-
-# B column `j` at K step `p`; `UnpackedBView` (src/execution/unpackedb.jl)
-# overrides it to read B in place, resolved at compile time.
-@inline _b_step_load(packed_b::PB, kernel, j::Int, p::Int) where {PB} =
+# B column `j` at K step `p`, as a real or as `(re, im)`; `UnpackedBView`
+# (src/execution/unpackedb.jl) overrides both to read B in place, resolved at
+# compile time.
+@inline b_scalar(packed_b::PB, kernel, j::Int, p::Int) where {PB} =
     panel_load(packed_b, packed_b_offset(kernel, j, p))
+@inline b_complex(packed_b::PB, kernel, j::Int, p::Int) where {PB} = (
+    panel_load(packed_b, packed_b_offset(kernel, j, p)),
+    panel_load(packed_b, packed_b_offset(kernel, j, p, 1)),
+)
 
-@generated function _accumulate_step(
+@generated function accumulate_step(
         kernel::SIMDKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, T}},
         packed_a::PA, packed_b::PB, p::Int
     ) where {MR, NR, T, W, NV, PA, PB}
     NVECA = MR ÷ W
-    check_acc(:_accumulate_step, T, T, NV, NVECA * NR)
+    check_acc(:accumulate_step, T, T, NV, NVECA * NR)
 
     avars = [Symbol(:a, v) for v in 0:(NVECA - 1)]
     bvars = [Symbol(:b, j) for j in 1:NR]
@@ -58,13 +54,13 @@ end
             for v in 0:(NVECA - 1)
     ]
     load_b = [
-        :($(bvars[j]) = _b_step_load(packed_b, kernel, $j, p))
+        :($(bvars[j]) = b_scalar(packed_b, kernel, $j, p))
             for j in 1:NR
     ]
 
     acc_exprs = Vector{Any}(undef, NV)
     for j in 1:NR, v in 0:(NVECA - 1)
-        idx = v + NVECA * (j - 1) + 1
+        idx = acc_index(NVECA, v, j)
         acc_exprs[idx] = :(muladd($(avars[v + 1]), $(bvars[j]), acc[$idx]))
     end
 
@@ -78,41 +74,60 @@ end
     end
 end
 
-@inline function add_tile(
-        kernel::SIMDKernel{MR, NR, T, W}, acc::NTuple{NV, Vec{W, T}},
-        packed_a::PA, packed_b::PB, k_block_length::Int
-    ) where {MR, NR, T, W, NV, PA <: PackedPanel, PB}
-    k_block_length == 0 && return acc
-    k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
-    @inbounds for p in 1:k_block_length
-        acc = _accumulate_step(kernel, acc, packed_a, packed_b, p)
+# A kernel without a K step of its own runs its `inner(kernel)`'s.
+@inline accumulate_step(kernel::VectorKernel, acc::NTuple, packed_a::PA, packed_b::PB, p::Int) where {PA, PB} =
+    accumulate_step(inner(kernel), acc, packed_a, packed_b, p)
+
+# Vector store eligibility: unit-stride rows into rank-1 dense storage, exactly
+# what SIMD.jl's array `vload`/`vstore` accept. Must admit `Memory{T}`: that is
+# the `parent` of an Array-backed `StridedView` on Julia >= 1.11. The complex
+# layouts reinterpret `W` rows as `2W` consecutive reals, on an ISA the complex
+# fast paths ship for (shared with the complex pack fast path).
+@inline vector_store_eligible(::RealLayout, tile::Tile, ::Type{T}) where {T} =
+    is_unit_stride(tile.rows) && dense_lanes(tile.storage, T)
+@inline vector_store_eligible(::AccumulatorLayout, tile::Tile, ::Type{T}) where {T} =
+    is_unit_stride(tile.rows) && dense_lanes(tile.storage, T) &&
+    complex_fastpath_isa_eligible()
+
+@generated function store_tile!(
+        destination::Tile, acc::NTuple{NA, Vec{W, R}},
+        alpha::T, beta::T, kernel::VectorKernel{MR, NR, T, W}
+    ) where {MR, NR, T, W, R, NA}
+    layout = accumulator_layout(kernel)
+    return quote
+        $(inline_store(layout) ? :(Base.@_inline_meta) : nothing)
+        m, n = store_prologue!(destination, alpha, beta)
+        (m == 0 || n == 0) && return destination
+
+        if vector_store_eligible($layout, destination, T)
+            return vector_store!(destination, acc, alpha, beta, kernel, m, n)
+        end
+
+        return scalar_store!(destination, acc, alpha, beta, kernel, m, n)
     end
-    return acc
 end
 
-# Vector store eligibility: unit-stride rows into rank-1 dense real storage,
-# exactly what SIMD.jl's array `vload`/`vstore` accept. Must admit `Memory{T}`:
-# that is the `parent` of an Array-backed `StridedView` on Julia >= 1.11.
-@inline _vector_store_eligible(tile::Tile, ::Type{T}) where {T} =
-    is_unit_stride(tile.rows) && dense_lanes(tile.storage, T)
-
-@generated function _store_tile_scattered!(
-        destination::Tile, acc::NTuple{NV, Vec{W, T}},
-        alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W},
+# Element by element, for every destination the vector store cannot take.
+@generated function scalar_store!(
+        destination::Tile, acc::NTuple{NA, Vec{W, R}},
+        alpha::T, beta::T, kernel::VectorKernel{MR, NR, T, W},
         m::Int, n::Int
-    ) where {MR, NR, T, W, NV}
-    NVECA = MR ÷ W
+    ) where {MR, NR, T, W, R, NA}
+    layout = accumulator_layout(kernel)
+    rows = rows_per_vector(layout, W)
+    MV = MR ÷ rows
+    check_acc(:scalar_store!, R, T, NA, accumulator_length(layout, MV, NR))
+
     blocks = Any[]
-    for j in 1:NR, v in 0:(NVECA - 1)
-        idx = v + NVECA * (j - 1) + 1
+    for j in 1:NR, v in 0:(MV - 1)
         push!(
             blocks, quote
                 if $j <= n
-                    vec = acc[$idx]
-                    for lane in 1:$W
-                        i = $(v * W) + lane
+                    $(acc_bindings(layout, kernel, MV, NR, v, j))
+                    for lane in 1:$rows
+                        i = $(v * rows) + lane
                         i <= m || break
-                        axpby_tile!(destination, i, $j, alpha, vec[lane], beta)
+                        axpby_tile!(destination, i, $j, alpha, $(lane_value(layout)), beta)
                     end
                 end
             end
@@ -126,41 +141,34 @@ end
     end
 end
 
-# Whole `W`-row blocks are one vector load/store; a block straddling `m` is
-# stored lane by lane, so nothing outside the valid rectangle is touched.
+# Whole row blocks are one vector load/store; a block straddling `m` is stored
+# lane by lane, so nothing outside the valid rectangle is touched.
 # `rows::AffineAxis` in the signature: an ineligible tile is a MethodError.
-@generated function _store_tile_vector!(
-        destination::Tile{S, <:AffineAxis}, acc::NTuple{NV, Vec{W, T}},
-        alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W},
+@generated function vector_store!(
+        destination::Tile{S, <:AffineAxis}, acc::NTuple{NA, Vec{W, R}},
+        alpha::T, beta::T, kernel::VectorKernel{MR, NR, T, W},
         m::Int, n::Int
-    ) where {S, MR, NR, T, W, NV}
-    NVECA = MR ÷ W
-    RC = eltype(S)
-    old = :(convert(Vec{$W, $T}, vload(Vec{$W, $RC}, storage, at)))
+    ) where {S, MR, NR, T, W, R, NA}
+    layout = accumulator_layout(kernel)
+    rows = rows_per_vector(layout, W)
+    MV = MR ÷ rows
+    check_acc(:vector_store!, R, T, NA, accumulator_length(layout, MV, NR))
+    RC = store_lanetype(layout, S, T)
+
     blocks = Any[]
     for j in 1:NR
         vblocks = Any[]
-        for v in 0:(NVECA - 1)
-            idx = v + NVECA * (j - 1) + 1
+        for v in 0:(MV - 1)
             push!(
                 vblocks, quote
-                    vec = acc[$idx]
-                    if $((v + 1) * W) <= m
-                        at = colbase + $(v * W) + 1
-                        vstore(
-                            convert(
-                                Vec{$W, $RC},
-                                iszero(beta) ? alpha * vec :
-                                    isone(beta) ? muladd(alpha, vec, $old) :
-                                    muladd(alpha, vec, beta * $old)
-                            ),
-                            storage, at
-                        )
-                    elseif $(v * W) < m
-                        for lane in 1:$W
-                            i = $(v * W) + lane
+                    $(acc_bindings(layout, kernel, MV, NR, v, j))
+                    if $((v + 1) * rows) <= m
+                        $(block_store(layout, :(colbase + $(v * rows)), W, R, RC))
+                    elseif $(v * rows) < m
+                        for lane in 1:$rows
+                            i = $(v * rows) + lane
                             i <= m || break
-                            axpby_at!(storage, colbase + i, alpha, vec[lane], beta)
+                            axpby_at!(storage, colbase + i, alpha, $(lane_value(layout)), beta)
                         end
                     end
                 end
@@ -176,30 +184,11 @@ end
         )
     end
     return quote
-        Base.@_inline_meta
+        $(inline_store(layout) ? :(Base.@_inline_meta) : nothing)
         storage = destination.storage
         cols = destination.cols
         rowbase0 = @inbounds destination.base + destination.rows[1]
-        @inbounds begin
-            $(blocks...)
-        end
+        $(store_body(layout, W, R, RC, blocks))
         return destination
     end
-end
-
-# `@inline` with the vector store: out of line, the whole accumulator is spilled
-# to the stack and reloaded on every micro-tile. The scattered store stays out
-# of line: it is scalar anyway, and inlining it bloats the tile function.
-@inline function store_tile!(
-        destination::Tile, acc::NTuple{NV, Vec{W, T}},
-        alpha::T, beta::T, kernel::SIMDKernel{MR, NR, T, W}
-    ) where {MR, NR, T, W, NV}
-    m, n = store_prologue!(destination, alpha, beta)
-    (m == 0 || n == 0) && return destination
-
-    if _vector_store_eligible(destination, T)
-        return _store_tile_vector!(destination, acc, alpha, beta, kernel, m, n)
-    end
-
-    return _store_tile_scattered!(destination, acc, alpha, beta, kernel, m, n)
 end

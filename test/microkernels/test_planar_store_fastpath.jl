@@ -1,5 +1,5 @@
-# The vectorized complex store fast paths (planar here, fmaddsub in
-# test_fmaddsub_store_fastpath.jl, which reuses `mk_store_fastpath`).
+# The vectorized complex store fast paths: split (planar) and lane pairs
+# (1m, fmaddsub).
 #
 # Values are pinned two ways. On the elements the fast path vectorizes (full
 # row blocks) it must match, bitwise, an independent transcription of Base's
@@ -11,7 +11,7 @@
 # The fast path ships for AVX-512 only; every expectation derives from the live
 # profile, so `test/forced_isa_runner.jl` checks the other ISAs too.
 
-using QuasiStrided: PlanarKernel, FMAddSubKernel, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, TargetProfile, CacheLevel,
+using QuasiStrided: PlanarKernel, FMAddSubKernel, OneMKernel, KERNEL_SHAPES_C64_ONEM, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, TargetProfile, CacheLevel,
     target_profile, unknown_target, KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 
 const STORE_FASTPATH_ON = QuasiStrided.complex_fastpath_isa_eligible()
@@ -65,7 +65,7 @@ function mk_store_fastpath(K, T, shapes; beta0_exact = false, S = T)
             for (alpha, beta) in mk_store_ab(T)
                 fast = mk_dense(cold)
                 dfast = Tile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
-                @test QuasiStrided._complex_vector_eligible(dfast, T) == STORE_FASTPATH_ON
+                @test QuasiStrided.vector_store_eligible(QuasiStrided.accumulator_layout(k), dfast, T) == STORE_FASTPATH_ON
                 store_tile!(dfast, acc, alpha, beta, k)
                 scal = copy(cold)  # scattered rows: always the scalar store
                 store_tile!(Tile(scal, 0, view(collect(0:(m - 1)), 1:m), AffineAxis(0, m, n)), acc, alpha, beta, k)
@@ -92,10 +92,10 @@ end
         m, n = 16, 4
         storage = zeros(T, 4 * m * n)
         eligible(s, rows, cols = AffineAxis(0, m, n)) =
-            QuasiStrided._complex_vector_eligible(Tile(s, 0, rows, cols), T)
+            QuasiStrided.vector_store_eligible(QuasiStrided.SplitLayout(), Tile(s, 0, rows, cols), T)
         @test eligible(storage, AffineAxis(0, 1, m)) == STORE_FASTPATH_ON
         @test !eligible(storage, AffineAxis(0, 2, m), AffineAxis(0, 2m, n))
-        @test !QuasiStrided._complex_vector_eligible(Tile(storage, m - 1, AffineAxis(0, -1, m), AffineAxis(0, m, n)), T)
+        @test !QuasiStrided.vector_store_eligible(QuasiStrided.SplitLayout(), Tile(storage, m - 1, AffineAxis(0, -1, m), AffineAxis(0, m, n)), T)
         @test !eligible(storage, view(collect(0:(m - 1)), 1:m))
         @test !eligible(view(storage, 1:(m * n)), AffineAxis(0, 1, m))
         @test !eligible(reshape(storage, 4m, n), AffineAxis(0, 1, m))
@@ -105,7 +105,8 @@ end
 end
 
 
-@testset "fmaddsub store fast path" begin
+@testset "lane-pair store fast path" begin
+    mk_store_fastpath(OneMKernel, ComplexF64, KERNEL_SHAPES_C64_ONEM[[1, end]]; beta0_exact = true)
     mk_store_fastpath(FMAddSubKernel, ComplexF64, KERNEL_SHAPES_C64_FMADDSUB; beta0_exact = true)
     mk_store_fastpath(FMAddSubKernel, ComplexF32, KERNEL_SHAPES_C32_FMADDSUB; beta0_exact = true)
     mk_store_fastpath(FMAddSubKernel, ComplexF64, KERNEL_SHAPES_C64_FMADDSUB[[1, end]]; beta0_exact = true, S = ComplexF32)

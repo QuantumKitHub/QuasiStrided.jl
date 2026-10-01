@@ -26,6 +26,7 @@ include("packing/pack_contiguous.jl")
 
 # --- Microkernels: add one packed K block to a register tile, store into C ---
 include("microkernels/interface.jl")
+include("microkernels/types.jl")
 include("microkernels/scalar.jl")
 include("microkernels/simd.jl")
 include("microkernels/planar.jl")

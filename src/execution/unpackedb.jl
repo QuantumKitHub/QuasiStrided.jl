@@ -26,16 +26,16 @@ Base.length(u::UnpackedBView) = u.per_k * length(u.ksteps)
     return u.transform(z)
 end
 
-@inline _b_step_load(u::UnpackedBView, kernel, j::Int, p::Int) =
+@inline b_scalar(u::UnpackedBView, kernel, j::Int, p::Int) =
     convert(scalartype(kernel), _unpacked_b_element(u, j, p))
 
 # Complex kernels: the planar `(re, im)` pair.
-@inline function _b_step_load2(u::UnpackedBView, kernel, j::Int, p::Int)
+@inline function b_complex(u::UnpackedBView, kernel, j::Int, p::Int)
     z = convert(scalartype(kernel), _unpacked_b_element(u, j, p))
     return (real(z), imag(z))
 end
 
-# The kernels whose K step reads B through `_b_step_load`/`_b_step_load2`
+# The kernels whose K step reads B through `b_scalar`/`b_complex`
 # (not 1m, whose inner kernel walks the planar panel, nor the scalar one).
 @inline _unpacked_b_kernel_eligible(::SIMDKernel) = true
 @inline _unpacked_b_kernel_eligible(::PlanarKernel) = true

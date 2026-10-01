@@ -33,8 +33,8 @@ end
     @testset "construction" begin
         cr = ComplexRealKernel(Val(8), Val(4), ComplexF32)
         rc = RealComplexKernel(Val(8), Val(4), ComplexF64)
-        @test cr.inner isa SIMDKernel{16, 4, Float32, 8}
-        @test rc.inner isa SIMDKernel{8, 8, Float64, 4}
+        @test QuasiStrided.inner(cr) isa SIMDKernel{16, 4, Float32, 8}
+        @test QuasiStrided.inner(rc) isa SIMDKernel{8, 8, Float64, 4}
         @test (sliver_width(cr)..., sliver_width(rc)...) == (16, 4, 8, 8)
         @test_throws ArgumentError ComplexRealKernel(Val(3), Val(4), ComplexF64, Val(3))  # odd W
         @test_throws ArgumentError RealComplexKernel(Val(6), Val(4), ComplexF64, Val(4))

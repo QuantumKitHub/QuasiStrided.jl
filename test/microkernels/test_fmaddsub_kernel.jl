@@ -26,20 +26,20 @@ const _QSF = QuasiStrided
         @test_throws ArgumentError FMAddSubKernel(Val(8), Val(4), Float64, Val(4))
     end
 
-    @testset "_fmaddsub is lane-exact x86 fmaddsub; _swap_pairs swaps pairs" begin
+    @testset "fmaddsub is lane-exact x86 fmaddsub; swap_pairs swaps pairs" begin
         rng = MersenneTwister(0xADD5)
         for R in (Float64, Float32), N in (2, 4, 8, 16), _ in 1:10
             x, y, c = (Vec{N, R}(ntuple(_ -> randn(rng, R), N)) for _ in 1:3)
             # One fused rounding per lane, with an exactly negated addend in even lanes.
-            @test Tuple(_QSF._fmaddsub(x, y, c)) ===
+            @test Tuple(_QSF.fmaddsub(x, y, c)) ===
                 ntuple(l -> isodd(l) ? fma(x[l], y[l], -c[l]) : fma(x[l], y[l], c[l]), N)
-            @test Tuple(_QSF._swap_pairs(x)) === ntuple(l -> isodd(l) ? x[l + 1] : x[l - 1], N)
+            @test Tuple(_QSF.swap_pairs(x)) === ntuple(l -> isodd(l) ? x[l + 1] : x[l - 1], N)
         end
         x = Vec{4, Float64}((0.0, -0.0, Inf, 1.0))
         y = Vec{4, Float64}((1.0, 1.0, 1.0, NaN))
         c = Vec{4, Float64}((0.0, 0.0, 1.0, 1.0))
         @test isequal(
-            Tuple(_QSF._fmaddsub(x, y, c)),
+            Tuple(_QSF.fmaddsub(x, y, c)),
             (fma(0.0, 1.0, -0.0), fma(-0.0, 1.0, 0.0), fma(Inf, 1.0, -1.0), fma(1.0, NaN, 1.0))
         )
     end
@@ -50,9 +50,9 @@ const _QSF = QuasiStrided
             b = Complex{R}(7, -2)
             c = Vec{2, R}((R(11), R(13)))
             br, bi = Vec{2, R}(real(b)), Vec{2, R}(imag(b))
-            right = _QSF._fmaddsub(a, br, _QSF._fmaddsub(_QSF._swap_pairs(a), bi, c))
+            right = _QSF.fmaddsub(a, br, _QSF.fmaddsub(_QSF.swap_pairs(a), bi, c))
             @test Complex(right[1], right[2]) == Complex{R}(11, 13) + Complex{R}(3, 5) * b
-            wrong = _QSF._fmaddsub(_QSF._swap_pairs(a), bi, _QSF._fmaddsub(a, br, c))
+            wrong = _QSF.fmaddsub(_QSF.swap_pairs(a), bi, _QSF.fmaddsub(a, br, c))
             @test wrong[1] == R(11) + R(5) * imag(b) - R(3) * real(b)
         end
     end

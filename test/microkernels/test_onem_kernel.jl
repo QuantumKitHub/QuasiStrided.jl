@@ -1,5 +1,5 @@
-using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEFormat,
-    PlanarFormat, complex_method, lanewidth, kernel_shapes,
+using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
+    complex_method, lanewidth, kernel_shapes,
     _kernel_from_shape, _default_method
 
 @testset "OneMKernel" begin
@@ -13,8 +13,8 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEForm
 
     @testset "construction" begin
         k = OneMKernel(Val(12), Val(8), ComplexF64, Val(8))
-        @test k.inner isa SIMDKernel{24, 8, Float64, 8}  # the real kernel, at 2MR rows
-        @test zero_accumulator(k) === zero_accumulator(k.inner)
+        @test QuasiStrided.inner(k) isa SIMDKernel{24, 8, Float64, 8}  # the real kernel, at 2MR rows
+        @test zero_accumulator(k) === zero_accumulator(QuasiStrided.inner(k))
         @test complex_method(k) === OneMMethod()
         @test lanewidth(OneMKernel(Val(8), Val(4), ComplexF32)) == 8
         # 2MR, not MR, must divide by W; W must be even even where 2MR divides.
@@ -23,9 +23,6 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod, OneEForm
         @test_throws ArgumentError OneMKernel(Val(8), Val(4), ComplexF64, Val(0))
         @test_throws ArgumentError OneMKernel(Val(8), Val(4), Float64)
         @test_throws ArgumentError OneMKernel(Val(8), Val(4), Float64, Val(4))
-        wrong = SIMDKernel(Val(12), Val(8), Float64, Val(4))
-        d = Descriptor(Val(12), Val(8), ComplexF64, OneEFormat(), PlanarFormat())
-        @test_throws ArgumentError OneMKernel{12, 8, ComplexF64, 8, typeof(wrong)}(d, wrong)
         # The error reports the logical k_block_length, not the doubled real one.
         err = try
             add_tile(k, zero_accumulator(k), Float64[], Float64[], -3)
