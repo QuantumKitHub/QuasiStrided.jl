@@ -16,8 +16,8 @@ TTFX when codegen is touched).
 | 1 | Hardware | `hardware/target.jl` | done |
 | 2 | Axis groups | `layout/axis_group.jl`, `pair_group.jl` | done |
 | 3 | Tiles | `layout/tiles.jl` | done |
-| 4 | Packing formats | `packing/format.jl`, `panel.jl` (`transposed.jl` → chunk 11) | in progress |
-| 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | |
+| 4 | Packing formats | `packing/format.jl`, `panel.jl` (`transposed.jl` → chunk 11) | done |
+| 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | done |
 | 6 | Kernel interface | `microkernels/interface.jl`, `scalar.jl` | |
 | 7 | SIMD kernels | `simd.jl`, `planar.jl` | |
 | 8 | Complex/mixed kernels | `onem.jl`, `fmaddsub.jl`, `mixed.jl` | |
@@ -113,12 +113,23 @@ a borrowed pointer. The pointer is kept because the nest holds a
 nested closures. One `Tile` type with `getindex`/`setindex!`/`size` replaces
 `QSTile`/`SourceTile`/`DestinationTile`/`tile_load`/`tile_store!`.
 
-### D8. Packing formats (chunk 4)
+### D8. Packing formats (chunk 4, applied)
 
 Panels are only `PackedPanel` (the oracle and tests too; the `AbstractVector`
 panel methods go); one `Descriptor` constructor plus a `RealDescriptor`
 alias; one `packed_a_offset(d, i, p, plane = 0)` (and B);
 `transposed.jl` merges into `panel.jl` and is reviewed with `pack_split.jl`.
+
+### D9. Packers (chunk 5, applied)
+
+A and B on the same footing: one `pack!(panel, tile, sliver_spec(kernel, i), transform)`
+with lanes along the tile's rows; B is packed as `transpose(tile)`. A kernel
+needing asymmetric packing gets it through its per-operand spec (format,
+extent), or overloads `pack!` for its own spec. Fast paths are symmetric, so
+real B with unit-stride columns takes the vector path (measured before
+keeping). One `emit!` per format taking the values to store; padding passes
+literal zeros. Vector-path predicates (`dense_lanes`, `is_unit_stride`,
+`complex_fastpath_isa_eligible`) live in pack_contiguous.jl.
 
 ## Possible improvements
 
@@ -135,8 +146,6 @@ alias; one `packed_a_offset(d, i, p, plane = 0)` (and B);
 - Detected `l1d.line` is unused: `_K_LINE_BYTES = 64` in `labels.jl` (K-order
   cost model) and `pack_split.jl`; thread the detected line size through
   planning (chunks 9/11).
-- `complex_fastpath_isa_eligible` is policy, not detection: move it next to
-  its consumers (chunks 5/7).
 - 16-argument `ContractPlan(...)` spelled out five times, `_PlanRequest`
   twice more: one "copy with fields replaced" helper (chunk 13/14).
 - `execute.jl` mixes public API, barrier/hint machinery, the C-panel path and
