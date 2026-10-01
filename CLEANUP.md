@@ -18,7 +18,7 @@ TTFX when codegen is touched).
 | 3 | Tiles | `layout/tiles.jl` | done |
 | 4 | Packing formats | `packing/format.jl`, `panel.jl` (`transposed.jl` → chunk 11) | done |
 | 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | done |
-| 6 | Kernel interface | `microkernels/interface.jl`, `scalar.jl` | |
+| 6 | Kernel interface | `microkernels/interface.jl`, `scalar.jl` | done |
 | 7 | SIMD kernels | `simd.jl`, `planar.jl` | |
 | 8 | Complex/mixed kernels | `onem.jl`, `fmaddsub.jl`, `mixed.jl` | |
 | 9 | Labels | `planning/labels.jl`, `conjugation.jl` | |
@@ -130,6 +130,17 @@ real B with unit-stride columns takes the vector path (measured before
 keeping). One `emit!` per format taking the values to store; padding passes
 literal zeros. Vector-path predicates (`dense_lanes`, `is_unit_stride`,
 `complex_fastpath_isa_eligible`) live in pack_contiguous.jl.
+
+### D10. Kernel interface (chunk 6, applied)
+
+`add_tile` (not an extension of `Base.accumulate`); `Microkernel` and
+`KernelMethod` replace `DescriptorKernel`/`ComplexMethod`; each method
+declares `pack_formats`, from which the reals per packed element follow. One
+`execute_tile!` and one `pack!`, whose per-tile storage check is a
+`@boundscheck` the nest skips with `@inbounds` (the macro block is span-checked;
+under `--check-bounds=yes`, as in the tests, the checks run). `ScalarKernel`
+uses a tuple accumulator (allocation-free) and branches on `beta` once per
+tile. The contract lives in docstrings.
 
 ## Possible improvements
 
