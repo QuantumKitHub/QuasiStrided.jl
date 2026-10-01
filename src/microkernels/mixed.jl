@@ -4,7 +4,7 @@
 #   * complex A x real B: interleaved A is a real `2MR x k_block_length`
 #     panel; the accumulator is 1m/fmaddsub's interleaved layout.
 #   * real A x complex B: interleaved B is a real `k_block_length x 2NR` panel;
-#     accumulator column `2j` holds the real and `2j+1` the imaginary part of
+#     accumulator column `2j-1` holds the real and `2j` the imaginary part of
 #     column `j`.
 
 using SIMD: Vec

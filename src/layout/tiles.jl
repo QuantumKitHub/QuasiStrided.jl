@@ -1,7 +1,7 @@
-# Tile axes and tiles. Addresses are zero-based (storage index = address + 1);
-# a tile's `base` is the address of its logical origin. A tile axis is the
-# vector of offsets of its rows or columns: an `AffineAxis`, or a `view` of an
-# offset buffer.
+# Tile axes and tiles. Addresses are zero-based (storage index = address + 1),
+# coordinates one-based; a tile's `base` is the address its offsets are
+# relative to. A tile axis is the vector of offsets of its rows or columns: an
+# `AffineAxis`, or a `view` of an offset buffer.
 
 # Offsets `base + (t - 1) * stride`. Not a `StepRange`: the stride may be zero.
 struct AffineAxis <: AbstractVector{Int}
@@ -28,9 +28,6 @@ function Base.extrema(ax::AffineAxis)
     last = Base.Checked.checked_add(ax.base, Base.Checked.checked_mul(ax.count - 1, ax.stride))
     return minmax(ax.base, last)
 end
-
-# Zero-based until coordinates become one-based.
-@inline axis_offset(ax::AbstractVector{Int}, t::Int) = @inbounds ax[t + 1]
 
 # An offset interval of one map: `regular` iff `buffer[t+1] == base + t*stride`
 # for all `t < count`; otherwise read the buffer (valid until it is refilled).
@@ -85,12 +82,11 @@ end
 
 Base.size(tile::Tile) = (length(tile.rows), length(tile.cols))
 
-# Zero-based until coordinates become one-based.
 Base.@propagate_inbounds Base.getindex(tile::Tile, i::Int, j::Int) =
-    tile.storage[tile.base + tile.rows[i + 1] + tile.cols[j + 1] + 1]
+    tile.storage[tile.base + tile.rows[i] + tile.cols[j] + 1]
 
 Base.@propagate_inbounds function Base.setindex!(tile::Tile, v, i::Int, j::Int)
-    tile.storage[tile.base + tile.rows[i + 1] + tile.cols[j + 1] + 1] = v
+    tile.storage[tile.base + tile.rows[i] + tile.cols[j] + 1] = v
     return tile
 end
 

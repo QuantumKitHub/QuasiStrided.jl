@@ -1,5 +1,5 @@
 # FMAddSub (interleaved-accumulator) complex microkernel. One accumulator plane
-# in 1m's layout (lanes `(2u, 2u+1)` are `(re, im)` of one complex row), updated
+# in 1m's layout (lanes `(2u-1, 2u)` are `(re, im)` of one complex row), updated
 # per (A-vector, B-column) pair by two chained x86 `vfmaddsub` ops:
 #
 #     acc = fmaddsub(a, br, fmaddsub(swap(a), bi, acc))
@@ -109,8 +109,8 @@ end
 
     av = [Symbol(:a, v) for v in 0:(MV - 1)]
     sv = [Symbol(:s, v) for v in 0:(MV - 1)]
-    brv = [Symbol(:br, j) for j in 0:(NR - 1)]
-    biv = [Symbol(:bi, j) for j in 0:(NR - 1)]
+    brv = [Symbol(:br, j) for j in 1:NR]
+    biv = [Symbol(:bi, j) for j in 1:NR]
 
     load_a = Any[]
     for v in 0:(MV - 1)
@@ -118,7 +118,7 @@ end
             load_a,
             :(
                 $(av[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 0, $(v * W), p)
+                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 0, $(v * W + 1), p)
                 )
             )
         )
@@ -126,19 +126,19 @@ end
     end
 
     load_b = Any[]
-    for j in 0:(NR - 1)
+    for j in 1:NR
         push!(load_b, :((br_s, bi_s) = _b_step_load2(packed_b, kernel, $j, p)))
-        push!(load_b, :($(brv[j + 1]) = Vec{$W, $R}(br_s)))
-        push!(load_b, :($(biv[j + 1]) = Vec{$W, $R}(bi_s)))
+        push!(load_b, :($(brv[j]) = Vec{$W, $R}(br_s)))
+        push!(load_b, :($(biv[j]) = Vec{$W, $R}(bi_s)))
     end
 
     acc_exprs = Vector{Any}(undef, NA)
-    for j in 0:(NR - 1), v in 0:(MV - 1)
-        idx = v + MV * j + 1
+    for j in 1:NR, v in 0:(MV - 1)
+        idx = v + MV * (j - 1) + 1
         acc_exprs[idx] = :(
             _fmaddsub(
-                $(av[v + 1]), $(brv[j + 1]),
-                _fmaddsub($(sv[v + 1]), $(biv[j + 1]), acc[$idx])
+                $(av[v + 1]), $(brv[j]),
+                _fmaddsub($(sv[v + 1]), $(biv[j]), acc[$idx])
             )
         )
     end
@@ -159,7 +159,7 @@ function Base.accumulate(
     ) where {MR, NR, T, W, R, NA, PA, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
-    @inbounds for p in 0:(k_block_length - 1)
+    @inbounds for p in 1:k_block_length
         acc = _accumulate_step_fmaddsub(kernel, acc, packed_a, packed_b, p)
     end
     return acc
@@ -212,10 +212,10 @@ end
     HW = W ÷ 2
 
     blocks = Any[]
-    for j in 0:(NR - 1)
+    for j in 1:NR
         vblocks = Any[]
         for v in 0:(MV - 1)
-            idx = v + MV * j + 1
+            idx = v + MV * (j - 1) + 1
             push!(
                 vblocks, quote
                     vec = acc[$idx]
@@ -224,12 +224,12 @@ end
                             sp, 2 * (colbase + $(v * HW)), vec, ar, ai, br, bi, beta
                         )
                     elseif $(v * HW) < m
-                        for u in 0:$(HW - 1)
+                        for u in 1:$HW
                             i = $(v * HW) + u
-                            i < m || break
+                            i <= m || break
                             _axpby_at!(
-                                storage, colbase + i + 1, alpha,
-                                Complex(vec[2 * u + 1], vec[2 * u + 2]), beta
+                                storage, colbase + i, alpha,
+                                Complex(vec[2 * u - 1], vec[2 * u]), beta
                             )
                         end
                     end
@@ -238,8 +238,8 @@ end
         end
         push!(
             blocks, quote
-                if $j < n
-                    colbase = rowbase0 + axis_offset(cols, $j)  # zero-based (0, j)
+                if $j <= n
+                    colbase = rowbase0 + cols[$j]  # the address of (1, j)
                     $(vblocks...)
                 end
             end
@@ -249,7 +249,7 @@ end
     return quote
         storage = destination.storage
         cols = destination.cols
-        rowbase0 = destination.base + axis_offset(destination.rows, 0)
+        rowbase0 = @inbounds destination.base + destination.rows[1]
         ar = Vec{$W, $R}(real(alpha))
         ai = Vec{$W, $R}(imag(alpha))
         br = Vec{$W, $R}(real(beta))

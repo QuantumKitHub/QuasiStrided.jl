@@ -35,9 +35,9 @@ end
     GC.@preserve storage begin
         sp = pointer(storage)
         dp = packed.ptr
-        for p in 0:(k_block_length - 1)
-            v = vload(Vec{MR, S}, sp + sizeof(S) * (rowbase + axis_offset(cols, p)))
-            vstore(convert(Vec{MR, T}, v), dp + sizeof(T) * (MR * p))
+        for p in 1:k_block_length
+            v = vload(Vec{MR, S}, sp + sizeof(S) * (rowbase + (@inbounds cols[p])))
+            vstore(convert(Vec{MR, T}, v), dp + sizeof(T) * (MR * (p - 1)))
         end
     end
     return packed
@@ -107,7 +107,7 @@ end
 _single_region_shuffle(::PlanarFormat) = _planar_pack_shuffle
 _single_region_shuffle(::InterleavedFormat) = _onee_pack_shuffle_a
 
-# Lane `t` of K step `p` is element `elembase + axis_offset(steps, p) + t`;
+# Lane `t` of K step `p` is element `elembase + steps[p] + (t - 1)`;
 # only the lane axis must be unit-stride, `steps` may be scattered. Pinning
 # `Complex{RS}` in the signature keeps the bitcast to `RS` lanes sound; the
 # lanes convert to `R` before the shuffle.
@@ -120,14 +120,14 @@ _single_region_shuffle(::InterleavedFormat) = _onee_pack_shuffle_a
     GC.@preserve storage begin
         sp = reinterpret(Ptr{RS}, pointer(storage))
         dp = packed.ptr
-        for p in 0:(k_block_length - 1)
+        for p in 1:k_block_length
             src = convert(
                 Vec{2 * PD, R},
-                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + axis_offset(steps, p))))
+                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + (@inbounds steps[p]))))
             )
             vstore(
                 shuffle(src, _pack_alt(src, transform), Val(PD)),
-                dp + sizeof(R) * (2 * PD * p)
+                dp + sizeof(R) * (2 * PD * (p - 1))
             )
         end
     end
@@ -141,12 +141,12 @@ end
     GC.@preserve storage begin
         sp = reinterpret(Ptr{RS}, pointer(storage))
         dp = packed.ptr
-        for p in 0:(k_block_length - 1)
+        for p in 1:k_block_length
             src = convert(
                 Vec{2 * PD, R},
-                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + axis_offset(steps, p))))
+                vload(Vec{2 * PD, RS}, sp + sizeof(RS) * (2 * (elembase + (@inbounds steps[p]))))
             )
-            at = 4 * PD * p
+            at = 4 * PD * (p - 1)
             vstore(
                 _onee_pack_shuffle_a(src, _pack_alt(src, transform), Val(PD)),
                 dp + sizeof(R) * at

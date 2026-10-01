@@ -5,11 +5,11 @@
 # (N, K) block, which at small M costs as much as the kernel itself.
 
 # Stands in for a packed B micro-panel of `NR` columns: column `j`, K step
-# `p` is storage address `colbase[j+1] + axis_offset(ksteps, p)` (base
-# included). Padding columns of a tail sliver alias the last valid column, so
-# every address read is inside the hoisted B check; their results are never
-# stored. `length` is the packed-equivalent count that
-# `_execute_tile_prologue!` checks, not the storage length.
+# `p` is storage address `colbase[j] + ksteps[p]` (base included). Padding
+# columns of a tail sliver alias the last valid column, so every address read
+# is inside the hoisted B check; their results are never stored. `length` is
+# the packed-equivalent count that `_execute_tile_prologue!` checks, not the
+# storage length.
 struct UnpackedBView{S, K <: AbstractVector{Int}, NR, F}
     storage::S
     colbase::NTuple{NR, Int}
@@ -22,7 +22,7 @@ Base.length(u::UnpackedBView) = u.per_k * length(u.ksteps)
 
 # `@inbounds`: the caller has checked the whole B panel region.
 @inline function _unpacked_b_element(u::UnpackedBView{S, K, NR, F}, j::Int, p::Int) where {S, K, NR, F}
-    @inbounds z = u.storage[u.colbase[j + 1] + axis_offset(u.ksteps, p) + 1]
+    @inbounds z = u.storage[u.colbase[j] + u.ksteps[p] + 1]
     return u.transform(z)
 end
 

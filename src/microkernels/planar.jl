@@ -66,8 +66,8 @@ end
     arv = [Symbol(:ar, v) for v in 0:(MV - 1)]
     aiv = [Symbol(:ai, v) for v in 0:(MV - 1)]
     naiv = [Symbol(:nai, v) for v in 0:(MV - 1)]
-    brv = [Symbol(:br, j) for j in 0:(NR - 1)]
-    biv = [Symbol(:bi, j) for j in 0:(NR - 1)]
+    brv = [Symbol(:br, j) for j in 1:NR]
+    biv = [Symbol(:bi, j) for j in 1:NR]
 
     load_a = Any[]
     for v in 0:(MV - 1)
@@ -75,7 +75,7 @@ end
             load_a,
             :(
                 $(arv[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 0, $(v * W), p)
+                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 0, $(v * W + 1), p)
                 )
             )
         )
@@ -83,7 +83,7 @@ end
             load_a,
             :(
                 $(aiv[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 1, $(v * W), p)
+                    Vec{$W, $R}, packed_a, packed_a_plane_offset(kernel, 1, $(v * W + 1), p)
                 )
             )
         )
@@ -91,23 +91,23 @@ end
     end
 
     load_b = Any[]
-    for j in 0:(NR - 1)
-        push!(load_b, :(($(brv[j + 1]), $(biv[j + 1])) = _b_step_load2(packed_b, kernel, $j, p)))
+    for j in 1:NR
+        push!(load_b, :(($(brv[j]), $(biv[j])) = _b_step_load2(packed_b, kernel, $j, p)))
     end
 
     acc_exprs = Vector{Any}(undef, NA)
-    for j in 0:(NR - 1), v in 0:(MV - 1)
-        idx = v + MV * j + 1
+    for j in 1:NR, v in 0:(MV - 1)
+        idx = v + MV * (j - 1) + 1
         acc_exprs[idx] = :(  # re: ar*br - ai*bi
             muladd(
-                $(naiv[v + 1]), $(biv[j + 1]),
-                muladd($(arv[v + 1]), $(brv[j + 1]), acc[$idx])
+                $(naiv[v + 1]), $(biv[j]),
+                muladd($(arv[v + 1]), $(brv[j]), acc[$idx])
             )
         )
         acc_exprs[NV + idx] = :(  # im: ar*bi + ai*br
             muladd(
-                $(aiv[v + 1]), $(brv[j + 1]),
-                muladd($(arv[v + 1]), $(biv[j + 1]), acc[$(NV + idx)])
+                $(aiv[v + 1]), $(brv[j]),
+                muladd($(arv[v + 1]), $(biv[j]), acc[$(NV + idx)])
             )
         )
     end
@@ -128,18 +128,19 @@ function Base.accumulate(
     ) where {MR, NR, T, W, R, NA, PA, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
-    @inbounds for p in 0:(k_block_length - 1)
+    @inbounds for p in 1:k_block_length
         acc = _accumulate_step_planar(kernel, acc, packed_a, packed_b, p)
     end
     return acc
 end
 
-# Generator-time accumulator indices of the re/im vectors of block `v`, column
-# `j`: planar's two planes, or `RealComplexKernel`'s column pairs. A `<:` test
-# rather than dispatch, as `RealComplexKernel` is defined after this file.
+# Generator-time accumulator indices of the re/im vectors of block `v`
+# (zero-based), column `j`: planar's two planes, or `RealComplexKernel`'s
+# column pairs. A `<:` test rather than dispatch, as `RealComplexKernel` is
+# defined after this file.
 function _planar_acc_index(kernel::Type, MV::Int, NR::Int, v::Int, j::Int)
-    kernel <: PlanarKernel && return (v + MV * j + 1, MV * NR + v + MV * j + 1)
-    kernel <: RealComplexKernel && return (v + MV * 2j + 1, v + MV * (2j + 1) + 1)
+    kernel <: PlanarKernel && return (v + MV * (j - 1) + 1, MV * NR + v + MV * (j - 1) + 1)
+    kernel <: RealComplexKernel && return (v + MV * (2j - 2) + 1, v + MV * (2j - 1) + 1)
     throw(ArgumentError("_planar_acc_index: no planar accumulator layout for $kernel"))
 end
 
@@ -154,16 +155,16 @@ end
     _check_acc(:_store_tile_planar!, R, T, NA, 2NV)
 
     blocks = Any[]
-    for j in 0:(NR - 1), v in 0:(MV - 1)
+    for j in 1:NR, v in 0:(MV - 1)
         ire, iim = _planar_acc_index(kernel, MV, NR, v, j)
         push!(
             blocks, quote
-                if $j < n
+                if $j <= n
                     revec = acc[$ire]
                     imvec = acc[$iim]
                     for lane in 1:$W
-                        i = $(v * W) + lane - 1
-                        i < m || break
+                        i = $(v * W) + lane
+                        i <= m || break
                         _axpby_tile!(
                             destination, i, $j, alpha,
                             Complex(revec[lane], imvec[lane]), beta
@@ -255,7 +256,7 @@ end
     _check_acc(:_store_tile_planar_vector!, R, T, NA, 2NV)
 
     blocks = Any[]
-    for j in 0:(NR - 1)
+    for j in 1:NR
         vblocks = Any[]
         for v in 0:(MV - 1)
             ire, iim = _planar_acc_index(kernel, MV, NR, v, j)
@@ -270,10 +271,10 @@ end
                         )
                     elseif $(v * W) < m
                         for lane in 1:$W
-                            i = $(v * W) + lane - 1
-                            i < m || break
+                            i = $(v * W) + lane
+                            i <= m || break
                             _axpby_at!(
-                                storage, colbase + i + 1, alpha,
+                                storage, colbase + i, alpha,
                                 Complex(revec[lane], imvec[lane]), beta
                             )
                         end
@@ -283,8 +284,8 @@ end
         end
         push!(
             blocks, quote
-                if $j < n
-                    colbase = rowbase0 + axis_offset(cols, $j)  # zero-based (0, j)
+                if $j <= n
+                    colbase = rowbase0 + cols[$j]  # the address of (1, j)
                     $(vblocks...)
                 end
             end
@@ -295,7 +296,7 @@ end
         Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
-        rowbase0 = destination.base + axis_offset(destination.rows, 0)
+        rowbase0 = @inbounds destination.base + destination.rows[1]
         ar = Vec{$W, $R}(real(alpha))
         ai = Vec{$W, $R}(imag(alpha))
         br = Vec{$W, $R}(real(beta))

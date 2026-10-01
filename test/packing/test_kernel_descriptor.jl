@@ -4,8 +4,8 @@ using QuasiStrided: ComplexKernelDescriptor, RealFormat, PlanarFormat, OneEForma
 @testset "KernelDescriptor" begin
     k = KernelDescriptor(Val(8), Val(6), Float64)
     @test (tile_size(k)..., scalartype(k), realtype(k)) == (8, 6, Float64, Float64)
-    @test packed_a_offset(k, 3, 2) == 3 + 8 * 2
-    @test packed_b_offset(k, 5, 2) == 5 + 6 * 2
+    @test packed_a_offset(k, 4, 3) == 3 + 8 * 2
+    @test packed_b_offset(k, 6, 3) == 5 + 6 * 2
     @test packed_a_length(k, 0) == 0
     @test packed_a_length(k, 4) == 32
     @test packed_b_length(k, 4) == 24

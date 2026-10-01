@@ -31,7 +31,8 @@ SIMDKernel(::Val{MR}, ::Val{NR}, ::Type{T}) where {MR, NR, T} =
 
 lanewidth(::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W} = W
 
-# `(MR÷W)*NR` vectors; vector `v` of column `j` is at `v + (MR÷W)*j + 1`.
+# `(MR÷W)*NR` vectors; vector `v` (zero-based) of column `j` is at
+# `v + (MR÷W)*(j - 1) + 1`.
 function zero_accumulator(kernel::SIMDKernel{MR, NR, T, W}) where {MR, NR, T, W}
     z = zero(Vec{W, T})
     return ntuple(_ -> z, Val((MR ÷ W) * NR))
@@ -50,21 +51,21 @@ end
     _check_acc(:_accumulate_step, T, T, NV, NVECA * NR)
 
     avars = [Symbol(:a, v) for v in 0:(NVECA - 1)]
-    bvars = [Symbol(:b, j) for j in 0:(NR - 1)]
+    bvars = [Symbol(:b, j) for j in 1:NR]
 
     load_a = [
-        :($(avars[v + 1]) = panel_vload(Vec{$W, $T}, packed_a, packed_a_offset(kernel, $(v * W), p)))
+        :($(avars[v + 1]) = panel_vload(Vec{$W, $T}, packed_a, packed_a_offset(kernel, $(v * W + 1), p)))
             for v in 0:(NVECA - 1)
     ]
     load_b = [
-        :($(bvars[j + 1]) = _b_step_load(packed_b, kernel, $j, p))
-            for j in 0:(NR - 1)
+        :($(bvars[j]) = _b_step_load(packed_b, kernel, $j, p))
+            for j in 1:NR
     ]
 
     acc_exprs = Vector{Any}(undef, NV)
-    for j in 0:(NR - 1), v in 0:(NVECA - 1)
-        idx = v + NVECA * j + 1
-        acc_exprs[idx] = :(muladd($(avars[v + 1]), $(bvars[j + 1]), acc[$idx]))
+    for j in 1:NR, v in 0:(NVECA - 1)
+        idx = v + NVECA * (j - 1) + 1
+        acc_exprs[idx] = :(muladd($(avars[v + 1]), $(bvars[j]), acc[$idx]))
     end
 
     return quote
@@ -83,7 +84,7 @@ end
     ) where {MR, NR, T, W, NV, PA, PB}
     k_block_length == 0 && return acc
     k_block_length > 0 || _throw_negative_k_block_length(:accumulate, k_block_length)
-    @inbounds for p in 0:(k_block_length - 1)
+    @inbounds for p in 1:k_block_length
         acc = _accumulate_step(kernel, acc, packed_a, packed_b, p)
     end
     return acc
@@ -102,15 +103,15 @@ end
     ) where {MR, NR, T, W, NV}
     NVECA = MR ÷ W
     blocks = Any[]
-    for j in 0:(NR - 1), v in 0:(NVECA - 1)
-        idx = v + NVECA * j + 1
+    for j in 1:NR, v in 0:(NVECA - 1)
+        idx = v + NVECA * (j - 1) + 1
         push!(
             blocks, quote
-                if $j < n
+                if $j <= n
                     vec = acc[$idx]
                     for lane in 1:$W
-                        i = $(v * W) + lane - 1
-                        i < m || break
+                        i = $(v * W) + lane
+                        i <= m || break
                         _axpby_tile!(destination, i, $j, alpha, vec[lane], beta)
                     end
                 end
@@ -137,10 +138,10 @@ end
     RC = eltype(S)
     old = :(convert(Vec{$W, $T}, vload(Vec{$W, $RC}, storage, at)))
     blocks = Any[]
-    for j in 0:(NR - 1)
+    for j in 1:NR
         vblocks = Any[]
         for v in 0:(NVECA - 1)
-            idx = v + NVECA * j + 1
+            idx = v + NVECA * (j - 1) + 1
             push!(
                 vblocks, quote
                     vec = acc[$idx]
@@ -157,9 +158,9 @@ end
                         )
                     elseif $(v * W) < m
                         for lane in 1:$W
-                            i = $(v * W) + lane - 1
-                            i < m || break
-                            _axpby_at!(storage, colbase + i + 1, alpha, vec[lane], beta)
+                            i = $(v * W) + lane
+                            i <= m || break
+                            _axpby_at!(storage, colbase + i, alpha, vec[lane], beta)
                         end
                     end
                 end
@@ -167,8 +168,8 @@ end
         end
         push!(
             blocks, quote
-                if $j < n
-                    colbase = rowbase0 + axis_offset(cols, $j)  # zero-based (0, j)
+                if $j <= n
+                    colbase = rowbase0 + cols[$j]  # the address of (1, j)
                     $(vblocks...)
                 end
             end
@@ -178,7 +179,7 @@ end
         Base.@_inline_meta
         storage = destination.storage
         cols = destination.cols
-        rowbase0 = destination.base + axis_offset(destination.rows, 0)
+        rowbase0 = @inbounds destination.base + destination.rows[1]
         @inbounds begin
             $(blocks...)
         end

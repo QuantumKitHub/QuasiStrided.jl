@@ -2,7 +2,7 @@
 # `2*k_block_length` real K steps against 1e-packed A and planar B. At logical K
 # step `p`, `OneEFormat` A holds `(re_0, im_0, re_1, im_1, ...)` then `(-im_0,
 # re_0, -im_1, re_1, ...)`, and planar B `re_0..` then `im_0..`, so accumulator
-# real row `2i` is the real and `2i+1` the imaginary part of complex row `i`.
+# real row `2i-1` is the real and `2i` the imaginary part of complex row `i`.
 # There is deliberately no FMA loop here: 1m reuses the real kernel body
 # verbatim.
 
@@ -62,8 +62,9 @@ function Base.accumulate(
 end
 
 # Scalar store for an interleaved accumulator (1m and fmaddsub): with `W` even
-# and `2MR` a multiple of `W`, complex row `i = v*(W÷2) + u` is lanes `2u+1`
-# (re) and `2u+2` (im) of vector `v` -- never split across two vectors.
+# and `2MR` a multiple of `W`, complex row `i = v*(W÷2) + u` is lanes `2u-1`
+# (re) and `2u` (im) of vector `v` (zero-based) -- never split across two
+# vectors.
 @generated function _store_tile_lanepair!(
         destination::Tile, acc::NTuple{NV, Vec{W, R}},
         alpha::T, beta::T, kernel::DescriptorKernel{MR, NR, T},
@@ -75,18 +76,18 @@ end
     HW = W ÷ 2
 
     blocks = Any[]
-    for j in 0:(NR - 1), v in 0:(MV - 1)
-        idx = v + MV * j + 1
+    for j in 1:NR, v in 0:(MV - 1)
+        idx = v + MV * (j - 1) + 1
         push!(
             blocks, quote
-                if $j < n
+                if $j <= n
                     vec = acc[$idx]
-                    for u in 0:$(HW - 1)
+                    for u in 1:$HW
                         i = $(v * HW) + u
-                        i < m || break
+                        i <= m || break
                         _axpby_tile!(
                             destination, i, $j, alpha,
-                            Complex(vec[2 * u + 1], vec[2 * u + 2]), beta
+                            Complex(vec[2 * u - 1], vec[2 * u]), beta
                         )
                     end
                 end

@@ -1,10 +1,12 @@
 # The contract between packing and the microkernels: the packed-panel formats
 # and the descriptor fixing a kernel's register tile, element type and panel
-# formats. Complex panels are "N planes of real(T)"; every format is addressed by
+# formats. Complex panels are "N planes of real(T)"; every format puts lane `i`
+# of plane `plane` at K step `p` (one-based `i`, `p`) at zero-based offset
 #
-#     p * MR * reals_per_element  +  plane * MR  +  i
+#     (p - 1) * MR * reals_per_element  +  plane * MR  +  (i - 1)
 #
-# which at RealFormat (one real per element, plane 0) reduces to `i + MR*p`.
+# which at RealFormat (one real per element, plane 0) reduces to
+# `(i - 1) + MR * (p - 1)`.
 
 abstract type PackFormat end
 
@@ -87,13 +89,14 @@ sliver_width(k, i::Int) = sliver_width(k)[i]
 packed_a_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 1) * k_block_length
 packed_b_length(d::Descriptor, k_block_length::Int) = sliver_width(d, 2) * k_block_length
 
-# Zero-based offsets, in reals. For 1e and interleaved, `i`/`j` runs over reals
-# (0:2MR-1) and 1e's second region is `plane == 2`.
+# Zero-based offsets, in reals, of one-based coordinates. For 1e and
+# interleaved, `i`/`j` runs over reals (1:2MR) and 1e's second region is
+# `plane == 2`.
 @inline packed_a_plane_offset(d::Descriptor{MR}, plane::Int, i::Int, p::Int) where {MR} =
-    p * sliver_width(d, 1) + plane * MR + i
+    (p - 1) * sliver_width(d, 1) + plane * MR + (i - 1)
 @inline packed_b_plane_offset(d::Descriptor{MR, NR}, plane::Int, j::Int, p::Int) where {MR, NR} =
-    p * sliver_width(d, 2) + plane * NR + j
+    (p - 1) * sliver_width(d, 2) + plane * NR + (j - 1)
 
 # Real descriptors only: a complex element has no single offset.
-packed_a_offset(kernel::KernelDescriptor{MR}, i::Int, p::Int) where {MR} = i + MR * p
-packed_b_offset(kernel::KernelDescriptor{MR, NR}, j::Int, p::Int) where {MR, NR} = j + NR * p
+packed_a_offset(kernel::KernelDescriptor{MR}, i::Int, p::Int) where {MR} = (i - 1) + MR * (p - 1)
+packed_b_offset(kernel::KernelDescriptor{MR, NR}, j::Int, p::Int) where {MR, NR} = (j - 1) + NR * (p - 1)

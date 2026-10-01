@@ -18,7 +18,7 @@ using QuasiStrided: PlanarKernel, PlanarMethod, complex_method, lanewidth,
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), ComplexF64, Val(0))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), Float64)
     # A complex kernel is never asked for a single-plane offset.
-    @test_throws MethodError QuasiStrided.packed_a_offset(k, 0, 0)
+    @test_throws MethodError QuasiStrided.packed_a_offset(k, 1, 1)
 
     mk_e2e(ComplexF64, nothing)
 end

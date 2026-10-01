@@ -18,13 +18,13 @@ end
         storage = zeros(200)
         t = Tile(storage, 50, rows, cols)
         @test size(t) == (4, 3)
-        for i in 0:3, j in 0:2
-            addr = 50 + rows[i + 1] + cols[j + 1]
+        for i in 1:4, j in 1:3
+            addr = 50 + rows[i] + cols[j]
             t[i, j] = 1000.0i + j
             @test storage[addr + 1] == t[i, j] == 1000.0i + j
         end
     end
-    @test_throws BoundsError Tile(zeros(3), 0, AffineAxis(0, 1, 2), AffineAxis(0, 2, 2))[1, 1]
+    @test_throws BoundsError Tile(zeros(3), 0, AffineAxis(0, 1, 2), AffineAxis(0, 2, 2))[2, 2]
 end
 
 @testset "storage bounds: offset ranges and span checks" begin

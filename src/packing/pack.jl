@@ -97,13 +97,13 @@ end
     ) where {FMT, V, MR, NR, T2, F}
     if format isa RealFormat
         if _pack_a_contiguous_eligible(packed, source, transform, m, Val(MR), real(T2))
-            rowbase = source.base + axis_offset(source.rows, 0)
+            rowbase = @inbounds source.base + source.rows[1]
             return _pack_a_contiguous!(packed, source.storage, rowbase, source.cols, Val(MR), k_block_length)
         end
     elseif _pack_complex_contiguous_eligible(
             packed, source.storage, source.rows, transform, format, m, Val(MR), T2
         )
-        elembase = source.base + axis_offset(source.rows, 0)
+        elembase = @inbounds source.base + source.rows[1]
         return _pack_complex_contiguous!(
             format, packed, source.storage, elembase, source.cols, Val(MR), k_block_length, transform
         )
@@ -120,7 +120,7 @@ end
     if _pack_complex_contiguous_eligible(
             packed, source.storage, source.cols, transform, format, n, Val(NR), T2
         )
-        elembase = source.base + axis_offset(source.cols, 0)
+        elembase = @inbounds source.base + source.cols[1]
         return _pack_complex_contiguous!(
             format, packed, source.storage, elembase, source.rows, Val(NR), k_block_length, transform
         )
@@ -145,19 +145,19 @@ end
         transform::F, load::L, plane_offset::P
     ) where {V, T, FMT <: PackFormat, PD, F, L, P}
     if valid == PD
-        @inbounds for p in 0:(k_block_length - 1)
-            for t in 0:(PD - 1)
+        @inbounds for p in 1:k_block_length
+            for t in 1:PD
                 z = convert(T, transform(load(t, p)))::T
                 _pack_emit!(packed, format, plane_offset, t, p, z)
             end
         end
     else
-        @inbounds for p in 0:(k_block_length - 1)
-            for t in 0:(valid - 1)
+        @inbounds for p in 1:k_block_length
+            for t in 1:valid
                 z = convert(T, transform(load(t, p)))::T
                 _pack_emit!(packed, format, plane_offset, t, p, z)
             end
-            for t in valid:(PD - 1)
+            for t in (valid + 1):PD
                 _pack_emit_zero!(packed, format, plane_offset, t, p, real(T))
             end
         end
@@ -186,8 +186,8 @@ end
 @inline function _pack_emit!(
         packed::V, ::InterleavedFormat, plane_offset::P, t::Int, p::Int, z::T
     ) where {V, P, T}
-    panel_store!(packed, plane_offset(0, 2 * t, p), real(z))
-    panel_store!(packed, plane_offset(0, 2 * t + 1, p), imag(z))
+    panel_store!(packed, plane_offset(0, 2 * t - 1, p), real(z))
+    panel_store!(packed, plane_offset(0, 2 * t, p), imag(z))
     return nothing
 end
 
@@ -196,10 +196,10 @@ end
     ) where {V, P, T}
     re = real(z)
     im = imag(z)
-    panel_store!(packed, plane_offset(0, 2 * t, p), re)
-    panel_store!(packed, plane_offset(0, 2 * t + 1, p), im)
-    panel_store!(packed, plane_offset(2, 2 * t, p), -im)
-    panel_store!(packed, plane_offset(2, 2 * t + 1, p), re)
+    panel_store!(packed, plane_offset(0, 2 * t - 1, p), re)
+    panel_store!(packed, plane_offset(0, 2 * t, p), im)
+    panel_store!(packed, plane_offset(2, 2 * t - 1, p), -im)
+    panel_store!(packed, plane_offset(2, 2 * t, p), re)
     return nothing
 end
 
@@ -223,17 +223,17 @@ end
 @inline function _pack_emit_zero!(
         packed::V, ::InterleavedFormat, plane_offset::P, t::Int, p::Int, ::Type{R}
     ) where {V, P, R}
+    panel_store!(packed, plane_offset(0, 2 * t - 1, p), zero(R))
     panel_store!(packed, plane_offset(0, 2 * t, p), zero(R))
-    panel_store!(packed, plane_offset(0, 2 * t + 1, p), zero(R))
     return nothing
 end
 
 @inline function _pack_emit_zero!(
         packed::V, ::OneEFormat, plane_offset::P, t::Int, p::Int, ::Type{R}
     ) where {V, P, R}
+    panel_store!(packed, plane_offset(0, 2 * t - 1, p), zero(R))
     panel_store!(packed, plane_offset(0, 2 * t, p), zero(R))
-    panel_store!(packed, plane_offset(0, 2 * t + 1, p), zero(R))
+    panel_store!(packed, plane_offset(2, 2 * t - 1, p), zero(R))
     panel_store!(packed, plane_offset(2, 2 * t, p), zero(R))
-    panel_store!(packed, plane_offset(2, 2 * t + 1, p), zero(R))
     return nothing
 end

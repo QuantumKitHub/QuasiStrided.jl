@@ -18,15 +18,15 @@
         plane_offset, format, buffer, descriptor, Val(R), Rp * k_block_length, transform(storage[kbase + fbuf[i + 1]]), i, p
     )
     if split.kinner
-        for g0 in 0:G:(fcount - 1), y1 in 0:(E - 1), p in 0:(k_block_length - 1)
-            kbase = base + axis_offset(kaxis, p) + 1
+        for g0 in 0:G:(fcount - 1), y1 in 0:(E - 1), p in 1:k_block_length
+            kbase = @inbounds base + kaxis[p] + 1
             for y2 in 0:(L - 1)
                 emit(kbase, g0 + y1 + E * y2, p)
             end
         end
     else
-        for g0 in 0:G:(fcount - 1), p in 0:(k_block_length - 1)
-            kbase = base + axis_offset(kaxis, p) + 1
+        for g0 in 0:G:(fcount - 1), p in 1:k_block_length
+            kbase = @inbounds base + kaxis[p] + 1
             for y1 in 0:(E - 1), y2 in 0:(L - 1)
                 emit(kbase, g0 + y1 + E * y2, p)
             end
@@ -36,19 +36,20 @@
     if valid != 0
         rb = (fcount ÷ R) * Rp * k_block_length
         pad = (plane, idx, pp) -> rb + plane_offset(descriptor, plane, idx, pp)
-        for p in 0:(k_block_length - 1), t in valid:(R - 1)
+        for p in 1:k_block_length, t in (valid + 1):R
             _pack_emit_zero!(buffer, format, pad, t, p, realtype(descriptor))
         end
     end
     return nothing
 end
 
-# Element `x` of block coordinate `i` (sliver `i ÷ R`, lane `i % R`) at K step `p`.
+# Element `x` of zero-based block coordinate `i` (sliver `i ÷ R`, lane
+# `i % R + 1`) at K step `p`.
 @inline function _pack_line_element!(
         plane_offset::PO, format::FMT, buffer::PK, descriptor::DS, ::Val{R}, panel::Int, x, i::Int, p::Int
     ) where {PO, FMT, PK, DS, R}
     r, t = divrem(i, R)
     po = (plane, idx, pp) -> r * panel + plane_offset(descriptor, plane, idx, pp)
-    _pack_emit!(buffer, format, po, t, p, convert(_element_type(format, scalartype(descriptor)), x))
+    _pack_emit!(buffer, format, po, t + 1, p, convert(_element_type(format, scalartype(descriptor)), x))
     return nothing
 end

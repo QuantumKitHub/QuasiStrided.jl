@@ -119,11 +119,11 @@ function scale_tile!(destination::Tile, beta::T) where {T}
     if isone(beta)
         return destination
     elseif iszero(beta)
-        @inbounds for j in 0:(n - 1), i in 0:(m - 1)
+        @inbounds for j in 1:n, i in 1:m
             destination[i, j] = zero(T)
         end
     else
-        @inbounds for j in 0:(n - 1), i in 0:(m - 1)
+        @inbounds for j in 1:n, i in 1:m
             destination[i, j] = convert(T, destination[i, j]) * beta
         end
     end
