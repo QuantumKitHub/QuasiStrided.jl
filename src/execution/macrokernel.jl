@@ -1,26 +1,19 @@
 # Macro-kernel helpers for the five-loop nest: function barriers over the
 # tile axis types, packed-sliver addressing, and sliver classification.
 
-# The axis `d` describes: an `AffineAxis` when regular, else a `view` of its
-# offsets in `buffer`.
+# The axis `d` describes. GUARDRAIL: a `Union{AffineAxis, ScatterAxis}` of
+# `isbits` types, never boxed; each consumer below binds each axis type as its
+# own parameter, so it builds a concretely typed `Tile`.
 @inline _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int) =
-    d.regular ? AffineAxis(d.base, d.stride, d.count) : view(buffer, (first + 1):(first + d.count))
+    d.regular ? AffineAxis(d.base, d.stride, d.count) : ScatterAxis(pointer(buffer, first + 1), d.count)
 
-# GUARDRAIL: `f(_axis_of(d, buffer, first))` with each axis type in its own
-# branch, which the nest uses instead of `_axis_of`: a `Union` holding a `view`
-# (not `isbits`) is heap-boxed. Each consumer below binds each axis type as its
-# own parameter, so it builds a concretely typed `Tile`. `Val(true)`: a ramp
-# map, whose descriptors are always regular (checked), so only the affine
-# branch is compiled.
-@inline function _with_axis(
-        f::F, d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{AFF} = Val(false)
-    ) where {F, AFF}
-    if AFF
-        d.regular || _throw_irregular_ramp_descriptor()
-    elseif !d.regular
-        return f(view(buffer, (first + 1):(first + d.count)))
-    end
-    return f(AffineAxis(d.base, d.stride, d.count))
+# The same with the axis type fixed by the path: `Val(true)` for a ramp map,
+# whose descriptors are always regular (checked).
+@inline _axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{false}) =
+    _axis_of(d, buffer, first)
+@inline function _axis_of(d::BlockDescriptor, ::Vector{Int}, ::Int, ::Val{true})
+    d.regular || _throw_irregular_ramp_descriptor()
+    return AffineAxis(d.base, d.stride, d.count)
 end
 @noinline _throw_irregular_ramp_descriptor() =
     throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))

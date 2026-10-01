@@ -171,8 +171,7 @@ end
         buf = [rand(-30:30) for _ in 1:n]
         rand() < 0.4 && (buf = [3 + 5 * (t - 1) for t in 1:n])   # force a regular run
         d = describe_block(buf, 0, n)
-        ax = QS._axis_of(d, buf, 0)
-        @test QS.descriptor_offset_range(d, buf, 0) == extrema(ax)
+        GC.@preserve buf @test QS.descriptor_offset_range(d, buf, 0) == extrema(QS._axis_of(d, buf, 0))
     end
     @test QS.descriptor_offset_range(BlockDescriptor(0, 0, 0, true), Int[], 0) == (0, -1)
 end

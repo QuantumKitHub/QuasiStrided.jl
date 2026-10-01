@@ -14,11 +14,9 @@ function _scale_all_of_C!(plan, betaT::T, m_tile::Int, n_tile::Int, m_length::In
         while n_tile_start < n_length
             n_tile_length = min(n_tile, n_length - n_tile_start)
             (_, dN_C) = block_descriptors!(n_bufs, plan.ngroup, n_tile_start, n_tile_length)
-            _with_axis(dM_C, ws.tile_m_buf_C, 0) do rowsC
-                _with_axis(dN_C, ws.tile_n_buf_C, 0) do colsC
-                    _scale_micro_tile!(plan.Cstorage, plan.Cbase, rowsC, colsC, betaT)
-                end
-            end
+            rowsC = _axis_of(dM_C, ws.tile_m_buf_C, 0)
+            colsC = _axis_of(dN_C, ws.tile_n_buf_C, 0)
+            GC.@preserve ws _scale_micro_tile!(plan.Cstorage, plan.Cbase, rowsC, colsC, betaT)
             n_tile_start += n_tile_length
         end
         m_tile_start += m_tile_length
@@ -200,7 +198,7 @@ function _execute_path!(
     ) where {T}
     kernel = plan.kernel
     ws = plan.workspace
-    # Packed panels borrow pointers into `ws`.
+    # Packed panels and scatter axes borrow pointers into `ws`.
     GC.@preserve ws begin
         _execute_nest!(
             plan, ws, kernel, tile_size(kernel)...,
@@ -358,6 +356,9 @@ function _execute_nest!(
                 )
             end
 
+            colsA_k = _axis_of(dK_A, ws.k_buf_A, 0, aff_kA)
+            rowsB_k = _axis_of(dK_B, ws.k_buf_B, 0, aff_kB)
+
             # Hoisted bounds checks (B here, A and C per M block): each
             # rectangle is exactly the union of the per-sliver/per-tile
             # regions, so the `unsafe_*` calls below read nothing unchecked.
@@ -366,28 +367,21 @@ function _execute_nest!(
             beta_eff = firstpanel ? betaT : one(T)
 
             if split_b
-                _with_axis(dK_B, ws.k_buf_B, 0, aff_kB) do rowsB_k
-                    _pack_block_transposed!(
-                        packed_b_plane_offset, b_format(kernel),
-                        packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), kernel, Val(tile_size(kernel, 2)), b_sliver_width,
-                        plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, n_block_length, k_block_length,
-                        plan.npack
-                    )
-                end
+                _pack_block_transposed!(
+                    packed_b_plane_offset, b_format(kernel),
+                    packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), kernel, Val(tile_size(kernel, 2)), b_sliver_width,
+                    plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, n_block_length, k_block_length,
+                    plan.npack
+                )
             elseif !UNPACKED_B
                 for n_tile_index in 0:(n_tiles - 1)
                     n_tile_start = n_tile_index * n_tile
                     bpanel = _sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
-                    _with_axis(dK_B, ws.k_buf_B, 0, aff_kB) do rowsB_k
-                        @inline
-                        _with_axis(ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, aff_nB) do colsB
-                            @inline
-                            _pack_sliver!(
-                                unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
-                                kernel, btransform
-                            )
-                        end
-                    end
+                    colsB = _axis_of(ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, aff_nB)
+                    _pack_sliver!(
+                        unsafe_pack_b!, bpanel, plan.Bstorage, plan.Bbase, rowsB_k, colsB,
+                        kernel, btransform
+                    )
                 end
             end
 
@@ -413,39 +407,30 @@ function _execute_nest!(
                 checked_span_bounds(cplan.Cbase, rng_mC, rng_nC, lenC)
 
                 if split_a
-                    _with_axis(dK_A, ws.k_buf_A, 0, aff_kA) do colsA_k
-                        _pack_block_transposed!(
-                            packed_a_plane_offset, a_format(kernel),
-                            packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), kernel, Val(tile_size(kernel, 1)), a_sliver_width,
-                            plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, m_block_length, k_block_length,
-                            plan.mpack
-                        )
-                    end
+                    _pack_block_transposed!(
+                        packed_a_plane_offset, a_format(kernel),
+                        packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), kernel, Val(tile_size(kernel, 1)), a_sliver_width,
+                        plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, m_block_length, k_block_length,
+                        plan.mpack
+                    )
                 else
                     for m_tile_index in 0:(m_tiles - 1)
                         m_tile_start = m_tile_index * m_tile
                         apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-                        _with_axis(dK_A, ws.k_buf_A, 0, aff_kA) do colsA_k
-                            @inline
-                            _with_axis(ws.m_desc_A[m_tile_index + 1], ws.m_buf_A, m_tile_start, aff_mA) do rowsA
-                                @inline
-                                _pack_sliver!(
-                                    unsafe_pack_a!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
-                                    kernel, atransform
-                                )
-                            end
-                        end
+                        rowsA = _axis_of(ws.m_desc_A[m_tile_index + 1], ws.m_buf_A, m_tile_start, aff_mA)
+                        _pack_sliver!(
+                            unsafe_pack_a!, apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
+                            kernel, atransform
+                        )
                     end
                 end
 
                 # --- loops over N tiles and M tiles ---
                 if UNPACKED_B
-                    _with_axis(dK_B, ws.k_buf_B, 0, aff_kB) do rowsB_k
-                        _micro_tiles_unpacked_b!(
-                            kernel, cplan, ws, rowsB_k, m_tiles, n_tiles,
-                            m_tile, n_tile, a_sliver_width, k_block_length, alphaT, beta_eff, aff_mC, aff_nC
-                        )
-                    end
+                    _micro_tiles_unpacked_b!(
+                        kernel, cplan, ws, rowsB_k, m_tiles, n_tiles,
+                        m_tile, n_tile, a_sliver_width, k_block_length, alphaT, beta_eff, aff_mC, aff_nC
+                    )
                 else
                     _micro_tiles_packed_b!(
                         kernel, cplan, ws, m_tiles, n_tiles,
@@ -478,19 +463,15 @@ end
     for n_tile_index in 0:(n_tiles - 1)
         n_tile_start = n_tile_index * n_tile
         bpanel = _sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
-        _with_axis(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC) do colsC
-            @inline
-            for m_tile_index in 0:(m_tiles - 1)
-                m_tile_start = m_tile_index * m_tile
-                apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-                _with_axis(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC) do rowsC
-                    @inline
-                    unsafe_execute_micro_tile!(
-                        kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                        apanel, bpanel, k_block_length, alphaT, beta_eff
-                    )
-                end
-            end
+        colsC = _axis_of(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC)
+        for m_tile_index in 0:(m_tiles - 1)
+            m_tile_start = m_tile_index * m_tile
+            apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
+            rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
+            unsafe_execute_micro_tile!(
+                kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
+                apanel, bpanel, k_block_length, alphaT, beta_eff
+            )
         end
     end
     return nothing

@@ -99,19 +99,15 @@ end
         bview = _unpacked_b_view(
             kernel, Bstorage, Bbase, ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, rowsB_k, btransform
         )
-        _with_axis(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC) do colsC
-            @inline
-            for m_tile_index in 0:(m_tiles - 1)
-                m_tile_start = m_tile_index * m_tile
-                apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-                _with_axis(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC) do rowsC
-                    @inline
-                    unsafe_execute_micro_tile!(
-                        kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                        apanel, bview, k_block_length, alphaT, beta_eff
-                    )
-                end
-            end
+        colsC = _axis_of(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC)
+        for m_tile_index in 0:(m_tiles - 1)
+            m_tile_start = m_tile_index * m_tile
+            apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
+            rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
+            unsafe_execute_micro_tile!(
+                kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
+                apanel, bview, k_block_length, alphaT, beta_eff
+            )
         end
     end
     return nothing

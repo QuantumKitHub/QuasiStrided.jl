@@ -15,15 +15,15 @@ TTFX when codegen is touched).
 | 0 | Tour | `QuasiStrided.jl`, `plan.jl`, `execute.jl` call path | done |
 | 1 | Hardware | `hardware/target.jl` | done |
 | 2 | Axis groups | `layout/axis_group.jl`, `pair_group.jl` | done |
-| 3 | Tiles | `layout/tiles.jl` | |
-| 4 | Packing formats | `packing/format.jl`, `panel.jl`, `transposed.jl` | |
+| 3 | Tiles | `layout/tiles.jl` | done |
+| 4 | Packing formats | `packing/format.jl`, `panel.jl` (`transposed.jl` → chunk 11) | in progress |
 | 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | |
 | 6 | Kernel interface | `microkernels/interface.jl`, `scalar.jl` | |
 | 7 | SIMD kernels | `simd.jl`, `planar.jl` | |
 | 8 | Complex/mixed kernels | `onem.jl`, `fmaddsub.jl`, `mixed.jl` | |
 | 9 | Labels | `planning/labels.jl`, `conjugation.jl` | |
 | 10 | Kernel selection | `planning/kernel_selection.jl` | |
-| 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl` | |
+| 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl`, the line-by-line packer | |
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | |
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | |
 | 14 | Five-loop nest | `execution/macrokernel.jl`, `execute.jl` | |
@@ -101,11 +101,34 @@ drops its alias check. Kept: generic `P` (a batch label in A, B and C would
 be a `P = 3` group) and unconditional range checks in `fill_offsets!`
 (`@boundscheck`/`@propagate_inbounds` only help when inlined).
 
+### D7. Tiles (chunk 3, applied)
+
+Addresses stay zero-based (storage index = address + 1), as do `AxisGroup`
+coordinates and block starts; coordinates within a tile, sliver or packed
+panel are one-based. Tile axes are `AbstractVector{Int}`s of offsets:
+`AffineAxis` (zero stride allowed, so not a `StepRange`) and `ScatterAxis`,
+a borrowed pointer. The pointer is kept because the nest holds a
+`Union{AffineAxis, ScatterAxis}`, which is only unboxed when both members are
+`isbits`; a `view` there allocated per call, and splitting by hand needed
+nested closures. One `Tile` type with `getindex`/`setindex!`/`size` replaces
+`QSTile`/`SourceTile`/`DestinationTile`/`tile_load`/`tile_store!`.
+
+### D8. Packing formats (chunk 4)
+
+Panels are only `PackedPanel` (the oracle and tests too; the `AbstractVector`
+panel methods go); one `Descriptor` constructor plus a `RealDescriptor`
+alias; one `packed_a_offset(d, i, p, plane = 0)` (and B);
+`transposed.jl` merges into `panel.jl` and is reviewed with `pack_split.jl`.
+
 ## Possible improvements
 
 - Piecewise-affine block descriptions instead of block-sized offset buffers:
   https://github.com/lkdvos/QuasiStrided.jl/issues/13 (decide after chunks
   3, 5, 12, 14).
+- One tile-axis type with a `regular` flag instead of a union of axis types:
+  https://github.com/lkdvos/QuasiStrided.jl/issues/14.
+- `PackedPanel` without a raw pointer:
+  https://github.com/lkdvos/QuasiStrided.jl/issues/15.
 
 ## Open items (to revisit in their chunk)
 

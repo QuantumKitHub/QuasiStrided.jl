@@ -1,7 +1,7 @@
 # Tile axes and tiles. Addresses are zero-based (storage index = address + 1),
 # coordinates one-based; a tile's `base` is the address its offsets are
 # relative to. A tile axis is the vector of offsets of its rows or columns: an
-# `AffineAxis`, or a `view` of an offset buffer.
+# `AffineAxis`, a `ScatterAxis`, or any `AbstractVector{Int}`.
 
 # Offsets `base + (t - 1) * stride`. Not a `StepRange`: the stride may be zero.
 struct AffineAxis <: AbstractVector{Int}
@@ -27,6 +27,22 @@ function Base.extrema(ax::AffineAxis)
     isempty(ax) && throw(ArgumentError("extrema of an empty AffineAxis"))
     last = Base.Checked.checked_add(ax.base, Base.Checked.checked_mul(ax.count - 1, ax.stride))
     return minmax(ax.base, last)
+end
+
+# Offsets read from a borrowed buffer, valid while its owner is
+# `GC.@preserve`d. A pointer rather than a `view`, so that it is `isbits` and a
+# `Union{AffineAxis, ScatterAxis}` is never heap-boxed.
+struct ScatterAxis <: AbstractVector{Int}
+    offsets::Ptr{Int}
+    count::Int
+end
+
+Base.size(ax::ScatterAxis) = (ax.count,)
+Base.IndexStyle(::Type{ScatterAxis}) = IndexLinear()
+
+@inline function Base.getindex(ax::ScatterAxis, t::Int)
+    @boundscheck checkbounds(ax, t)
+    return unsafe_load(ax.offsets, t)
 end
 
 # An offset interval of one map: `regular` iff `buffer[t+1] == base + t*stride`
