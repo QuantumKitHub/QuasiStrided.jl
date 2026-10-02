@@ -167,7 +167,6 @@ end
         )
         @test_throws BoundsError execute!(plan, 1.0, 0.0)
         @test all(iszero, Cstore)
-        @test_throws BoundsError execute_tilewise!(plan, 1.0, 0.0)
     end
 end
 
@@ -175,14 +174,13 @@ end
     Ma, Ka, Na = 19, 23, 17
     Amat, Bmat = randn(MersenneTwister(1), Ma, Ka), randn(MersenneTwister(2), Ka, Na)
     kernel = SIMDKernel(Val(8), Val(6), Float64, Val(4))
-    # Default everything; a reused workspace without the oracle (the backend's
-    # shape); several blocks with tail tiles in M and N (the vectorized store's
-    # row tail); a conj transform, which the real path never builds but which
-    # must still cross `_pack_sliver!` concretely typed.
+    # Default everything; several blocks with tail tiles in M and N (the
+    # vectorized store's row tail); a conj transform, which the real path never
+    # builds but which must still cross `_pack_sliver!` concretely typed.
     Cmat = zeros(Ma, Na)
     p = _mm_plan(Cmat, Amat, Bmat)
     plans = (
-        p, _mm_plan(Cmat, Amat, Bmat; workspace = p.workspace, oracle = false),
+        p,
         _mm_plan(Cmat, Amat, Bmat; kernel = kernel, m_block = 16, k_block = 5, n_block = 8),
         ContractPlan(
             p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
@@ -196,9 +194,6 @@ end
         @test Cmat ≈ Amat * Bmat
         @test allocs == 0 skip = (VERSION < v"1.11")
     end
-    allocs_tw = _steady_allocs!(execute_tilewise!, plans[4], Cmat)
-    @test Cmat ≈ Amat * Bmat
-    @test allocs_tw == 0 skip = (VERSION < v"1.11")
     ps = _mm_plan(Cmat, Amat, Bmat; kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 8, k_block = 6, n_block = 7)
     @test _steady_allocs!(execute!, ps, Cmat) == 0 skip = (VERSION < v"1.11")
 end
@@ -236,9 +231,7 @@ end
     @test typeof(plan.workspace) === QuasiStrided.ContractWorkspace{Float64, Vector{Float64}, Vector{Float64}}
     plan_argtypes = (typeof(Cv), typeof(Av), NTuple{2, Int}, typeof(Bv), NTuple{2, Int}, NTuple{2, Int})
     @test isempty(_ws_nonconcrete_types(plan_contract, plan_argtypes))
-    for f in (execute!, execute_tilewise!)
-        @test isempty(_ws_nonconcrete_types(f, (typeof(plan), Float64, Float64)))
-    end
+    @test isempty(_ws_nonconcrete_types(execute!, (typeof(plan), Float64, Float64)))
     @test isconcretetype(only(Base.return_types(execute!, (typeof(plan), Float64, Float64))))
 end
 

@@ -27,8 +27,8 @@ function _execute_outer!(
     Bstorage = plan.Bstorage
     Cstorage = plan.Cstorage
     Bbase = plan.Bbase
-    bufB = ws.n_buf_B
-    bufC = ws.n_buf_C
+    bufB = ws.n.offsets[1]
+    bufC = ws.n.offsets[2]
     n_block = plan.blocking.n_block
     lenB = length(Bstorage)
     lenC = length(Cstorage)

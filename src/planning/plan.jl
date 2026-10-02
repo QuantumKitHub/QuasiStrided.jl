@@ -8,8 +8,10 @@
 Reusable, concretely typed plan from [`plan_contract`](@ref): the M/N/K
 `AxisGroup`s, kernel, operand storages, effective [`Blocking`](@ref), packing
 transforms and the [`ContractWorkspace`](@ref) holding every buffer
-[`execute!`](@ref) needs. Field layout is not part of the public interface;
-after an M/N orientation swap the `A*` fields describe the original `B`.
+[`execute!`](@ref) needs. Reusing a plan reuses its buffers. A plan, and so
+its workspace, must be used by one task at a time. Field layout is not part
+of the public interface; after an M/N orientation swap the `A*` fields
+describe the original `B`.
 """
 struct ContractPlan{
         T, Kern, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
@@ -47,9 +49,8 @@ end
                   kernel = nothing,
                   conjA = false, conjB = false,
                   m_block = nothing, k_block = nothing, n_block = nothing,
-                  workspace = nothing,
                   allocator = TensorOperations.DefaultAllocator(),
-                  oracle = true, accumulator = nothing) -> ContractPlan
+                  accumulator = nothing) -> ContractPlan
 
 Plan `C[indC] = A[indA] * B[indB]` (every label in exactly two operands):
 resolve the labels into M/N/K `AxisGroup`s, validate axis lengths and eltypes,
@@ -83,11 +84,9 @@ invalid input.
     is packed line by line (`PackSplit`); its `m_block` (or `n_block`) then
     becomes a whole number of line groups, up to `requested k_block / k_block`
     times the request.
-  * `workspace` reuses an existing [`ContractWorkspace`](@ref) for compute
-    type `T`, grown by [`reserve!`](@ref) as needed. A non-default
-    TensorOperations `allocator` sizes the buffers once via `tensoralloc`,
-    forbids `workspace`, and leaves [`release!`](@ref) to the caller.
-  * `oracle = false` skips `execute_tilewise!`'s buffers.
+  * The plan's [`ContractWorkspace`](@ref) takes its packed panels from the
+    TensorOperations `allocator`; for a non-default one, [`release!`](@ref)
+    is left to the caller.
   * `conjA`/`conjB` conjugate A's/B's elements (never `alpha`/`beta`) and
     compose by XOR with a view's own `conj`/`adjoint` `op`. A conjugated `C`
     is rejected.
@@ -102,14 +101,12 @@ function plan_contract(
         m_block::Union{Int, Nothing} = nothing,
         k_block::Union{Int, Nothing} = nothing,
         n_block::Union{Int, Nothing} = nothing,
-        workspace::Union{Nothing, ContractWorkspace} = nothing,
         allocator = TO.DefaultAllocator(),
-        oracle::Bool = true,
         accumulator::Union{Nothing, Type{Float32}, Type{Float64}} = nothing
     ) where {NA, NB, NC}
     return _planned(
         identity, C, A, indA, B, indB, indC,
-        kernel, conjA, conjB, m_block, k_block, n_block, workspace, allocator, oracle, accumulator
+        kernel, conjA, conjB, m_block, k_block, n_block, allocator, accumulator
     )
 end
 
@@ -117,8 +114,7 @@ end
 # is known (`run` is the chosen M composite's unit-stride run in C), as one
 # value that crosses the kernel barrier. `T` is the phantom compute type.
 struct _PlanRequest{
-        T, F, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
-        WS <: Union{Nothing, ContractWorkspace}, AL,
+        T, F, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC, AL,
     }
     f::F
     mgroup::GM
@@ -134,19 +130,17 @@ struct _PlanRequest{
     m_block::Union{Int, Nothing}
     k_block::Union{Int, Nothing}
     n_block::Union{Int, Nothing}
-    workspace::WS
     allocator::AL
-    oracle::Bool
 end
 
 @inline function _plan_request(
         ::Type{T}, f::F, mgroup::GM, ngroup::GN, kgroup::GK,
         Astorage::SA, Abase::Int, Bstorage::SB, Bbase::Int, Cstorage::SC, Cbase::Int,
-        run::Int, m_block, k_block, n_block, workspace::WS, allocator::AL, oracle::Bool
-    ) where {T, F, GM, GN, GK, SA, SB, SC, WS, AL}
-    return _PlanRequest{T, F, GM, GN, GK, SA, SB, SC, WS, AL}(
+        run::Int, m_block, k_block, n_block, allocator::AL
+    ) where {T, F, GM, GN, GK, SA, SB, SC, AL}
+    return _PlanRequest{T, F, GM, GN, GK, SA, SB, SC, AL}(
         f, mgroup, ngroup, kgroup, Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
-        run, m_block, k_block, n_block, workspace, allocator, oracle
+        run, m_block, k_block, n_block, allocator
     )
 end
 
@@ -181,8 +175,7 @@ function _planned(
         B::StridedView, indB::NTuple{NB, Int}, indC::NTuple{NC, Int},
         kernel, conjA::Bool, conjB::Bool,
         m_block::Union{Int, Nothing}, k_block::Union{Int, Nothing}, n_block::Union{Int, Nothing},
-        workspace::Union{Nothing, ContractWorkspace}, allocator, oracle::Bool,
-        accumulator::AC
+        allocator, accumulator::AC
     ) where {F, NA, NB, NC, AC}
     T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
     K = default_kernel_type(T, eltype(A), eltype(B))
@@ -228,14 +221,14 @@ function _planned(
         req_swapped = _plan_request(
             T, f, ngroup, mgroup, kgroup_swapped,
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
-            run_n, m_block, k_block, n_block, workspace, allocator, oracle
+            run_n, m_block, k_block, n_block, allocator
         )
         return _plan_with_kernel(kernel, K, btransform, atransform, req_swapped)
     end
     req = _plan_request(
         T, f, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
-        run_m, m_block, k_block, n_block, workspace, allocator, oracle
+        run_m, m_block, k_block, n_block, allocator
     )
     return _plan_with_kernel(kernel, K, atransform, btransform, req)
 end
@@ -290,8 +283,8 @@ end
 # built across a dispatch barrier specialised on that one concrete kernel type,
 # so only the chosen kernel's code is compiled (holding the menu-wide kernel
 # Union would box the request; a static ladder would compile every menu
-# kernel). All barrier arguments are singletons or heap objects: 0 B, one
-# method-cache hit.
+# kernel). All barrier arguments are singletons or heap objects (the request
+# in a `Ref`): one method-cache hit.
 @inline _plan_with_kernel(kernel, ::Type, atransform, btransform, req::_PlanRequest) =
     _plan_contract(kernel, atransform, btransform, req, nothing)
 @inline function _plan_with_kernel(::Nothing, ::Type{K}, atransform, btransform, req::_PlanRequest{T}) where {K, T}
@@ -305,34 +298,16 @@ end
     # the shape and kernel type, not the kernel: a call union-split on the
     # kernel type is emitted out of line and boxes `req`.
     hint = _path_hint(req.f, req, shape, Val(K))
-    core = _strip_storage(req)
-    slot = _barrier_slot!(req.workspace, typeof(core))
-    slot[] = core
     return Base.inferencebarrier(_plan_resolved)(
-        vkernel, atransform, btransform, hint, slot,
-        req.Astorage, req.Bstorage, req.Cstorage
+        vkernel, atransform, btransform, hint, Base.RefValue{typeof(req)}(req)
     )
 end
 
 function _plan_resolved(
-        ::Val{Kern}, atransform::TA, btransform::TB, hint::H,
-        slot::Base.RefValue{R}, Astorage::SA, Bstorage::SB, Cstorage::SC
-    ) where {Kern, TA, TB, H, T, R <: _PlanRequest{T}, SA, SB, SC}
-    req = _with_storage(slot[], Astorage, Bstorage, Cstorage)
-    return _plan_contract(Kern(), atransform, btransform, req, hint)
+        ::Val{Kern}, atransform::TA, btransform::TB, hint::H, slot::Base.RefValue{R}
+    ) where {Kern, TA, TB, H, R <: _PlanRequest}
+    return _plan_contract(Kern(), atransform, btransform, slot[], hint)
 end
-
-# The storages cross the barrier as arguments, so no slot retains a user array.
-@inline _strip_storage(req::_PlanRequest{T}) where {T} = _plan_request(
-    T, req.f, req.mgroup, req.ngroup, req.kgroup,
-    nothing, req.Abase, nothing, req.Bbase, nothing, req.Cbase,
-    req.run, req.m_block, req.k_block, req.n_block, req.workspace, req.allocator, req.oracle
-)
-@inline _with_storage(req::_PlanRequest{T}, Astorage, Bstorage, Cstorage) where {T} = _plan_request(
-    T, req.f, req.mgroup, req.ngroup, req.kgroup,
-    Astorage, req.Abase, Bstorage, req.Bbase, Cstorage, req.Cbase,
-    req.run, req.m_block, req.k_block, req.n_block, req.workspace, req.allocator, req.oracle
-)
 
 # `nothing` for a continuation that does not execute (see src/execution/execute.jl).
 @inline _path_hint(f, req::_PlanRequest, shape, kernel_type) = nothing
@@ -383,8 +358,8 @@ function _plan_contract(
         end
     end
     blocking = Blocking(m_block, k_block, n_block)
-    ws = _resolve_workspace(
-        T, req.workspace, kernel, blocking, req.oracle, req.allocator, panel ? m_length * min(n_block, n_length) : 0
+    ws = ContractWorkspace(
+        T, kernel, blocking; allocator = req.allocator, panel = panel ? m_length * min(n_block, n_length) : 0
     )
 
     plan = ContractPlan(
@@ -397,3 +372,5 @@ end
 
 # `hint` is used only by an executing continuation (src/execution/execute.jl).
 @inline _continue(f::F, plan::ContractPlan, hint) where {F} = f(plan)
+
+release!(plan::ContractPlan, allocator) = release!(plan.workspace, allocator)

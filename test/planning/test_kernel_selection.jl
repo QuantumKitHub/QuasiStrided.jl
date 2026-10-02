@@ -171,7 +171,7 @@ using StridedViews: StridedView
             Bv = StridedView(randn(T, d, d, d, d))
             plan = QuasiStrided.plan_contract(
                 StridedView(zeros(T, d, d, d, d, d, d)), StridedView(randn(T, d, d, d, d)),
-                (i, j, m, b), Bv, (m, k, a, c), (a, b, c, i, j, k); oracle = false
+                (i, j, m, b), Bv, (m, k, a, c), (a, b, c, i, j, k)
             )
             @test tile_size(plan.kernel, 1) == 16
             @test plan.Astorage === parent(Bv)
@@ -179,7 +179,7 @@ using StridedViews: StridedView
             B2 = StridedView(randn(T, d, d, d, d))
             plan2 = QuasiStrided.plan_contract(
                 StridedView(zeros(T, d, d, d, d)), StridedView(randn(T, d, d)), (q, b),
-                B2, (a, q, r, s), (a, b, r, s); oracle = false
+                B2, (a, q, r, s), (a, b, r, s)
             )
             @test tile_size(plan2.kernel, 1) == 16
             @test plan2.Astorage === parent(B2)

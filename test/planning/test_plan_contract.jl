@@ -30,9 +30,6 @@ end
     for eltypes in ((Float16, Float16, Float16), (Float64, Float64, BigFloat), (ComplexF64, Float64, Float64))
         @test_throws ArgumentError plan_contract(mk(eltypes...)...)
     end
-    ws = plan_contract(mk(Float32, Float32, Float32)...).workspace
-    @test_throws ArgumentError plan_contract(mk(Float32, Float32, Float32)...; accumulator = Float64, workspace = ws)
-    @test plan_contract(mk(Float32, Float64, Float32)...; accumulator = Float32, workspace = ws).workspace === ws
 end
 
 
@@ -110,9 +107,6 @@ end
         @test typeof(plan) === typeof(base)
         fill!(Cmat, 0.0)
         execute!(plan, 1.0, 0.0)
-        @test Cmat ≈ Amat * Bmat
-        fill!(Cmat, 0.0)
-        execute_tilewise!(plan, 1.0, 0.0)
         @test Cmat ≈ Amat * Bmat
     end
 
@@ -430,13 +424,6 @@ end
         end
 
         Cref = _lo_reference(C, Av, indA, Bv, indB, indC; alpha = 1.3, beta = -0.7)
-        Ctw = copy(C)
-        plan_tw = plan_contract(
-            StridedView(Ctw), Av, indA, Bv, indB, indC; kernel = plan.kernel
-        )
-        execute_tilewise!(plan_tw, 1.3, -0.7)
-        @test Ctw ≈ Cref
-
         Cex = copy(C)
         plan_ex = plan_contract(StridedView(Cex), Av, indA, Bv, indB, indC)
         execute!(plan_ex, 1.3, -0.7)
@@ -580,12 +567,6 @@ end
 
             plan = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
             execute!(plan, alpha, beta)
-            @test isapprox(copy(Cv), Cref; rtol = rtol)
-
-            copyto!(Csub, permutedims(Cstart, invperm(perm)))
-            plan_tw = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
-            @test (plan_tw.Astorage === parent(Bv)) == (plan.Astorage === parent(Bv))
-            execute_tilewise!(plan_tw, alpha, beta)
             @test isapprox(copy(Cv), Cref; rtol = rtol)
         end
     end
@@ -742,7 +723,7 @@ end
     @test pt.kgroup.strides[2] == (14400, 360, 9)                 # then A's
 end
 
-@testset "K order: correctness on scrambled K (all dtypes, alpha/beta, conj, both orientations, oracle)" begin
+@testset "K order: correctness on scrambled K (all dtypes, alpha/beta, conj, both orientations)" begin
     Random.seed!(0x5C7A_0B1E)
     ext = _KO_BIG
     for T in (Float64, Float32, ComplexF64, ComplexF32)
@@ -766,10 +747,6 @@ end
             Cref = _lo_reference(Cstart, Av, indA, Bv, indB, indC; conjA, conjB, alpha, beta)
             plan = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
             execute!(plan, alpha, beta)
-            @test isapprox(C, Cref; rtol = rtol)
-            copyto!(C, Cstart)
-            plan_tw = plan_contract(Cv, Av, indA, Bv, indB, indC; conjA = conjA, conjB = conjB)
-            execute_tilewise!(plan_tw, alpha, beta)
             @test isapprox(C, Cref; rtol = rtol)
         end
     end

@@ -86,7 +86,7 @@ end
         @test_throws BoundsError execute!(plan, 1.0, 0.0)
         @test all(iszero, plan.Cstorage)
     end
-    plan = plan_contract(_outer_maker(T, 64, 50, 6)()...; oracle = false, n_block = 12)
+    plan = plan_contract(_outer_maker(T, 64, 50, 6)()...; n_block = 12)
     @test _outer_takes(plan)
     execute!(plan, 1.0, 0.0)
     @test (@allocated execute!(plan, 1.0, 0.0)) == 0 skip = (VERSION < v"1.11")

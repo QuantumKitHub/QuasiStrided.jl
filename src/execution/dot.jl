@@ -52,14 +52,14 @@ function _execute_dot!(plan::ContractPlan{T}, alphaT::T, betaT::T, matB::Bool, :
         _dot_nest!(
             plan, ws, plan.Bstorage, plan.Bbase, plan.btransform,
             plan.Astorage, plan.Abase, plan.atransform,
-            plan.ngroup, ws.n_buf_B, ws.n_buf_C, plan.blocking.n_block, ws.k_buf_A,
+            plan.ngroup, ws.n.offsets[1], ws.n.offsets[2], plan.blocking.n_block, ws.k[1],
             alphaT, betaT, Val(W)
         )
     else
         _dot_nest!(
             plan, ws, plan.Astorage, plan.Abase, plan.atransform,
             plan.Bstorage, plan.Bbase, plan.btransform,
-            plan.mgroup, ws.m_buf_A, ws.m_buf_C, plan.blocking.m_block, ws.k_buf_B,
+            plan.mgroup, ws.m.offsets[1], ws.m.offsets[2], plan.blocking.m_block, ws.k[2],
             alphaT, betaT, Val(W)
         )
     end
@@ -108,7 +108,7 @@ function _dot_nest!(
             k_block_length = min(k_block, k_length - k_block_start)
             beta_eff = firstblock ? betaT : one(T)
 
-            fill_offsets!((ws.k_buf_A, ws.k_buf_B), plan.kgroup, k_block_start, k_block_length)
+            fill_offsets!(ws.k, plan.kgroup, k_block_start, k_block_length)
             checked_span_bounds(vbase, _buffer_range(vkbuf, k_block_length), (0, 0), lenv)
             if vflip
                 _dot_gather!(gptr, vstorage, vbase, vkbuf, k_block_length, conj)

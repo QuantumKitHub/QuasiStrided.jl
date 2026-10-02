@@ -112,7 +112,7 @@ end
 
 @testset "dot path: allocation-free, and through the backend ($T)" for T in _DOT_TYPES
     for (mk, kw) in ((_dot_gemv_maker(T, 6, 4), (;)), (_dot_n1_maker(T, 5, 300, 4), (k_block = 64, m_block = 8)))
-        plan = plan_contract(mk()...; oracle = false, kw...)
+        plan = plan_contract(mk()...; kw...)
         @test _dot_takes(plan)
         execute!(plan, 1.0, 0.0)
         @test (@allocated execute!(plan, 1.0, 0.0)) == 0 skip = (VERSION < v"1.11")

@@ -6,7 +6,6 @@ using StridedViews: StridedView, offset
 const QS = QuasiStrided
 const _pcf_plan = QuasiStrided.plan_contract
 const _pcf_exec = QuasiStrided.execute!
-const _pcf_exec_tw = QuasiStrided.execute_tilewise!
 const _pcf_Plan = QuasiStrided.ContractPlan
 
 @testset "per-call floor: classify_labels" begin
@@ -77,10 +76,11 @@ end
     A = randn(64, 64); B = randn(64, 64); C = zeros(64, 64)
     Av, Bv, Cv = StridedView(A), StridedView(B), StridedView(C)
     p = _pcf_plan(Cv, Av, (1, 2), Bv, (2, 3), (1, 3))
-    ws = p.workspace
-    f() = _pcf_plan(Cv, Av, (1, 2), Bv, (2, 3), (1, 3); workspace = ws)
+    ws() = QS.ContractWorkspace(Float64, p.kernel, p.blocking)
+    ws()
+    f() = _pcf_plan(Cv, Av, (1, 2), Bv, (2, 3), (1, 3))
     f()
-    @test (@allocated f()) <= 3000
+    @test (@allocated f()) <= 3000 + (@allocated ws())
 end
 
 @testset "per-call floor: checked_span_bounds is equivalent to the per-tile check" begin
@@ -142,7 +142,7 @@ end
         buf2 = [rand(-40:40) for _ in 1:blocklen]
         d1 = Vector{BlockDescriptor}(undef, nsliv)
         d2 = Vector{BlockDescriptor}(undef, nsliv)
-        (r1, r2) = QS._classify_slivers!(d1, d2, buf1, buf2, blocklen, reg, nsliv)
+        (r1, r2) = QS._classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, nsliv)
         @test r1 == (minimum(buf1), maximum(buf1))
         @test r2 == (minimum(buf2), maximum(buf2))
         @test all(s -> d1[s].count == min(reg, blocklen - (s - 1) * reg), 1:nsliv)
@@ -155,7 +155,7 @@ end
     buf2[7:12] .= [0, -7, -14, -21, -28, -35]                 # sliver 2, REGULAR, stride -7
     d1 = Vector{BlockDescriptor}(undef, 3)
     d2 = Vector{BlockDescriptor}(undef, 3)
-    (r1, r2) = QS._classify_slivers!(d1, d2, buf1, buf2, blocklen, reg, 3)
+    (r1, r2) = QS._classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, 3)
     @test !d1[2].regular && d1[2].count == 6        # scan branch
     @test d2[2].regular && d2[2].stride == -7       # affine branch, negative stride
     @test r1 == (-500, 500)
@@ -225,13 +225,6 @@ Base.IndexStyle(::Type{<:CountingStorage}) = IndexLinear()
     @test cstore.n == 1 + forced * ntiles
     @test astore.n == 1 + forced * m_tiles
     @test bstore.n == 1
-
-    # The oracle checks per tile.
-    fill!(cstore.data, 0.0)
-    astore.n = 0; bstore.n = 0; cstore.n = 0
-    _pcf_exec_tw(p, 1.0, 0.0)
-    @test reshape(cstore.data, Ma, Na) ≈ Amat * Bmat
-    @test cstore.n >= ntiles
 end
 
 @testset "per-call floor: a block that must be rejected is still rejected" begin
@@ -259,7 +252,6 @@ end
     short_C = zeros(Ma * Na - 1)
     @test_throws BoundsError _pcf_exec(replan(Cstorage = short_C), 1.0, 0.0)
     @test all(iszero, short_C)
-    @test_throws BoundsError _pcf_exec_tw(replan(Cstorage = short_C), 1.0, 0.0)
 
     @test_throws BoundsError _pcf_exec(replan(Cbase = -1), 1.0, 0.0)
 
@@ -331,12 +323,6 @@ end
     @test_throws BoundsError QS.checked_span_bounds(base.Cbase, mrange, truerange, shortlen)
     @test QS.checked_span_bounds(base.Cbase, mrange, firstonly, shortlen) === nothing
     @test QS.checked_span_bounds(base.Cbase, mrange, lastonly, shortlen) === nothing
-
-    # The oracle rejects too, but only at the offending tile, after writing
-    # the ones before it.
-    fill!(short_C, 0.0)
-    @test_throws BoundsError _pcf_exec_tw(pshort, 1.0, 0.0)
-    @test any(!iszero, short_C)
 
     # An interior-sliver minimum: the base shifted down by one.
     plow = _pcf_Plan(
@@ -441,11 +427,11 @@ end
         d1 = Vector{BlockDescriptor}(undef, nsliv)
         d2 = Vector{BlockDescriptor}(undef, nsliv)
         fill_offsets!((buf1, buf2), g, first, blocklen)
-        want = QS._classify_slivers!(d1, d2, buf1, buf2, blocklen, reg, nsliv)
+        want = QS._classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, nsliv)
 
         r1 = Vector{BlockDescriptor}(undef, nsliv)
         r2 = Vector{BlockDescriptor}(undef, nsliv)
-        got = QS._ramp_slivers!(r1, r2, steps[1], steps[2], first, blocklen, reg, nsliv)
+        got = QS._ramp_slivers!(QS.GroupBuffers((buf1, buf2), (r1, r2)), steps[1], steps[2], first, blocklen, reg, nsliv)
 
         for s in 1:nsliv
             @test r1[s].base == d1[s].base && r1[s].stride == d1[s].stride
@@ -468,12 +454,7 @@ end
             StridedView(C), StridedView(A), indA, StridedView(B), indB, indC; kw...
         )
         _pcf_exec(p, 2.0, -0.5)
-        ref = copy(C0)
-        p2 = _pcf_plan(
-            StridedView(ref), StridedView(A), indA, StridedView(B), indB, indC; kw...
-        )
-        _pcf_exec_tw(p2, 2.0, -0.5)
-        @test C ≈ ref
+        @test C ≈ _lo_reference(C0, A, indA, B, indB, indC; alpha = 2.0, beta = -0.5)
         return p
     end
 

@@ -64,8 +64,8 @@ plan = plan_contract(StridedView(C), StridedView(A), (1, 2, 3),
 execute!(plan, 1.0, 0.0)
 ```
 
-`plan_contract` also takes `workspace=`/`allocator=` keywords (e.g. for
-Bumper-backed buffers); see its docstring.
+`plan_contract` also takes an `allocator=` keyword (e.g. for Bumper-backed
+buffers); see its docstring.
 
 ## API
 
@@ -95,7 +95,7 @@ and `B` into panels and drives a microkernel over register tiles of `C`.
 | `src/packing/` | packed-panel formats and the `pack_a!`/`pack_b!` packers with contiguous fast paths |
 | `src/microkernels/` | the kernel interface and the scalar, SIMD, planar, 1m and fmaddsub kernels |
 | `src/planning/` | label classification, conjugation, kernel selection, cache blocking, `plan_contract` |
-| `src/execution/` | the workspace, the five-loop nest, the specialised paths and the tile-by-tile oracle |
+| `src/execution/` | the workspace, the barriers, the five-loop nest and the specialised paths |
 | `src/integrations/` | `QuasiStridedBackend` for TensorOperations.jl |
 
 `test/` mirrors this layout.
@@ -127,8 +127,8 @@ Implemented:
   `eltype(C)` once. `conjA`/`conjB` and each operand's `StridedView.op` are
   applied during packing.
 - Zero steady-state allocation on Julia >= 1.11 for `execute!` on a reused
-  plan and for `tensorcontract!` through the backend (which pools workspaces
-  per task). On Julia 1.10 `SIMDKernel`'s accumulator is not kept in
+  plan; `tensorcontract!` through the backend plans each call, so it allocates
+  the plan's workspace through the given allocator. On Julia 1.10 `SIMDKernel`'s accumulator is not kept in
   registers, so calls allocate; results are unaffected.
 
 Not implemented:

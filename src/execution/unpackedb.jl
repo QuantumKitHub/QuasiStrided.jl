@@ -63,7 +63,7 @@ end
 const _UNPACKED_B_MMAX = 256
 
 # The view for one N sliver; `buf`/`n_tile_start` locate an irregular sliver's
-# offsets in `ws.n_buf_B`.
+# offsets in `ws.n.offsets[1]`.
 @inline function _unpacked_b_view(
         kernel::Microkernel{MR, NR, T}, storage::S, base::Int,
         d::BlockDescriptor, buf::Vector{Int}, n_tile_start::Int, ksteps::K, transform::F
@@ -92,13 +92,13 @@ end
     for n_tile_index in 0:(n_tiles - 1)
         n_tile_start = n_tile_index * n_tile
         bview = _unpacked_b_view(
-            kernel, Bstorage, Bbase, ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, rowsB_k, btransform
+            kernel, Bstorage, Bbase, ws.n.descriptors[1][n_tile_index + 1], ws.n.offsets[1], n_tile_start, rowsB_k, btransform
         )
-        colsC = _axis_of(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC)
+        colsC = _axis_of(ws.n.descriptors[2][n_tile_index + 1], ws.n.offsets[2], n_tile_start, aff_nC)
         for m_tile_index in 0:(m_tiles - 1)
             m_tile_start = m_tile_index * m_tile
             apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-            rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
+            rowsC = _axis_of(ws.m.descriptors[2][m_tile_index + 1], ws.m.offsets[2], m_tile_start, aff_mC)
             # Inside the caller's C check.
             @inbounds _execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,

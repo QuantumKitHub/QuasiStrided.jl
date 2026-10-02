@@ -36,7 +36,7 @@ end
 function time_blocking(fx, kernel, b::Blocking, ::Type{T}) where {T}
     plan = plan_contract(
         fx.Cv, fx.Av, fx.indA, fx.Bv, fx.indB, fx.indC;
-        kernel, m_block = b.m_block, k_block = b.k_block, n_block = b.n_block, oracle = false
+        kernel, m_block = b.m_block, k_block = b.k_block, n_block = b.n_block
     )
     return median_time_s(() -> execute!(plan, one(T), zero(T)); reps = REPS)
 end

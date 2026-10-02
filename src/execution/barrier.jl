@@ -8,26 +8,31 @@
 # or a singleton, so each barrier passes:
 #   * static choices (kernel shape, method, transforms, path) as singletons;
 #   * operand storages (already heap objects) as themselves;
-#   * everything else through a typed slot, a `Base.RefValue{P}` owned by the
-#     workspace's `_SlotCache`: written just before the call, read back first
-#     thing in the callee.
-# The payload never holds an operand array, so a pooled workspace retains no
-# user data between calls. A workspace belongs to one task at a time, and
-# the callee copies the payload out before it could run another contraction.
+#   * everything else through a typed slot, a `Base.RefValue{P}` (owned by the
+#     workspace's `SlotCache` once there is a workspace): written just before
+#     the call, read back first thing in the callee.
+# The payload never holds an operand array, so a slot retains no user data
+# between calls. A workspace belongs to one task at a time, and the callee
+# copies the payload out before it could run another contraction.
+
+# Typed payload slots: one `Base.RefValue{P}` per payload type, plus the last
+# one used. They live as long as the workspace, which is what lets a barrier
+# call allocate nothing.
+mutable struct SlotCache
+    last::Any
+    const slots::IdDict{Any, Any}
+end
+SlotCache() = SlotCache(nothing, IdDict{Any, Any}())
 
 # The typed slot for payload type `P`; the common case (same payload type as
 # the previous crossing) is one type-tag test.
-@inline function _barrier_slot!(ws::ContractWorkspace, ::Type{P}) where {P}
-    cache = ws.slots
+@inline function barrier_slot!(cache::SlotCache, ::Type{P}) where {P}
     slot = cache.last
     slot isa Base.RefValue{P} && return slot
-    return _barrier_slot_slow!(cache, P)
+    return barrier_slot_slow!(cache, P)
 end
 
-# No workspace yet: a one-off slot, on a path that allocates a workspace anyway.
-@inline _barrier_slot!(::Nothing, ::Type{P}) where {P} = Base.RefValue{P}()
-
-@noinline function _barrier_slot_slow!(cache::_SlotCache, ::Type{P}) where {P}
+@noinline function barrier_slot_slow!(cache::SlotCache, ::Type{P}) where {P}
     slot = get!(() -> Base.RefValue{P}(), cache.slots, P)::Base.RefValue{P}
     cache.last = slot
     return slot

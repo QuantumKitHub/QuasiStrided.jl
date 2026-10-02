@@ -1,11 +1,10 @@
 # `C *= beta` tile by tile, never reading A or B: the
-# `k_length == 0 || alpha == 0` pass of `execute!` and `execute_tilewise!`. Uses
-# the tile-sized `tile_*` buffers, which is why those exist even under
-# `oracle = false`.
+# `k_length == 0 || alpha == 0` pass of `execute!`. Borrows the first tile of
+# the M/N offset buffers.
 function _scale_all_of_C!(plan, betaT::T, m_tile::Int, n_tile::Int, m_length::Int, n_length::Int) where {T}
     ws = plan.workspace
-    m_bufs = (ws.tile_m_buf_A, ws.tile_m_buf_C)
-    n_bufs = (ws.tile_n_buf_B, ws.tile_n_buf_C)
+    m_bufs = ws.m.offsets
+    n_bufs = ws.n.offsets
     m_tile_start = 0
     while m_tile_start < m_length
         m_tile_length = min(m_tile, m_length - m_tile_start)
@@ -14,8 +13,8 @@ function _scale_all_of_C!(plan, betaT::T, m_tile::Int, n_tile::Int, m_length::In
         while n_tile_start < n_length
             n_tile_length = min(n_tile, n_length - n_tile_start)
             (_, dN_C) = block_descriptors!(n_bufs, plan.ngroup, n_tile_start, n_tile_length)
-            rowsC = _axis_of(dM_C, ws.tile_m_buf_C, 0)
-            colsC = _axis_of(dN_C, ws.tile_n_buf_C, 0)
+            rowsC = _axis_of(dM_C, m_bufs[2], 0)
+            colsC = _axis_of(dN_C, n_bufs[2], 0)
             GC.@preserve ws _scale_micro_tile!(plan.Cstorage, plan.Cbase, rowsC, colsC, betaT)
             n_tile_start += n_tile_length
         end
@@ -99,7 +98,7 @@ end
 # with its storages stripped; they cross as arguments.
 @inline function _execute_across_barrier!(plan::ContractPlan{T}, alphaT::T, betaT::T, path) where {T}
     core = _strip_storage(plan)
-    slot = _barrier_slot!(plan.workspace, Tuple{typeof(core), T, T})
+    slot = barrier_slot!(plan.workspace.slots, Tuple{typeof(core), T, T})
     slot[] = (core, alphaT, betaT)
     Base.inferencebarrier(_execute_resolved!)(
         path, slot, plan.Astorage, plan.Bstorage, plan.Cstorage
@@ -127,13 +126,13 @@ end
 )
 
 # The continuation the TensorOperations adapter hands `_planned`: `execute!`
-# inside the planning barrier. A struct, not a closure, so the scalars are
-# concretely typed.
-struct _Execute{T}
+# and `release!` inside the planning barrier. A struct, not a closure, so the
+# fields are concretely typed.
+struct _Execute{T, AL}
     alpha::T
     beta::T
+    allocator::AL
 end
-(e::_Execute)(plan::ContractPlan) = (execute!(plan, e.alpha, e.beta); nothing)
 
 # The path predicted before the kernel barrier, so its callee is specialised
 # on the path as well as the kernel.
@@ -149,10 +148,15 @@ end
     sizeof(real(eltype(Cstorage))) < sizeof(real(T)) ?
     kernel_blocking(target_profile(), T, K, shape[1], shape[2]).k_block : 0
 
-@inline _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T} =
-    (_execute_hinted!(plan, e.alpha, e.beta, hint); nothing)
-@inline _continue(e::_Execute{T}, plan::ContractPlan{T}, ::Nothing) where {T} =
-    (execute!(plan, e.alpha, e.beta); nothing)
+@inline function _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T}
+    if hint === nothing
+        execute!(plan, e.alpha, e.beta)
+    else
+        _execute_hinted!(plan, e.alpha, e.beta, hint)
+    end
+    release!(plan, e.allocator)
+    return nothing
+end
 
 # Runs the predicted path statically when it provably equals the plan's own
 # `_select_path` (always, for an automatically chosen kernel); otherwise
@@ -267,13 +271,15 @@ function _panel_copy!(target::ContractPlan, n_block_start::Int, n_block_length::
     C = target.Cstorage
     m_length = axis_length(target.mgroup)
     m_block = target.blocking.m_block
-    fill_offsets!((ws.n_buf_B, ws.n_buf_C), target.ngroup, n_block_start, n_block_length)
+    n_bufC = ws.n.offsets[2]
+    fill_offsets!(ws.n.offsets, target.ngroup, n_block_start, n_block_length)
     m_block_start = 0
     while m_block_start < m_length
         m_block_length = min(m_block, m_length - m_block_start)
-        fill_offsets!((ws.m_buf_A, ws.m_buf_C), target.mgroup, m_block_start, m_block_length)
+        m_bufC = ws.m.offsets[2]
+        fill_offsets!(ws.m.offsets, target.mgroup, m_block_start, m_block_length)
         for j in 1:n_block_length, i in 1:m_block_length
-            c = target.Cbase + ws.m_buf_C[i] + ws.n_buf_C[j] + 1
+            c = target.Cbase + m_bufC[i] + n_bufC[j] + 1
             q = m_block_start + i + (j - 1) * m_length
             if load
                 panel[q] = C[c]
@@ -325,15 +331,11 @@ function _execute_nest!(
         n_tiles = cld(n_block_length, n_tile)
         (rng_nB, rng_nC) = if n_ramp
             _ramp_slivers!(
-                ws.n_desc_B, ws.n_desc_C, n_step[1], n_step[2], n_block_start,
-                n_block_length, n_tile, n_tiles
+                ws.n, n_step[1], n_step[2], n_block_start, n_block_length, n_tile, n_tiles
             )
         else
-            fill_offsets!((ws.n_buf_B, ws.n_buf_C), ngroup, n_block_start, n_block_length)
-            _classify_slivers!(
-                ws.n_desc_B, ws.n_desc_C, ws.n_buf_B, ws.n_buf_C,
-                n_block_length, n_tile, n_tiles
-            )
+            fill_offsets!(ws.n.offsets, ngroup, n_block_start, n_block_length)
+            _classify_slivers!(ws.n, n_block_length, n_tile, n_tiles)
         end
 
         # --- loop over K blocks ---
@@ -349,18 +351,18 @@ function _execute_nest!(
                     _ramp_offset_range(k_step[2], k_block_start, k_block_length),
                 )
             else
-                fill_offsets!((ws.k_buf_A, ws.k_buf_B), plan.kgroup, k_block_start, k_block_length)
-                dA = describe_block(ws.k_buf_A, 0, k_block_length)
-                dB = describe_block(ws.k_buf_B, 0, k_block_length)
+                fill_offsets!(ws.k, plan.kgroup, k_block_start, k_block_length)
+                dA = describe_block(ws.k[1], 0, k_block_length)
+                dB = describe_block(ws.k[2], 0, k_block_length)
                 (
                     dA, dB,
-                    descriptor_offset_range(dA, ws.k_buf_A, 0),
-                    descriptor_offset_range(dB, ws.k_buf_B, 0),
+                    descriptor_offset_range(dA, ws.k[1], 0),
+                    descriptor_offset_range(dB, ws.k[2], 0),
                 )
             end
 
-            colsA_k = _axis_of(dK_A, ws.k_buf_A, 0, aff_kA)
-            rowsB_k = _axis_of(dK_B, ws.k_buf_B, 0, aff_kB)
+            colsA_k = _axis_of(dK_A, ws.k[1], 0, aff_kA)
+            rowsB_k = _axis_of(dK_B, ws.k[2], 0, aff_kB)
 
             # Hoisted bounds checks (B here, A and C per M block): each
             # rectangle is exactly the union of the per-sliver/per-tile
@@ -373,14 +375,14 @@ function _execute_nest!(
             if split_b
                 pack_block_by_lines!(
                     packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), sliver_spec(kernel, 2),
-                    plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, n_block_length, k_block_length,
+                    plan.Bstorage, plan.Bbase, ws.n.offsets[1], rowsB_k, btransform, n_block_length, k_block_length,
                     plan.npack
                 )
             elseif !UNPACKED_B
                 for n_tile_index in 0:(n_tiles - 1)
                     n_tile_start = n_tile_index * n_tile
                     bpanel = _sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
-                    colsB = _axis_of(ws.n_desc_B[n_tile_index + 1], ws.n_buf_B, n_tile_start, aff_nB)
+                    colsB = _axis_of(ws.n.descriptors[1][n_tile_index + 1], ws.n.offsets[1], n_tile_start, aff_nB)
                     @inbounds _pack_sliver!(
                         bpanel, plan.Bstorage, plan.Bbase, colsB, rowsB_k,
                         sliver_spec(kernel, 2), btransform
@@ -395,15 +397,11 @@ function _execute_nest!(
                 m_tiles = cld(m_block_length, m_tile)
                 (rng_mA, rng_mC) = if m_ramp
                     _ramp_slivers!(
-                        ws.m_desc_A, ws.m_desc_C, m_step[1], m_step[2], m_block_start,
-                        m_block_length, m_tile, m_tiles
+                        ws.m, m_step[1], m_step[2], m_block_start, m_block_length, m_tile, m_tiles
                     )
                 else
-                    fill_offsets!((ws.m_buf_A, ws.m_buf_C), mgroup, m_block_start, m_block_length)
-                    _classify_slivers!(
-                        ws.m_desc_A, ws.m_desc_C, ws.m_buf_A, ws.m_buf_C,
-                        m_block_length, m_tile, m_tiles
-                    )
+                    fill_offsets!(ws.m.offsets, mgroup, m_block_start, m_block_length)
+                    _classify_slivers!(ws.m, m_block_length, m_tile, m_tiles)
                 end
 
                 checked_span_bounds(plan.Abase, rng_mA, rng_kA, lenA)
@@ -412,14 +410,14 @@ function _execute_nest!(
                 if split_a
                     pack_block_by_lines!(
                         packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), sliver_spec(kernel, 1),
-                        plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, m_block_length, k_block_length,
+                        plan.Astorage, plan.Abase, ws.m.offsets[1], colsA_k, atransform, m_block_length, k_block_length,
                         plan.mpack
                     )
                 else
                     for m_tile_index in 0:(m_tiles - 1)
                         m_tile_start = m_tile_index * m_tile
                         apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-                        rowsA = _axis_of(ws.m_desc_A[m_tile_index + 1], ws.m_buf_A, m_tile_start, aff_mA)
+                        rowsA = _axis_of(ws.m.descriptors[1][m_tile_index + 1], ws.m.offsets[1], m_tile_start, aff_mA)
                         @inbounds _pack_sliver!(
                             apanel, plan.Astorage, plan.Abase, rowsA, colsA_k,
                             sliver_spec(kernel, 1), atransform
@@ -465,11 +463,11 @@ end
     for n_tile_index in 0:(n_tiles - 1)
         n_tile_start = n_tile_index * n_tile
         bpanel = _sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
-        colsC = _axis_of(ws.n_desc_C[n_tile_index + 1], ws.n_buf_C, n_tile_start, aff_nC)
+        colsC = _axis_of(ws.n.descriptors[2][n_tile_index + 1], ws.n.offsets[2], n_tile_start, aff_nC)
         for m_tile_index in 0:(m_tiles - 1)
             m_tile_start = m_tile_index * m_tile
             apanel = _sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-            rowsC = _axis_of(ws.m_desc_C[m_tile_index + 1], ws.m_buf_C, m_tile_start, aff_mC)
+            rowsC = _axis_of(ws.m.descriptors[2][m_tile_index + 1], ws.m.offsets[2], m_tile_start, aff_mC)
             # Inside the caller's C check.
             @inbounds _execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,

@@ -57,11 +57,9 @@ end
 # Classify each register sliver of a just-filled macro block, and return the
 # two maps' offset ranges over the whole block (the slivers partition it) for
 # the hoisted bounds checks.
-@inline function _classify_slivers!(
-        desc1::Vector{BlockDescriptor}, desc2::Vector{BlockDescriptor},
-        buf1::Vector{Int}, buf2::Vector{Int},
-        block_length::Int, tile::Int, tile_count::Int
-    )
+@inline function _classify_slivers!(g::GroupBuffers, block_length::Int, tile::Int, tile_count::Int)
+    desc1, desc2 = g.descriptors
+    buf1, buf2 = g.offsets
     lo1 = typemax(Int); hi1 = typemin(Int)
     lo2 = typemax(Int); hi2 = typemin(Int)
     for tile_index in 0:(tile_count - 1)
@@ -100,10 +98,10 @@ end
 
 # `_classify_slivers!`'s closed-form twin.
 @inline function _ramp_slivers!(
-        desc1::Vector{BlockDescriptor}, desc2::Vector{BlockDescriptor},
-        step1::Int, step2::Int, first::Int,
+        g::GroupBuffers, step1::Int, step2::Int, first::Int,
         block_length::Int, tile::Int, tile_count::Int
     )
+    desc1, desc2 = g.descriptors
     for tile_index in 0:(tile_count - 1)
         tile_start = tile_index * tile
         tile_length = min(tile, block_length - tile_start)

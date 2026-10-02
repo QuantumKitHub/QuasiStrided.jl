@@ -204,82 +204,28 @@ end
     @test c1 == c2
 end
 
-# Run `f` with an empty workspace pool on the current task (not a spawned one:
-# `@test` finds its testset through task-local storage too), restoring it after.
-function _qs_with_clean_pool(f)
-    key = QuasiStrided._QS_WORKSPACE_KEY
-    tls = task_local_storage()
-    prior = get(tls, key, nothing)
-    delete!(tls, key)
-    try
-        return f()
-    finally
-        prior === nothing ? delete!(tls, key) : (tls[key] = prior)
-    end
-end
-
-_qs_haspool() = haskey(task_local_storage(), QuasiStrided._QS_WORKSPACE_KEY)
-
-@testset "workspace pooling: default path reuses a task-local workspace" begin
-    Random.seed!(90210)
-    A, B = randn(20, 30), randn(30, 25)
-    run_once() = (C = zeros(20, 25); @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]; C)
-
-    steady = _qs_with_clean_pool() do
-        @test !_qs_haspool()
-        @test run_once() ≈ A * B
-        pool = task_local_storage(QuasiStrided._QS_WORKSPACE_KEY)
-        ws = pool[Float64]
-        steady = @allocated run_once()
-        @test pool[Float64] === ws
-        steady
-    end
-    # Julia 1.10 does not keep SIMDKernel's accumulator in registers.
-    @test steady < 20_000 skip = (VERSION < v"1.11")
-    Cv, Av, Bv = StridedView(zeros(20, 25)), StridedView(A), StridedView(B)
-    cold = @allocated plan_contract(Cv, Av, (1, -1), Bv, (-1, 2), (1, 2); oracle = false)
-    @test cold - steady > 5_000 skip = (VERSION < v"1.11")
-end
-
-@testset "workspace pooling: explicit allocators never touch the pool" begin
+@testset "tensorcontract!: allocator-routed workspace, released per call" begin
     Random.seed!(13571113)
     A, B = randn(20, 30), randn(30, 25)
-    _qs_with_clean_pool() do
-        for _ in 1:2
-            C1, C2, C3 = zeros(20, 25), zeros(20, 25), zeros(20, 25)
-            @tensor backend = qsbackend allocator = TensorOperations.ManualAllocator() C1[i, j] = A[i, k] * B[k, j]
-            @tensor backend = qsbackend allocator = TensorOperations.BufferAllocator() C2[i, j] = A[i, k] * B[k, j]
-            @no_escape begin
-                @tensor backend = qsbackend allocator = default_buffer() C3[i, j] = A[i, k] * B[k, j]
-            end
-            @test C1 ≈ C2 ≈ C3 ≈ A * B
+    buffer = TensorOperations.BufferAllocator()
+    for _ in 1:2
+        C1, C2, C3 = zeros(20, 25), zeros(20, 25), zeros(20, 25)
+        @tensor backend = qsbackend allocator = TensorOperations.ManualAllocator() C1[i, j] = A[i, k] * B[k, j]
+        @tensor backend = qsbackend allocator = buffer C2[i, j] = A[i, k] * B[k, j]
+        @no_escape begin
+            @tensor backend = qsbackend allocator = default_buffer() C3[i, j] = A[i, k] * B[k, j]
         end
-        @test !_qs_haspool()
-        C = zeros(20, 25)
-        @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]
-        @test _qs_haspool()
+        @test C1 ≈ C2 ≈ C3 ≈ A * B
     end
+    @test isempty(buffer)
 end
 
-# One pooled workspace per eltype, grown and then reused oversized.
-@testset "workspace pooling: correctness across shapes and eltypes on one task" begin
-    Random.seed!(2024)
-    _qs_with_clean_pool() do
-        for (m, k, n) in ((6, 8, 5), (37, 41, 29), (3, 3, 3), (17, 90, 2))
-            A, B = randn(m, k), randn(k, n)
-            C = fill(NaN, m, n)
-            @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]
-            @test C ≈ A * B
-        end
-        for T in (Float64, ComplexF64, Float32, ComplexF32, Float64, ComplexF64)
-            A, B = randn(T, (12, 7)), randn(T, (7, 9))
-            C = fill(convert(T, NaN), (12, 9))
-            @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]
-            @test C ≈ A * B
-        end
-        pool = task_local_storage(QuasiStrided._QS_WORKSPACE_KEY)
-        for T in all_eltypes
-            @test pool[T] isa QuasiStrided.ContractWorkspace{T, Vector{real(T)}}
-        end
-    end
+@testset "tensorcontract!: the default path allocates no more than planning" begin
+    A, B, C = randn(20, 30), randn(30, 25), zeros(20, 25)
+    run_once() = TO.tensorcontract!(C, A, ((1,), (2,)), false, B, ((1,), (2,)), false, ((1, 2), ()), 1.0, 0.0, qsbackend)
+    Cv, Av, Bv = StridedView(C), StridedView(A), StridedView(B)
+    plan_once() = plan_contract(Cv, Av, (1, -1), Bv, (-1, 2), (1, 2))
+    run_once(); plan_once()
+    @test C ≈ A * B
+    @test (@allocated run_once()) <= (@allocated plan_once()) skip = (VERSION < v"1.11")
 end

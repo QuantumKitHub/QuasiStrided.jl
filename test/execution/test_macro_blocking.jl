@@ -1,6 +1,5 @@
-# Randomized agreement of the five-loop `execute!` with a dense matmul and with
-# `execute_tilewise!`, at block sizes small enough to split every dimension,
-# over real and complex kernels, alpha/beta and the conjugation flags and ops.
+# Randomized agreement of the five-loop `execute!` with a dense matmul, at
+# block sizes small enough to split every dimension, over real and complex kernels, alpha/beta and the conjugation flags and ops.
 # helpers.jl binds `plan_contract`/`execute!` unqualified in this scope, so
 # names here are written `QuasiStrided.<name>`.
 
@@ -51,7 +50,7 @@ function _macro_scalar(rng, ::Type{T}) where {T}
     return T <: Complex ? T(rand(rng, -3.0:0.5:3.0), rand(rng, -3.0:0.5:3.0)) : T(rand(rng, -3.0:0.5:3.0))
 end
 
-@testset "macro driver: randomized agreement vs dense matmul and the oracle ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
+@testset "macro driver: randomized agreement vs dense matmul ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
     rng = MersenneTwister(0x5A17_D817)
     kernels = _macro_kernels(T)
     @test !isempty(kernels)
@@ -72,9 +71,7 @@ end
 
         C = copy(Cstart)
         QuasiStrided.execute!(_macro_plan(C, Amat, Bmat, kernel, m_block, k_block, n_block; kw...), alpha, beta)
-        Ctw = copy(Cstart)
-        QuasiStrided.execute_tilewise!(_macro_plan(Ctw, Amat, Bmat, kernel, m_block, k_block, n_block; kw...), alpha, beta)
-        ok = isapprox(C, expected; rtol = _macro_rtol(T, Ka)) && isapprox(C, Ctw; rtol = _macro_rtol(T, Ka))
+        ok = isapprox(C, expected; rtol = _macro_rtol(T, Ka))
         ok || @error "macro driver case $i failed" kernel Ma Ka Na m_block k_block n_block kw alpha beta
         @test ok
     end
@@ -105,17 +102,15 @@ end
     Amat, Bmat = randn(a_n, q_n, k_n), randn(k_n, n_n)
     Cstart = randn(a_n, q_n, n_n)
     Cref = _brute_ref(Amat, (1, 2, 3), Bmat, (3, 4), Cstart, (1, 2, 4), 1.7, -0.4)
-    for run! in (QuasiStrided.execute!, QuasiStrided.execute_tilewise!)
-        Cbig = randn(a_n + 3, q_n, n_n)
-        Csub = view(Cbig, 1:a_n, :, :)
-        Csub .= Cstart
-        plan = QuasiStrided.plan_contract(
-            StridedView(Csub), StridedView(Amat), (1, 2, 3), StridedView(Bmat), (3, 4), (1, 2, 4);
-            kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 8, k_block = 5, n_block = 3
-        )
-        run!(plan, 1.7, -0.4)
-        @test isapprox(Array(Csub), Cref; rtol = _macro_rtol(Float64, k_n))
-    end
+    Cbig = randn(a_n + 3, q_n, n_n)
+    Csub = view(Cbig, 1:a_n, :, :)
+    Csub .= Cstart
+    plan = QuasiStrided.plan_contract(
+        StridedView(Csub), StridedView(Amat), (1, 2, 3), StridedView(Bmat), (3, 4), (1, 2, 4);
+        kernel = ScalarKernel(Val(4), Val(3), Float64), m_block = 8, k_block = 5, n_block = 3
+    )
+    QuasiStrided.execute!(plan, 1.7, -0.4)
+    @test isapprox(Array(Csub), Cref; rtol = _macro_rtol(Float64, k_n))
 end
 
 @testset "macro driver: several blocks at the default blocking ($(nameof(typeof(k))){$T})" for T in (ComplexF64, ComplexF32), k in _macro_kernels(T)

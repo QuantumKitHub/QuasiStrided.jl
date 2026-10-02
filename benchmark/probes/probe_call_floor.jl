@@ -1,6 +1,6 @@
 # Per-call floor of `tensorcontract!` on tiny problems: QuasiStridedBackend vs
 # StridedBLAS, through TensorOperations' public entry point with the default
-# allocator (so QuasiStrided uses its pooled task workspace).
+# allocator.
 #
 #   JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 taskset -c 4-7 \
 #       julia --project=benchmark benchmark/probes/probe_call_floor.jl [label]
