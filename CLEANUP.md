@@ -23,7 +23,7 @@ TTFX when codegen is touched).
 | 8 | Complex/mixed kernels | (merged into chunk 7's files) | done |
 | 9 | Labels | `planning/labels.jl` (`conjugation.jl` → plan.jl) | done |
 | 10 | Kernel selection | `planning/kernel_selection.jl` | done |
-| 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl`, the line-by-line packer | |
+| 11 | Blocking | `blocking.jl`, line packing (now `packing/line_packing.jl`) | done |
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | |
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | |
 | 14 | Five-loop nest | `execution/macrokernel.jl`, `execute.jl` | |
@@ -191,6 +191,18 @@ override rows. The kernel type (unparameterised, e.g. `PlanarKernel`) replaces
 barrier as `Val{K}()` (a bare `Type` argument misses the dispatch fast path,
 +350–430 ns per call).
 
+### D15. Blocking, host defaults, line packing (chunk 11, applied)
+
+`default_blocking(kernel, profile)` evaluates the analytical model with the
+kernel's own tile and sliver bytes (complex and named kernels now get their
+own optimum; real defaults unchanged); fixed rows only when caches are
+undetected. No host-defaults cache: shape rules branch on `profile.isa`, and
+`TargetProfile` derives `l2_share`/`l3_share`/`double_pumped` at
+construction (computing them per plan cost 25–57 ns). The detected cache-line
+size is used (`line_bytes`). The line-packing feature lives in
+`packing/line_packing.jl`; `pack_split` takes the `SliverSpec`; the packer is
+`pack_block_by_lines!`.
+
 ## Possible improvements
 
 - Piecewise-affine block descriptions instead of block-sized offset buffers:
@@ -201,6 +213,9 @@ barrier as `Val{K}()` (a bare `Type` argument misses the dispatch fast path,
 - `PackedPanel` without a raw pointer:
   https://github.com/lkdvos/QuasiStrided.jl/issues/15.
 
+- The A/B swap compares tile heights with `select_shape(...; k_length = ∞)`,
+  so it never sees the small-K run demotion. Benchmark whether letting it see
+  that step picks better orientations for small K.
 - Analytical shape selection over a bounded search space instead of the menu:
   https://github.com/lkdvos/QuasiStrided.jl/issues/17.
 - M and N are both ordered by their C strides. Only the M side matters for the
@@ -209,6 +224,9 @@ barrier as `Val{K}()` (a bare `Type` argument misses the dispatch fast path,
   suite layouts where B's and C's N strides disagree.
 
 ## Open items (to revisit in their chunk)
+
+- One `pack_block!(panel, block, spec, transform, order)` for per-sliver and
+  by-lines packing, so the nest makes one call per block (chunk 14).
 
 - Internal constants still use `_UPPER` names; drop the underscores in one pass
   at the end (D2).
