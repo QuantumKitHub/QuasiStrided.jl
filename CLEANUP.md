@@ -18,9 +18,9 @@ TTFX when codegen is touched).
 | 3 | Tiles | `layout/tiles.jl` | done |
 | 4 | Packing formats | `packing/format.jl`, `panel.jl` (`transposed.jl` → chunk 11) | done |
 | 5 | Packers | `packing/pack.jl`, `pack_contiguous.jl` | done |
-| 6 | Kernel interface | `microkernels/interface.jl`, `scalar.jl` | done |
-| 7 | SIMD kernels | `simd.jl`, `planar.jl` | in progress (with 8) |
-| 8 | Complex/mixed kernels | `onem.jl`, `fmaddsub.jl`, `mixed.jl` | in progress (with 7) |
+| 6 | Kernel interface | `microkernels/interface.jl` (+ ScalarKernel) | done |
+| 7 | Vector kernels | now `kernels.jl`, `vecops.jl`, `steps.jl`, `stores.jl` | done |
+| 8 | Complex/mixed kernels | (merged into chunk 7's files) | done |
 | 9 | Labels | `planning/labels.jl`, `conjugation.jl` | |
 | 10 | Kernel selection | `planning/kernel_selection.jl` | |
 | 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl`, the line-by-line packer | |
@@ -157,7 +157,7 @@ it: each executed variant is smaller and branch-free (less code fetched per
 store), at the cost of compile time and code size; measure both. `b_step_load*` hooks get descriptive
 names.
 
-### D12. Kernels = K step + accumulator layout (chunks 7–8)
+### D12. Kernels = K step + accumulator layout (chunks 7–8, applied)
 
 Three K steps (real, planar, fmaddsub) and three accumulator layouts (real,
 split re/im, lane pairs). `accumulator_layout(kernel)` selects one generic
@@ -166,7 +166,13 @@ layout supplies its full-block store and lane value); one generic `add_tile`
 over `accumulate_step` with `k_steps` (1m: 2k). `inner(k)` is computed, not a
 field (no `KI` parameter). One generic constructor without `W`; generic
 `complex_method`/`lanewidth`. 1m gets the lane-pair vector store. The `beta`
-hoist is a separate commit on top, measured on its own.
+hoist (cc78fd1) is kept: small K 19–27% faster (Float64) and 3–10%
+(ComplexF64), large cases unchanged, vector stores ~35–40% larger, first call
+Float64 3.1 → 3.7 s and ComplexF64 2.0 → 2.4 s, full suite ~18 → ~28 min.
+Files, by concern: `interface.jl` (contract), `kernels.jl` (all kernel types
+and their traits; `AccumulatorLayout`/`KernelMethod` are Holy traits),
+`vecops.jl` (shared SIMD ops), `steps.jl` (K steps, `add_tile`), `stores.jl`
+(layouts' stores).
 
 ## Possible improvements
 
