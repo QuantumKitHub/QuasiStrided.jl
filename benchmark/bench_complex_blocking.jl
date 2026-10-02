@@ -1,7 +1,10 @@
-# Same-node A/B of complex cache blocking: the kernel's own analytical blocking
-# (`default_blocking`) against the real row of `real(T)`'s default kernel
-# divided by packed reals per element, interleaved per case, for every menu
-# shape of the planar, 1m and fmaddsub kernels that fits the host's vectors.
+# Same-node comparison of complex cache blocking, interleaved per case, for
+# every menu shape of the planar, 1m and fmaddsub kernels that fits the host's
+# vectors:
+#   old    - the real row of `real(T)`'s default kernel divided by packed reals
+#   new    - the kernel's own analytical blocking (`default_blocking`)
+#   hybrid - the real row's `k_block`, `m_block`/`n_block` from the kernel's
+#            byte budget at that `k_block`, rounded down to MR/NR
 #
 #   julia --project=benchmark benchmark/bench_complex_blocking.jl
 #       [--dtypes ComplexF64,ComplexF32] [--rounds 3] [--reps 3] [--outdir DIR]
@@ -10,7 +13,7 @@ include(joinpath(@__DIR__, "harness.jl"))
 
 using QuasiStrided: PlanarKernel, OneMKernel, FMAddSubKernel, Blocking, default_blocking,
     kernel_shapes, kernel_from_shape, derived_shape, target_profile, pack_formats,
-    reals_per_element, scalartype
+    reals_per_element, scalartype, tile_size
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "ComplexF64,ComplexF32"))
 const ROUNDS = argopt("rounds", 3)
@@ -33,6 +36,20 @@ function scaled_real_row(kernel)
     return Blocking(max(1, row.m_block ÷ a_reals), row.k_block, max(1, row.n_block ÷ b_reals))
 end
 
+function hybrid_blocking(kernel)
+    T = scalartype(kernel)
+    R = real(T)
+    profile = target_profile()
+    row = default_blocking(kernel_from_shape(derived_shape(profile, R), R, SIMDKernel))
+    profile.l1d.bytes > 0 && profile.l2.bytes > 0 || return scaled_real_row(kernel)
+    MR, NR = tile_size(kernel)
+    SA, SB = map(f -> reals_per_element(f) * sizeof(R), pack_formats(typeof(kernel)))
+    k = row.k_block
+    m = max(MR, ((profile.l2_share ÷ 2) ÷ (k * SA)) ÷ MR * MR)
+    n = max(NR, ((profile.l2_share + profile.l3_share) ÷ (k * SB)) ÷ NR * NR)
+    return Blocking(m, k, n)
+end
+
 function time_blocking(fx, kernel, b::Blocking, ::Type{T}) where {T}
     plan = plan_contract(
         fx.Cv, fx.Av, fx.indA, fx.Bv, fx.indB, fx.indC;
@@ -43,7 +60,7 @@ end
 
 function run(io)
     print_env_header(stdout, "bench_complex_blocking.jl")
-    println(io, "dtype,kernel,MR,NR,W,case,old_m,old_k,old_n,new_m,new_k,new_n,round,t_old,t_new")
+    println(io, "dtype,kernel,MR,NR,W,case,old_m,old_k,old_n,new_m,new_k,new_n,hyb_m,hyb_k,hyb_n,round,t_old,t_new,t_hybrid")
     rng = MersenneTwister(1)
     lanes(T) = target_profile().vector_bytes ÷ sizeof(real(T))
     for T in RUN_DTYPES, K in (PlanarKernel, OneMKernel, FMAddSubKernel)
@@ -52,7 +69,8 @@ function run(io)
             kernel = K(Val(MR), Val(NR), T, Val(W))
             new = default_blocking(kernel)
             old = scaled_real_row(kernel)
-            if new == old
+            hybrid = hybrid_blocking(kernel)
+            if new == old == hybrid
                 println("skip $T $(nameof(K)) ($MR,$NR,$W): blocking unchanged $new")
                 continue
             end
@@ -61,18 +79,20 @@ function run(io)
                 for r in 1:ROUNDS
                     t_old = time_blocking(fx, kernel, old, T)
                     t_new = time_blocking(fx, kernel, new, T)
+                    t_hybrid = time_blocking(fx, kernel, hybrid, T)
                     println(
                         io, join(
                             (
                                 T, nameof(K), MR, NR, W, spec.name, old.m_block, old.k_block, old.n_block,
-                                new.m_block, new.k_block, new.n_block, r, t_old, t_new,
+                                new.m_block, new.k_block, new.n_block,
+                                hybrid.m_block, hybrid.k_block, hybrid.n_block, r, t_old, t_new, t_hybrid,
                             ), ","
                         )
                     )
                     flush(io)
                     @printf(
-                        "%s %s (%d,%d,%d) %s round %d: old %.4g s, new %.4g s, new/old %.3f\n",
-                        T, nameof(K), MR, NR, W, spec.name, r, t_old, t_new, t_new / t_old
+                        "%s %s (%d,%d,%d) %s round %d: old %.4g s, new/old %.3f, hybrid/old %.3f\n",
+                        T, nameof(K), MR, NR, W, spec.name, r, t_old, t_new / t_old, t_hybrid / t_old
                     )
                 end
             end

@@ -24,7 +24,7 @@ TTFX when codegen is touched).
 | 9 | Labels | `planning/labels.jl` (`conjugation.jl` → plan.jl) | done |
 | 10 | Kernel selection | `planning/kernel_selection.jl` | done |
 | 11 | Blocking | `blocking.jl`, line packing (now `packing/line_packing.jl`) | done |
-| 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | |
+| 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | done |
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | |
 | 14 | Five-loop nest | `execution/macrokernel.jl`, `execute.jl` | |
 | 15 | Alternative paths | `oracle.jl`, `unpackedb.jl` | |
@@ -202,6 +202,26 @@ construction (computing them per plan cost 25–57 ns). The detected cache-line
 size is used (`line_bytes`). The line-packing feature lives in
 `packing/line_packing.jl`; `pack_split` takes the `SliverSpec`; the packer is
 `pack_block_by_lines!`.
+
+### D16. Workspace (chunk 12, applied)
+
+No workspace pooling or reuse API: a plan builds its workspace through the
+TensorOperations allocator; reusing a plan is the way to reuse buffers
+(allocation-free). Measured cost under `DefaultAllocator`: per-call floor
+~3x, 128³–256³ +13–36%; none under Bumper. If this matters, design an
+explicit reuse mechanism rather than a cache. The tile-wise oracle is gone
+(tests compare against the brute-force reference). Offsets and descriptors
+are bundled per group (`ws.m`, `ws.n`, `ws.k`), not per operand: a group's
+two maps are filled together and share a lifetime. Plans are single-task.
+
+### Complex blocking benchmark (after chunk 11)
+
+Same-node A/B, `bench_complex_blocking.jl`, jobs 7160147–9: the kernel's own
+model is faster on Icelake for large sizes (0.58–0.92; the old scaled row was
+rounded *up* to MR past the L2 budget), but 1–10% slower on Genoa/Rome and at
+small M, following the smaller `k_block`. Rerun with a third "hybrid"
+variant (real row's `k_block`, own `m_block`/`n_block` rounded down) to pick
+one.
 
 ## Possible improvements
 
