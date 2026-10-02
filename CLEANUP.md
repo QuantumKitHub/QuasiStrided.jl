@@ -21,7 +21,7 @@ TTFX when codegen is touched).
 | 6 | Kernel interface | `microkernels/interface.jl` (+ ScalarKernel) | done |
 | 7 | Vector kernels | now `kernels.jl`, `vecops.jl`, `steps.jl`, `stores.jl` | done |
 | 8 | Complex/mixed kernels | (merged into chunk 7's files) | done |
-| 9 | Labels | `planning/labels.jl`, `conjugation.jl` | |
+| 9 | Labels | `planning/labels.jl` (`conjugation.jl` → plan.jl) | done |
 | 10 | Kernel selection | `planning/kernel_selection.jl` | |
 | 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl`, the line-by-line packer | |
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | |
@@ -174,6 +174,14 @@ and their traits; `AccumulatorLayout`/`KernelMethod` are Holy traits),
 `vecops.jl` (shared SIMD ops), `steps.jl` (K steps, `add_tile`), `stores.jl`
 (layouts' stores).
 
+### D13. Labels (chunk 9, applied)
+
+`TupleTools.sortperm`/`getindices` (its merge sort is stable; relied on and
+tested) replace the insertion sort; one K-order function; `l2_core_bytes`
+moves to defaults.jl; `isconj`/`op_conjugates` move into plan.jl. The K-order
+model, free-label order and swap rule are unchanged; labels.jl stays one
+file.
+
 ## Possible improvements
 
 - Piecewise-affine block descriptions instead of block-sized offset buffers:
@@ -184,7 +192,15 @@ and their traits; `AccumulatorLayout`/`KernelMethod` are Holy traits),
 - `PackedPanel` without a raw pointer:
   https://github.com/lkdvos/QuasiStrided.jl/issues/15.
 
+- M and N are both ordered by their C strides. Only the M side matters for the
+  vector store; for N the order mainly decides ramp detection and C locality,
+  while B's pack (and the unpacked-B path) would prefer B's strides. Measure on
+  suite layouts where B's and C's N strides disagree.
+
 ## Open items (to revisit in their chunk)
+
+- Internal constants still use `_UPPER` names; drop the underscores in one pass
+  at the end (D2).
 
 - Detected `l1d.line` is unused: `_K_LINE_BYTES = 64` in `labels.jl` (K-order
   cost model) and `pack_split.jl`; thread the detected line size through
