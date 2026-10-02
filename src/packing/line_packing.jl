@@ -4,7 +4,7 @@
 # they alias in a few cache sets and the pack costs a memory latency per
 # element. A split plan enumerates the free composite so that a macro block
 # holds whole lines, and packs each block line by line
-# (`_pack_block_transposed!`); the packed format and the K order are unchanged.
+# (`pack_block_by_lines!`); the packed format and the K order are unchanged.
 
 """
     PackSplit(q, dj, L, kinner, Eq, E)
@@ -27,20 +27,21 @@ end
 
 const _NO_SPLIT = PackSplit(0, 0, 0, false, 0, 0)
 
-_is_split(s::PackSplit) = s.L != 0
+is_split(s::PackSplit) = s.L != 0
 
-# The split for the operand behind map 1 of `g` (A for M, B for N) and the block
-# extent it needs, or `(eff, _NO_SPLIT)`. `eff` is the plan's extent, `rounded`
-# the requested one rounded to `R`; a split block may take the budget the
-# blocking reserved for `k_block_requested` when the K extent clamps `k_block`.
-# `l2bytes = nothing`: `_split_capacity`, doubled for complex, whose block
-# walk costs more per element.
-@inline function _pack_split(
-        g::AxisGroup{D}, kg::AxisGroup, kmap::Int, R::Int, S::Int, complex::Bool, k_block::Int,
-        eff::Int, rounded::Int, k_block_requested::Int, l2bytes::Union{Int, Nothing} = nothing
-    ) where {D}
+# The split for the free group `g` of the operand packed as `spec` (A for M, B
+# for N), whose storage eltype takes `S` bytes, and the block extent it needs,
+# or `(eff, _NO_SPLIT)`. `eff` is the plan's extent, `rounded` the requested
+# one rounded to the tile; a split block may take the budget the blocking
+# reserved for `k_block_requested` when the K extent clamps `k_block`.
+# `l2bytes = nothing`: `split_capacity`, doubled for complex, whose block walk
+# costs more per element.
+@inline function pack_split(
+        g::AxisGroup{D}, kg::AxisGroup, spec::SliverSpec{I, R, F}, S::Int, k_block::Int,
+        eff::Int, rounded::Int, k_block_requested::Int; l2bytes::Union{Int, Nothing} = nothing
+    ) where {D, I, R, F}
     D < 256 || return (eff, _NO_SPLIT)
-    line = _K_LINE_BYTES
+    line = line_bytes(target_profile())
     d1 = 0
     for d in 1:D
         g.lengths[d] > 1 && (d1 = d; break)
@@ -51,16 +52,15 @@ _is_split(s::PackSplit) = s.L != 0
         g.lengths[d] > 1 && abs(g.strides[1][d]) == 1 && (dj = d; break)
     end
     dj == 0 && return (eff, _NO_SPLIT)
-    return _pack_split_window(g, kg, kmap, d1, dj, R, S, complex, k_block, eff, rounded, k_block_requested, l2bytes)
+    return pack_split_window(g, kg, I, d1, dj, R, S, F !== RealFormat, line, k_block, eff, rounded, k_block_requested, l2bytes)
 end
 
 # Out of line: shared by every eltype, and most plans never get here.
-@noinline function _pack_split_window(
+@noinline function pack_split_window(
         g::AxisGroup, kg::AxisGroup{DK}, kmap::Int, d1::Int, dj::Int, R::Int, S::Int, complex::Bool,
-        k_block::Int, eff::Int, rounded::Int, k_block_requested::Int, l2bytes::Union{Int, Nothing}
+        line::Int, k_block::Int, eff::Int, rounded::Int, k_block_requested::Int, l2bytes::Union{Int, Nothing}
     ) where {DK}
-    line = _K_LINE_BYTES
-    L = _largest_divisor_upto(g.lengths[dj], max(1, line ÷ S))
+    L = largest_divisor_upto(g.lengths[dj], max(1, line ÷ S))
     L >= 2 || return (eff, _NO_SPLIT)
 
     ks = 0
@@ -81,26 +81,25 @@ end
     end
     klines = ks * S >= line ? k_block : cld(k_block * ks * S, line)
     aliased = abs(g.strides[1][d1]) * S % _K_WALK_FAR_BYTES == 0
-    cap = something(l2bytes, _split_capacity(target_profile(), aliased) << complex)
+    cap = something(l2bytes, split_capacity(target_profile(), aliased) << complex)
     widemul(psi, max(1, klines) * line) > cap || return (eff, _NO_SPLIT)
-    return _pack_split_dynamic(g.lengths, d1, dj, L, psi, R, eff, rounded, k_block, k_block_requested, kinner)
+    return pack_split_dynamic(g.lengths, d1, dj, L, psi, R, eff, rounded, k_block, k_block_requested, kinner)
 end
 
 # The cache that can hold the per-sliver walk's reuse window: the core's L2
 # share, plus its L3 share unless the sliver steps a whole number of pages,
 # which folds the lines it gathers into a few sets of every level.
-function _split_capacity(profile::TargetProfile, aliased::Bool)
+function split_capacity(profile::TargetProfile, aliased::Bool)
     l2 = l2_core_bytes(profile)
-    l3 = profile.l3
-    (aliased || l3.bytes <= 0) && return l2
-    return l2 + core_bytes(profile, l3)
+    (aliased || profile.l3.bytes <= 0) && return l2
+    return l2 + profile.l3_share
 end
 
 # Past the tests above the plan is for a large contraction; a dynamic call keeps
 # the search from being compiled for every other plan.
-@noinline _pack_split_dynamic(args...) = Base.inferencebarrier(_pack_split_blocks)(args...)::Tuple{Int, PackSplit}
+@noinline pack_split_dynamic(args...) = Base.inferencebarrier(pack_split_blocks)(args...)::Tuple{Int, PackSplit}
 
-function _pack_split_blocks(
+function pack_split_blocks(
         lengths::NTuple{D, Int}, d1::Int, dj::Int, L::Int, psi::Int, R::Int,
         eff::Int, rounded::Int, k_block::Int, k_block_requested::Int, kinner::Bool
     ) where {D}
@@ -128,11 +127,11 @@ function _pack_split_blocks(
     (q, Eq, E) = best[3] > 0 ? best : anyc
     E == 0 && return (eff, _NO_SPLIT)
     blk = lcm(R, E * L)
-    neweff = min(budget ÷ blk * blk, _roundup(prod(lengths), R))
+    neweff = min(budget ÷ blk * blk, roundup(prod(lengths), R))
     return (neweff, PackSplit(q, dj, L, kinner, Eq, E))
 end
 
-@inline function _largest_divisor_upto(n::Int, cap::Int)
+@inline function largest_divisor_upto(n::Int, cap::Int)
     for L in min(n, cap):-1:1
         n % L == 0 && return L
     end
@@ -141,15 +140,15 @@ end
 
 # `g` in the enumeration `s` describes: `q` and `dj` each replaced by an (inner,
 # outer) pair of axes, the inner chunk of `dj` moved right after that of `q`.
-function _split_group(g::AxisGroup{D, P}, s::PackSplit) where {D, P}
-    ax(k, p) = _split_axis(g, s, k, p)
+function split_group(g::AxisGroup{D, P}, s::PackSplit) where {D, P}
+    ax(k, p) = split_axis(g, s, k, p)
     return AxisGroup(
         ntuple(k -> ax(k, 0), Val(D + 2)), ntuple(p -> ntuple(k -> ax(k, p), Val(D + 2)), Val(P))
     )
 end
 
-# Length (`p == 0`) or map-`p` stride of axis `k` of `_split_group(g, s)`.
-@inline function _split_axis(g::AxisGroup, s::PackSplit, k::Int, p::Int)
+# Length (`p == 0`) or map-`p` stride of axis `k` of `split_group(g, s)`.
+@inline function split_axis(g::AxisGroup, s::PackSplit, k::Int, p::Int)
     len(d) = g.lengths[d]
     str(d) = g.strides[p][d]
     q, dj, Eq, L = Int(s.q), Int(s.dj), Int(s.Eq), Int(s.L)
@@ -160,4 +159,57 @@ end
     k <= dj + 1 && return p == 0 ? len(k - 2) : str(k - 2)
     k == dj + 2 && return p == 0 ? len(dj) ÷ L : L * str(dj)
     return p == 0 ? len(k - 2) : str(k - 2)
+end
+
+# Pack a macro block of `fcount` free coordinates (offsets `fbuf`, enumerated by
+# a split group, whole `E x L` groups) by `k_block_length` K steps into the
+# panels the per-sliver packer would write, reading each group line by line:
+# coordinate `i0 + E * y2` is element `y2` of the line at `i0`. `@noinline`: one
+# call per block, and inlined into the nest it slows the nest's micro-kernel
+# loop.
+@noinline function pack_block_by_lines!(
+        buffer::PK, spec::SliverSpec{I, R}, storage::ST, base::Int, fbuf::Vector{Int},
+        kaxis::KA, transform::F, fcount::Int, k_block_length::Int, split::PackSplit
+    ) where {PK, I, R, ST, KA <: AbstractVector{Int}, F}
+    E, L = Int(split.E), Int(split.L)
+    G = E * L
+    # The sliver and lane come from a per-element divrem by the constant `R`;
+    # hoisting them per line lets LLVM rewrite the loop so the line misses no
+    # longer overlap.
+    emit(kbase, i, p) = @inbounds pack_line_element!(
+        buffer, spec, sliver_width(spec) * k_block_length, transform(storage[kbase + fbuf[i + 1]]), i, p
+    )
+    if split.kinner
+        for g0 in 0:G:(fcount - 1), y1 in 0:(E - 1), p in 1:k_block_length
+            kbase = @inbounds base + kaxis[p] + 1
+            for y2 in 0:(L - 1)
+                emit(kbase, g0 + y1 + E * y2, p)
+            end
+        end
+    else
+        for g0 in 0:G:(fcount - 1), p in 1:k_block_length
+            kbase = @inbounds base + kaxis[p] + 1
+            for y1 in 0:(E - 1), y2 in 0:(L - 1)
+                emit(kbase, g0 + y1 + E * y2, p)
+            end
+        end
+    end
+    valid = fcount % R
+    if valid != 0
+        rb = (fcount ÷ R) * sliver_width(spec) * k_block_length
+        for p in 1:k_block_length, t in (valid + 1):R
+            emit_padding!(buffer, spec, rb, t, p)
+        end
+    end
+    return nothing
+end
+
+# Element `x` of zero-based block coordinate `i` (sliver `i ÷ R`, lane
+# `i % R + 1`) at K step `p`.
+@inline function pack_line_element!(
+        buffer::PK, spec::SliverSpec{I, R}, panel::Int, x, i::Int, p::Int
+    ) where {PK, I, R}
+    r, t = divrem(i, R)
+    emit_value!(buffer, spec, r * panel, t + 1, p, convert(element_type(spec), x))
+    return nothing
 end

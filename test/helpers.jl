@@ -53,6 +53,14 @@ using QuasiStrided: TargetProfile, CacheLevel
 const VALID_ISAS = (:avx512, :avx2, :neon, :unknown)
 synthetic(isakey) = TargetProfile(isakey, "synthetic", CacheLevel(), CacheLevel(), CacheLevel())
 
+# The kernel `plan_contract` picks for `T` on this host: at its own shape, and
+# for an M extent of `m_length` with C contiguous.
+host_kernel(::Type{T}) where {T} = kernel_from_shape(derived_shape(target_profile(), T), T)
+function auto_kernel(::Type{T}, m_length::Int) where {T}
+    shape, K = QuasiStrided.select_shape(T, QuasiStrided.default_kernel_type(T), m_length, 0, m_length)
+    return kernel_from_shape(shape, T, K)
+end
+
 # Permuted A (with a zero-stride axis), negative-stride B, offset sliced C.
 function scattered_fixture(::Type{T}, a_n = 32, k_n = 32, b_n = 8, n_n = 32) where {T}
     A2 = randn(MersenneTwister(11), T, a_n, k_n)

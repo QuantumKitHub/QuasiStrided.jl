@@ -415,7 +415,7 @@ end
         plan = plan_contract(Cv, Av, indA, Bv, indB, indC)
         @test plan.Astorage === parent(Av)
 
-        default_kernel = QuasiStrided._default_kernel(T, m_length, n_length)
+        default_kernel = auto_kernel(T, m_length)
         default_m_tile = tile_size(default_kernel, 1)
         if m_length == run || run % default_m_tile == 0
             @test plan.kernel === default_kernel
@@ -451,7 +451,7 @@ end
         Cmat = zeros(T, Ma, Na)
         Av, Bv, Cv = StridedView(Amat), StridedView(Bmat), StridedView(Cmat)
         plan = plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3))
-        @test plan.kernel === QuasiStrided._default_kernel(T, Ma, Na)
+        @test plan.kernel === auto_kernel(T, Ma)
 
         Cref = Amat * Bmat
         execute!(plan, 1.0, 0.0)
@@ -480,7 +480,7 @@ end
     for (T, a) in ((Float64, 8), (Float32, 16))
         m_length = a * 36
         n_length = 216
-        default_kernel = QuasiStrided._default_kernel(T, m_length, n_length)
+        default_kernel = auto_kernel(T, m_length)
 
         # Deep K never demotes; the fixture never swaps.
         m_deep = 2 * kmax_of(T)
@@ -640,7 +640,7 @@ end
 # `_KO_EXT` fits any L2; `_KO_BIG` makes B's lines touched before `d` advances
 # (b*c*e*64 B) exceed THIS host's L2 share, with e >= 40, so the model reorders
 # K wherever the suite runs.
-function _ko_big(l2 = QuasiStrided.l2_core_bytes(Float64))
+function _ko_big(l2 = QuasiStrided.l2_core_bytes(target_profile()))
     e = max(40, fld(l2, 40 * 40 * 64) + 1)
     return Dict(1 => 9, 2 => 40, 3 => 40, 4 => 5, 5 => e)
 end
@@ -717,7 +717,7 @@ end
 @testset "K order: plan_contract flips contract_scrambled at an L2-exceeding size" begin
     T = Float64
     ext = _KO_BIG
-    @test ext[2] * ext[3] * ext[5] * 64 > QuasiStrided.l2_core_bytes(T)
+    @test ext[2] * ext[3] * ext[5] * 64 > QuasiStrided.l2_core_bytes(target_profile())
     Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))   # B[d,c,b,e]
     Cv = StridedView(zeros(T, ext[1], ext[5]))

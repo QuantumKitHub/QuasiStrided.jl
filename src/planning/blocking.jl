@@ -19,55 +19,57 @@ struct Blocking
     end
 end
 
-# Complex blocking is the real row divided by the packed reals per element of
-# each operand, so every kernel type gets the same packed BYTE budget (1m's
-# `m_block` is half planar's).
-@inline function _scale_blocking(base::Blocking, ::Type{K}) where {K <: Microkernel}
+"""
+    default_blocking(kernel, profile = target_profile()) -> Blocking
+
+Cache-blocking factors for `kernel` on `profile`: an analytical model of the
+cache geometry, or fixed constants where L1d or L2 is undetected.
+`plan_contract` rounds `m_block`/`n_block` to multiples of the tile size and
+clamps all three to the contraction's extents.
+"""
+default_blocking(kernel, profile::TargetProfile = target_profile()) =
+    kernel_blocking(profile, scalartype(kernel), typeof(kernel), tile_size(kernel)...)
+
+# The default blocking of a kernel of type `K` for `T` with an `MR x NR` tile.
+# The fallback rows are divided by the packed reals per element of each
+# operand, so every kernel type gets the same packed byte budget.
+@inline function kernel_blocking(profile::TargetProfile, ::Type{T}, ::Type{K}, MR::Int, NR::Int) where {T, K}
+    R = real(T)
     a_reals, b_reals = map(reals_per_element, pack_formats(K))
+    modelled = modelled_blocking(profile, MR, NR, a_reals * sizeof(R), b_reals * sizeof(R))
+    modelled === nothing || return modelled
+    base = fallback_blocking(R)
     return Blocking(max(1, base.m_block ÷ a_reals), base.k_block, max(1, base.n_block ÷ b_reals))
 end
 
 # For a host whose L1d or L2 size is undetected.
-_fallback_blocking(::Type{Float64}) = Blocking(128, 256, 768)
-_fallback_blocking(::Type{Float32}) = Blocking(96, 768, 1152)
+fallback_blocking(::Type{Float64}) = Blocking(128, 256, 768)
+fallback_blocking(::Type{Float32}) = Blocking(96, 768, 1152)
 
-_real_blocking_row(profile::TargetProfile, ::Type{T}) where {T <: Union{Float32, Float64}} =
-    something(_modelled_blocking(profile, T), _fallback_blocking(T))
-
-# Analytical real row from the cache geometry. Per (N, K) block the packed B
-# panel is `n_block*k_block` elements, per (N, K, M) block the A block
+# Analytical blocking from the cache geometry, with `SA`/`SB` the packed bytes
+# per element of A and B. Per (N, K) block the packed B panel is
+# `n_block*k_block` elements, per (N, K, M) block the A block
 # `m_block*k_block`, and one `NR x k_block` B sliver is reused by every A
 # sliver of the block:
 #
-#     NR*k_block*S       <= L1/2              the reused B sliver
-#     m_block*k_block*S  <= L2core/2          the A block
-#     n_block*k_block*S  <= L2core + L3core   the B panel
+#     NR*k_block*SB       <= L1/2              the reused B sliver
+#     m_block*k_block*SA  <= L2core/2          the A block
+#     n_block*k_block*SB  <= L2core + L3core   the B panel
 #
 # rounded down to MR/NR multiples, shared levels divided by the cores sharing
 # them. `n_block` takes the whole per-core capacity, not half the L3: an
 # oversized B panel only re-streams B, an undersized one repacks A once per N
 # block.
 # `nothing` when L1d or L2 is undetected.
-function _modelled_blocking(profile::TargetProfile, ::Type{T}, MR::Int, NR::Int) where {T}
-    l1, l2, l3 = profile.l1d, profile.l2, profile.l3
-    (l1.bytes > 0 && l2.bytes > 0) || return nothing
-    l2core = core_bytes(profile, l2)
-    l3core = core_bytes(profile, l3)
-    S = sizeof(T)
-    k_block = max(1, (l1.bytes ÷ 2) ÷ (NR * S))
-    m_block = max(MR, ((l2core ÷ 2) ÷ (k_block * S)) ÷ MR * MR)
-    n_block = max(NR, ((l2core + l3core) ÷ (k_block * S)) ÷ NR * NR)
+@inline function modelled_blocking(profile::TargetProfile, MR::Int, NR::Int, SA::Int, SB::Int)
+    l1 = profile.l1d
+    (l1.bytes > 0 && profile.l2.bytes > 0) || return nothing
+    l2core, l3core = profile.l2_share, profile.l3_share
+    k_block = max(1, (l1.bytes ÷ 2) ÷ (NR * SB))
+    m_block = max(MR, ((l2core ÷ 2) ÷ (k_block * SA)) ÷ MR * MR)
+    n_block = max(NR, ((l2core + l3core) ÷ (k_block * SB)) ÷ NR * NR)
     return Blocking(m_block, k_block, n_block)
 end
 
-function _modelled_blocking(profile::TargetProfile, ::Type{T}) where {T <: Real}
-    MR, NR, _ = derived_shape(profile, T)
-    return _modelled_blocking(profile, T, MR, NR)
-end
-
-# For a bare scalar type: the fallback row, independent of the host.
-default_blocking(::Type{Float64}) = _fallback_blocking(Float64)
-default_blocking(::Type{Float32}) = _fallback_blocking(Float32)
-
 # Smallest multiple of `n` that is >= `x` (`x >= 0`, `n >= 1`).
-@inline _roundup(x::Int, n::Int) = cld(x, n) * n
+@inline roundup(x::Int, n::Int) = cld(x, n) * n

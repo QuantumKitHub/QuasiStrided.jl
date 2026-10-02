@@ -34,14 +34,15 @@ using QuasiStrided: OneMKernel, PlanarKernel, lanewidth, kernel_shapes,
         for T in (ComplexF64, ComplexF32)
             bm = default_blocking(OneMKernel(Val(8), Val(8), T, Val(8)))
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
-            @test (bm.m_block, bm.k_block, bm.n_block) == (bp.m_block ÷ 2, bp.k_block, bp.n_block)  # twice the packed A reals
+            # Twice the packed A reals, rounded to MR = 8.
+            @test (bm.k_block, bm.n_block) == (bp.k_block, bp.n_block) && bp.m_block - 2 * bm.m_block in (0, 8)
             for s in kernel_shapes(T, OneMKernel)
                 @test kernel_from_shape(s, T, OneMKernel) isa OneMKernel{s[1], s[2], T, s[3]}
             end
             @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, OneMKernel)
             # Never the default: method ranking does not transfer between machines.
             @test default_kernel_type(T) === PlanarKernel
-            @test QuasiStrided._default_kernel(T, 1024, 1024) isa PlanarKernel
+            @test auto_kernel(T, 1024) isa PlanarKernel
         end
     end
 

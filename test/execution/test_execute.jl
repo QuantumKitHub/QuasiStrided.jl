@@ -258,9 +258,12 @@ end
 function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
     p = plan_contract(Cv, Av, iA, Bv, iB, iC; kw...)
     k, k_block, d, T = p.kernel, p.blocking.k_block, default_blocking(p.kernel), eltype(Cv)
-    split(g, map, R, eff, req) = _pack_split(g, p.kgroup, map, R, sizeof(T), T <: Complex, k_block, eff, cld(req, R) * R, d.k_block, 0)
-    (m_block, ms) = split(p.mgroup, 1, tile_size(k, 1), p.blocking.m_block, something(get(kw, :m_block, nothing), d.m_block))
-    (n_block, ns) = split(p.ngroup, 2, tile_size(k, 2), p.blocking.n_block, d.n_block)
+    function split(g, i, eff, req)
+        R = tile_size(k, i)
+        return pack_split(g, p.kgroup, sliver_spec(k, i), sizeof(T), k_block, eff, cld(req, R) * R, d.k_block; l2bytes = 0)
+    end
+    (m_block, ms) = split(p.mgroup, 1, p.blocking.m_block, something(get(kw, :m_block, nothing), d.m_block))
+    (n_block, ns) = split(p.ngroup, 2, p.blocking.n_block, d.n_block)
     q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, m_block, n_block)
     @assert q.mgroup == p.mgroup && q.ngroup == p.ngroup
     return ContractPlan(
@@ -273,10 +276,10 @@ end
     plan_of(d) = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...)
     p = plan_of(16)
     k, b = p.kernel, p.blocking
-    splits(cap) = QuasiStrided._is_split(_pack_split(p.mgroup, p.kgroup, 1, tile_size(k, 1), 8, false, b.k_block, b.m_block, b.m_block, default_blocking(k).k_block, cap)[2])
+    splits(l2bytes) = is_split(pack_split(p.mgroup, p.kgroup, sliver_spec(k, 1), 8, b.k_block, b.m_block, b.m_block, default_blocking(k).k_block; l2bytes)[2])
     @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
-    host = splits(QuasiStrided._split_capacity(target_profile(), true))
-    @test QuasiStrided._is_split(p.mpack) == host
+    host = splits(QuasiStrided.split_capacity(target_profile(), true))
+    @test is_split(p.mpack) == host
     host && @test _path_of(p) isa _NestPath{false, <:Any, (true, false)}
     @test _path_of(plan_of(4)) isa _NestPath{<:Any, <:Any, (false, false)}
 end

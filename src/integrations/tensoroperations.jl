@@ -52,7 +52,7 @@ end
 end
 
 @noinline function _qs_build_task_workspace!(pool::Dict{DataType, ContractWorkspace}, ::Type{T}) where {T}
-    kernel = _default_kernel(T)
+    kernel = kernel_from_shape(derived_shape(target_profile(), T), T)
     new_ws = ContractWorkspace(T, kernel, default_blocking(kernel), false, TO.DefaultAllocator())
     pool[T] = new_ws
     return new_ws

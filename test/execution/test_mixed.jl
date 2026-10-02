@@ -77,7 +77,7 @@ end
     Cv = case === :strided_c ? StridedView(zeros(TC, 2M, 3N))[2:2:2M, 1:3:3N] : StridedView(zeros(TC, M, N))
     fill!(Cv, iszero(beta) ? NaN : 2.0^-28)
     if case === :backend
-        @test K ÷ 2 > QuasiStrided._resolved_defaults(Float64).real_row.k_block
+        @test K ÷ 2 > default_blocking(auto_kernel(Float64, M)).k_block
         backend = QuasiStrided.QuasiStridedBackend(accumulator = acc)
         TO.tensorcontract!(Cv, Av, ((1,), (2,)), false, Bv, ((1,), (2,)), false, ((1, 2), ()), 1, beta, backend)
     else

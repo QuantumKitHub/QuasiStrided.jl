@@ -1,7 +1,5 @@
 # Kernel selection: the microkernel `plan_contract` builds when the caller does
-# not name one. Everything here is a pure function of a `TargetProfile` and `T`;
-# src/planning/defaults.jl caches the host-dependent results per eltype, since
-# the `Val(profile.isa)` dispatch below is dynamic.
+# not name one, a pure function of a `TargetProfile` and `T`.
 
 # Kernel types, unparameterised, name the complex-arithmetic schemes here.
 # `OneMKernel`/`FMAddSubKernel` are chosen only by naming the kernel (FMAddSub
@@ -122,25 +120,30 @@ kernel_from_shape(shape::Tuple{Int, Int, Int}, ::Type{T}, ::Val{K}) where {T, K}
 # ----------------------------------------------------------------------------
 
 # Per-ISA shapes, consulted first. None for real types: the rule below is the optimum.
-shape_override(key::Val, ::Type{T}) where {T} = shape_override(key, T, default_kernel_type(T))
-shape_override(::Val, ::Type, ::Type) = nothing
-# On AVX-512 the rule's planar `MR = 2W, NR = 6` spills; `NR = 3` tiles do not.
-shape_override(::Val{:avx512}, ::Type{ComplexF64}, ::Type{<:PlanarKernel}) = (24, 3, 8)
-shape_override(::Val{:avx512}, ::Type{ComplexF32}, ::Type{<:PlanarKernel}) = (48, 3, 16)
-# AVX2 has 16 registers: at `MV = 1` planar `NR = 6` needs all 16, `NR = 5` needs 14.
-shape_override(::Val{:avx2}, ::Type{ComplexF64}, ::Type{<:PlanarKernel}) = (4, 5, 4)
-shape_override(::Val{:avx2}, ::Type{ComplexF32}, ::Type{<:PlanarKernel}) = (8, 5, 8)
-# The AVX2-sized 1m shape, for a caller asking for `OneMKernel`'s shape (the
-# fit would hand it an AVX-512 shape).
-shape_override(::Val{:avx2}, ::Type{ComplexF64}, ::Type{<:OneMKernel}) = (4, 6, 4)
+shape_override(isa::Symbol, ::Type{T}) where {T} = shape_override(isa, T, default_kernel_type(T))
+function shape_override(isa::Symbol, ::Type{T}, ::Type{K}) where {T, K}
+    if K <: PlanarKernel && T === ComplexF64
+        # On AVX-512 the rule's planar `MR = 2W, NR = 6` spills; `NR = 3` tiles
+        # do not. AVX2 has 16 registers: at `MV = 1` planar `NR = 6` needs all
+        # 16, `NR = 5` needs 14.
+        isa === :avx512 && return (24, 3, 8)
+        isa === :avx2 && return (4, 5, 4)
+    elseif K <: PlanarKernel && T === ComplexF32
+        isa === :avx512 && return (48, 3, 16)
+        isa === :avx2 && return (8, 5, 8)
+    elseif K <: OneMKernel && T === ComplexF64
+        # The AVX2-sized 1m shape, for a caller asking for `OneMKernel`'s shape
+        # (the fit would hand it an AVX-512 shape).
+        isa === :avx2 && return (4, 6, 4)
+    end
+    return nothing
+end
 
 # Where the `MR = MV*W` rule applies. Not on NEON (2W on 128-bit lanes is no
 # better than the fallback), nor complex off AVX-512 (planar's two accumulator
 # planes leave AVX2's 16 registers nothing spare).
-rule_applies(::Val{:avx512}, ::Type{<:SIMDKernel}) = true
-rule_applies(::Val{:avx512}, ::Type{<:Union{PlanarKernel, OneMKernel}}) = true
-rule_applies(::Val{:avx2}, ::Type{<:SIMDKernel}) = true
-rule_applies(::Val, ::Type) = false
+rule_applies(isa::Symbol, ::Type{K}) where {K} =
+    isa === :avx512 ? K <: Union{SIMDKernel, PlanarKernel, OneMKernel} : isa === :avx2 && K <: SIMDKernel
 
 # `W` real lanes per register, `MV` A vectors per column.
 rule_shape(vb::Int, ::Type{T}, mv::Int) where {T} =
@@ -149,17 +152,13 @@ rule_shape(vb::Int, ::Type{T}, mv::Int) where {T} =
 # MV = 4 for the real kernel on AVX-512: the MV = 2 tile is front-end bound on
 # cores with 2 FMA ports, and 4*6 accumulators + 4 A vectors + 2 still fit 32
 # registers. Complex kernels keep MV = 2 (planar already spills there).
-rule_mv(::Val{:avx512}, ::Type{<:SIMDKernel}) = 4
-rule_mv(::Val, ::Type) = 2
+rule_mv(isa::Symbol, ::Type{K}) where {K} = isa === :avx512 && K <: SIMDKernel ? 4 : 2
 
-# AMD's AVX-512 cores double-pump 512-bit FMAs, so their MV = 2 tile is not
-# front-end bound and the taller tile only adds edge and store cost.
-const _MV4_UNPROFITABLE_CPUS = ("znver4", "znver5")
-
-profile_mv(profile::TargetProfile, ::Type{K}) where {K} = rule_mv(Val(profile.isa), K)
-function profile_mv(profile::TargetProfile, ::Type{K}) where {K <: SIMDKernel}
-    mv = rule_mv(Val(profile.isa), K)
-    return (mv == 4 && profile.cpu_name in _MV4_UNPROFITABLE_CPUS) ? 2 : mv
+# Where 512-bit FMAs are double-pumped the MV = 2 tile is not front-end bound,
+# and the taller tile only adds edge and store cost.
+function profile_mv(profile::TargetProfile, ::Type{K}) where {K}
+    mv = rule_mv(profile.isa, K)
+    return (mv == 4 && profile.double_pumped) ? 2 : mv
 end
 
 # The register shape for `T` with kernel type `K` on `profile`: an override
@@ -168,11 +167,10 @@ derived_shape(profile::TargetProfile, ::Type{T}) where {T} =
     derived_shape(profile, T, default_kernel_type(T))
 
 function derived_shape(profile::TargetProfile, ::Type{T}, ::Type{K}) where {T, K}
-    key = Val(profile.isa)
-    ovr = shape_override(key, T, K)
+    ovr = shape_override(profile.isa, T, K)
     ovr === nothing || return ovr
     vb = profile.vector_bytes
-    if rule_applies(key, K) && vb > 0
+    if rule_applies(profile.isa, K) && vb > 0
         shape = rule_shape(vb, T, profile_mv(profile, K))
         shape in kernel_shapes(T, K) && return shape
     end
@@ -222,7 +220,7 @@ with, for compute type `T` and kernel type `K = default_kernel_type(T, TA, TB)`,
 extents `m_length`/`k_length` and C's unit-stride run along M (`run`;
 `m_length` when no layout is known). The steps, in order:
 
- 1. The host's shape for `T` (`derived_shape`, cached in `ResolvedDefaults`).
+ 1. The host's shape for `T` (`derived_shape`).
  2. Extent (real): the MV = 4 shape steps down to MV = 2 where `m_length`
     pads less (`extent_shape`).
  3. Small M: an `m_length` below one tile takes the fitted shape, or for
@@ -235,15 +233,15 @@ the kernel type as a `Val`, since inference widens a type inside a returned
 tuple to `UnionAll`.
 """
 @inline function select_shape(::Type{T}, ::Type{K}, m_length::Int, k_length::Int, run::Int) where {T, K}
-    d = _resolved_defaults(T)
-    shape = extent_shape(d.shape, T, K, m_length)
+    profile = target_profile()
+    shape = extent_shape(derived_shape(profile, T, K), T, K, m_length)
     if m_length > 0 && m_length < shape[1]
         # Static, so a real `T`'s kernel type stays concrete.
         if T <: Complex
-            small = small_m_shape(d.small_m, m_length)
+            small = small_m_shape(profile, T, m_length)
             small === nothing || return (small, Val(FMAddSubKernel))
         end
-        shape = d.fitted
+        shape = fitted_shape(profile, T, K)
     end
     return (fit_to_run(shape, T, K, m_length, k_length, run), Val(K))
 end
@@ -272,18 +270,14 @@ end
 
 # Small-M demotion for complex `T` on AVX-512, where the planar fitted shape is
 # the spilling `MR = 2W` tile: the native-width FMAddSub shape that pads
-# `m_length` least, ties by the larger tile. `small_m_candidates` is the
-# cached, host-dependent half (empty where the rule does not apply).
-small_m_candidates(::Val, ::TargetProfile, ::Type) = NTuple{3, Int}[]
-function small_m_candidates(::Val{:avx512}, profile::TargetProfile, ::Type{T}) where {T <: Complex}
+# `m_length` least, ties by the larger tile.
+function small_m_shape(profile::TargetProfile, ::Type{T}, m_length::Int) where {T}
+    profile.isa === :avx512 || return nothing
     lanes = profile.vector_bytes ÷ sizeof(real(T))
-    return [shape for shape in kernel_shapes(T, FMAddSubKernel) if shape[3] == lanes]
-end
-
-function small_m_shape(candidates::Vector{NTuple{3, Int}}, m_length::Int)
     best = nothing
-    for shape in candidates
-        MR, NR, _ = shape
+    for shape in kernel_shapes(T, FMAddSubKernel)
+        MR, NR, W = shape
+        W == lanes || continue
         key = (-(cld(m_length, MR) * MR), MR * NR)
         if best === nothing || key > best[1]
             best = (key, shape)

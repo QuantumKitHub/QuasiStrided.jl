@@ -140,7 +140,7 @@ const _QSF = QuasiStrided
                 @test kernel_from_shape(s, T, FMAddSubKernel) isa FMAddSubKernel{s[1], s[2], T, s[3]}
             end
             @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, FMAddSubKernel)
-            @test !(_QSF._default_kernel(T, 1024, 1024) isa FMAddSubKernel)
+            @test !(auto_kernel(T, 1024) isa FMAddSubKernel)
         end
     end
 

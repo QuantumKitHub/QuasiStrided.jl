@@ -19,7 +19,9 @@ CacheLevel() = CacheLevel(0, 0, 0)
     TargetProfile(isa, cpu_name, l1d, l2, l3)
 
 What was detected about the host CPU. `isa` is one of `:avx512`, `:avx2`,
-`:neon` or `:unknown`, and fixes `vector_bytes` and `nregisters`.
+`:neon` or `:unknown`, and fixes `vector_bytes` and `nregisters`. The core's
+share of L2 and L3 (`l2_share`, `l3_share`, in bytes) and whether 512-bit FMAs
+are double-pumped (`double_pumped`) are derived as well.
 """
 struct TargetProfile
     isa::Symbol
@@ -29,13 +31,27 @@ struct TargetProfile
     l1d::CacheLevel
     l2::CacheLevel
     l3::CacheLevel
+    # Derived here: planning reads them on every call.
+    l2_share::Int
+    l3_share::Int
+    double_pumped::Bool
 
     function TargetProfile(isa::Symbol, cpu_name::AbstractString, l1d::CacheLevel, l2::CacheLevel, l3::CacheLevel)
         isa in (:avx512, :avx2, :neon, :unknown) ||
             throw(ArgumentError("TargetProfile: unknown ISA $(repr(isa))"))
-        return new(isa, cpu_name, isa_vector_bytes(isa), isa_nregisters(isa), l1d, l2, l3)
+        return new(
+            isa, cpu_name, isa_vector_bytes(isa), isa_nregisters(isa), l1d, l2, l3,
+            core_bytes(l1d, l2), core_bytes(l1d, l3), cpu_name in _DOUBLE_PUMPED_CPUS
+        )
     end
 end
+
+# This core's share of `level`: the CPUs sharing it over the SMT threads per
+# core, which are the CPUs sharing L1d.
+core_bytes(l1d::CacheLevel, level::CacheLevel) = level.bytes ÷ max(1, level.sharing ÷ max(1, l1d.sharing))
+
+# AMD's AVX-512 cores, which double-pump 512-bit FMAs.
+const _DOUBLE_PUMPED_CPUS = ("znver4", "znver5")
 
 unknown_target() = TargetProfile(:unknown, "", CacheLevel(), CacheLevel(), CacheLevel())
 
@@ -174,7 +190,12 @@ target_profile() = TARGET[]
 
 init_target!() = (TARGET[] = detect_target(); nothing)
 
-# This core's share of `level`: the CPUs sharing it over the SMT threads per
-# core, which are the CPUs sharing L1d.
-core_bytes(profile::TargetProfile, level::CacheLevel) =
-    level.bytes ÷ max(1, level.sharing ÷ max(1, profile.l1d.sharing))
+# The core's private L2 share, or 1 MB when undetected.
+l2_core_bytes(profile::TargetProfile) = profile.l2_share > 0 ? profile.l2_share : 1 << 20
+
+line_bytes(profile::TargetProfile) = profile.l1d.line > 0 ? profile.l1d.line : 64
+
+# A K step at least a page apart: a chain of demand misses no prefetcher
+# follows, which the K-order model charges this factor.
+const _K_WALK_FAR_BYTES = 4096
+const _K_WALK_FAR_PENALTY = 3

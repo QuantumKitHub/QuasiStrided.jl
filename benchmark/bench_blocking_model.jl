@@ -3,18 +3,18 @@
 #
 #   julia --project=benchmark benchmark/bench_blocking_model.jl [--reps 21] [--smoke] [--outdir DIR]
 #
-# Per real dtype: the named rows (`model` = `_modelled_blocking`, `fallback` =
-# `_fallback_blocking`) and the `wide` grid on every harness shape, plus 1-D
-# `n_block` and `m_block` slices through the model row on a 2048x256x2048 shape
-# (the only one large enough for `n_block` to bind). Per complex dtype: the
-# named rows scaled by `_scale_blocking`. Every configuration of a shape is timed back to back.
+# Per real dtype: the named rows (`model` = `default_blocking` on this host,
+# `fallback` = on an undetected one) and the `wide` grid on every harness
+# shape, plus 1-D `n_block` and `m_block` slices through the model row on a
+# 2048x256x2048 shape (the only one large enough for `n_block` to bind). Per
+# complex dtype: the named rows. Every configuration of a shape is timed back to back.
 # The score of a configuration is the geomean over shapes of its time over the
 # best time at that shape. `--smoke` runs 1 rep on a few points.
 
 include(joinpath(@__DIR__, "harness.jl"))
 
-using QuasiStrided: Blocking, target_profile, _default_kernel, _modelled_blocking,
-    _fallback_blocking, _scale_blocking
+using QuasiStrided: Blocking, target_profile, unknown_target, default_blocking,
+    kernel_from_shape, derived_shape
 
 const SMOKE = hasflag("smoke")
 const REPS = SMOKE ? 1 : argopt("reps", 21)
@@ -36,7 +36,9 @@ const SUMMARY_PATH = joinpath(OUTDIR, "summary_blocking_model.txt")
 
 tup(b::Blocking) = (b.m_block, b.k_block, b.n_block)
 named_points(rows) = [(string(k), tup(v)) for (k, v) in pairs(rows) if v !== nothing]
-named_rows(::Type{T}) where {T <: Real} = (model = _modelled_blocking(PROFILE, T), fallback = _fallback_blocking(T))
+detected = PROFILE.l1d.bytes > 0 && PROFILE.l2.bytes > 0
+named_rows(kernel) = (model = detected ? default_blocking(kernel, PROFILE) : nothing, fallback = default_blocking(kernel, unknown_target()))
+host_kernel(::Type{T}) where {T} = kernel_from_shape(derived_shape(PROFILE, T), T)
 
 csv = open(CSV_PATH, "w")
 println(csv, "set,dtype,shape,Ma,Ka,Na,m_block_requested,k_block_requested,n_block_requested,m_block,k_block,n_block,reps,median_seconds,gflops")
@@ -114,8 +116,8 @@ raw = NamedTuple[]
 crng = MersenneTwister(0x0CA9A121)
 canaries = [run_canary(crng, "start")]
 for T in DTYPES
-    kernel = _default_kernel(T)
-    rows = named_rows(T)
+    kernel = host_kernel(T)
+    rows = named_rows(kernel)
     println("\n$T kernel $(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))  ", rows)
     rows.model === nothing && @warn "no cache geometry detected: model undefined"
     grid = [("wide", c) for c in thin(WIDE[T])]
@@ -131,8 +133,8 @@ for T in DTYPES
     push!(canaries, run_canary(crng, "after-$T"))
 end
 for T in CDTYPES
-    kernel = _default_kernel(T)
-    rows = map(v -> v === nothing ? nothing : _scale_blocking(v, typeof(kernel)), named_rows(real(T)))
+    kernel = host_kernel(T)
+    rows = named_rows(kernel)
     println("\n$T kernel $(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))  ", rows)
     for spec in thin(MAIN_SHAPES)
         sweep_shape!(raw, kernel, T, spec, named_points(rows))

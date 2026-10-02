@@ -301,10 +301,10 @@ end
 
 @inline function _plan_at_shape(shape, ::Val{K}, atransform, btransform, req::_PlanRequest{T}) where {K, T}
     vkernel = menu_val(shape, T, K)
-    # The execution path, predicted so the callee is specialised on it. Only a
-    # `Bool` crosses: a call union-split on the kernel type is emitted out of
-    # line and boxes `req`.
-    hint = _path_hint(req.f, req, _unpacked_b_kernel_eligible(K))
+    # The execution path, predicted so the callee is specialised on it. From
+    # the shape and kernel type, not the kernel: a call union-split on the
+    # kernel type is emitted out of line and boxes `req`.
+    hint = _path_hint(req.f, req, shape, Val(K))
     core = _strip_storage(req)
     slot = _barrier_slot!(req.workspace, typeof(core))
     slot[] = core
@@ -335,7 +335,7 @@ end
 )
 
 # `nothing` for a continuation that does not execute (see src/execution/execute.jl).
-@inline _path_hint(f, req::_PlanRequest, unpack_ok::Bool) = nothing
+@inline _path_hint(f, req::_PlanRequest, shape, kernel_type) = nothing
 
 # Plan construction on a concrete kernel and transform pair (a named kernel's
 # transform Unions die here). `req.f` runs in here, on the concrete plan type.
@@ -359,10 +359,10 @@ function _plan_contract(
     m_tile, n_tile = tile_size(kernel)
 
     # Empty extents: the drivers never read these; the floors keep them valid.
-    m_block_rounded = _roundup(requested.m_block, m_tile)
-    n_block_rounded = _roundup(requested.n_block, n_tile)
-    m_block = m_length == 0 ? m_tile : min(m_block_rounded, _roundup(m_length, m_tile))
-    n_block = n_length == 0 ? n_tile : min(n_block_rounded, _roundup(n_length, n_tile))
+    m_block_rounded = roundup(requested.m_block, m_tile)
+    n_block_rounded = roundup(requested.n_block, n_tile)
+    m_block = m_length == 0 ? m_tile : min(m_block_rounded, roundup(m_length, m_tile))
+    n_block = n_length == 0 ? n_tile : min(n_block_rounded, roundup(n_length, n_tile))
     k_block = k_length == 0 ? 1 : min(requested.k_block, k_length)
     panel = _c_panel_needed(T, req.Cstorage, k_length, k_block)
     mpack = npack = _NO_SPLIT
@@ -371,14 +371,14 @@ function _plan_contract(
     # the panel holds N blocks in C's own N order, which a split N group does
     # not enumerate contiguously.
     if m_length > 0 && n_length > 0 && k_length > 0
-        m_block, mpack = _pack_split(
-            req.mgroup, req.kgroup, 1, m_tile, sizeof(eltype(req.Astorage)),
-            !(a_format(kernel) isa RealFormat), k_block, m_block, m_block_rounded, requested.k_block
+        m_block, mpack = pack_split(
+            req.mgroup, req.kgroup, sliver_spec(kernel, 1), sizeof(eltype(req.Astorage)),
+            k_block, m_block, m_block_rounded, requested.k_block
         )
         if !panel
-            n_block, npack = _pack_split(
-                req.ngroup, req.kgroup, 2, n_tile, sizeof(eltype(req.Bstorage)),
-                !(b_format(kernel) isa RealFormat), k_block, n_block, n_block_rounded, requested.k_block
+            n_block, npack = pack_split(
+                req.ngroup, req.kgroup, sliver_spec(kernel, 2), sizeof(eltype(req.Bstorage)),
+                k_block, n_block, n_block_rounded, requested.k_block
             )
         end
     end

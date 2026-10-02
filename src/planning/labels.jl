@@ -133,10 +133,6 @@ end
 #     `min(L_u, line_bytes / stride_u)`.
 # ----------------------------------------------------------------------------
 
-const _K_WALK_FAR_BYTES = 4096
-const _K_WALK_FAR_PENALTY = 3
-const _K_LINE_BYTES = 64
-
 # What the cost model reads of one operand, gathered once per plan in `klabels`
 # order: each K label's extent and |stride|, the element count and size, and
 # whether its register slivers are whole lines (the free composite's first
@@ -152,7 +148,7 @@ end
 
 @inline function k_operand(
         klabels::NTuple{DK, Int}, ind::NTuple{N, Int}, v::StridedView,
-        free::NTuple{DF, Int}
+        free::NTuple{DF, Int}, line::Int
     ) where {DK, N, DF}
     st = Base.strides(v)
     sz = size(v)
@@ -161,7 +157,7 @@ end
     ps = map(pos, klabels)
     len = map(p -> sz[p], ps)
     kst = map(p -> abs(st[p]), ps)
-    line_elems = max(1, _K_LINE_BYTES ÷ S)
+    line_elems = max(1, line ÷ S)
     wholeline = false
     for l in free
         p = pos(l)
@@ -174,7 +170,7 @@ end
 
 # Cost of packing one operand under the K order `perm`; `Qfree` is its free extent.
 function k_order_cost(
-        perm::NTuple{DK, Int}, op::KOperand{DK}, Qfree::Int, l2bytes::Int
+        perm::NTuple{DK, Int}, op::KOperand{DK}, Qfree::Int, l2bytes::Int, line::Int
     ) where {DK}
     len, st, S = op.len, op.st, op.S
     kfast = 0
@@ -201,16 +197,16 @@ function k_order_cost(
     # One element of `u` per line exactly when su*S > line/2 (len[u] >= 2);
     # tested first so the division is only paid where its value is used.
     suS = su * S
-    (2 * suS > _K_LINE_BYTES || u == kfast) && return op.n * walk
+    (2 * suS > line || u == kfast) && return op.n * walk
 
     faster = 1
     @inbounds for i in perm
         i == u && break
         faster *= len[i]
     end
-    footprint = Int128(faster) * Int128(Qfree) * Int128(_K_LINE_BYTES)
+    footprint = Int128(faster) * Int128(Qfree) * Int128(line)
     footprint <= l2bytes && return op.n * walk
-    share = min(@inbounds(len[u]), _K_LINE_BYTES ÷ suS)
+    share = min(@inbounds(len[u]), line ÷ suS)
     return op.n * walk * share
 end
 
@@ -223,14 +219,16 @@ end
         m_length::Int, n_length::Int, l2bytes::Union{Int, Nothing} = nothing
     ) where {DK, NA, NB, DM, DN}
     DK <= 1 && return klabels
-    opA = k_operand(klabels, indA, A, morder)
-    opB = k_operand(klabels, indB, B, norder)
+    profile = target_profile()
+    line = line_bytes(profile)
+    opA = k_operand(klabels, indA, A, morder, line)
+    opB = k_operand(klabels, indB, B, norder, line)
     id = ntuple(identity, Val(DK))
     permA = TupleTools.sortperm(opA.st)
     permB = TupleTools.sortperm(opB.st)
     permA == id && permB == id && return klabels
-    l2 = l2bytes === nothing ? l2_core_bytes(eltype(A)) : l2bytes
-    cost(perm) = k_order_cost(perm, opA, m_length, l2) + k_order_cost(perm, opB, n_length, l2)
+    l2 = l2bytes === nothing ? l2_core_bytes(profile) : l2bytes
+    cost(perm) = k_order_cost(perm, opA, m_length, l2, line) + k_order_cost(perm, opB, n_length, l2, line)
     best = id
     bestcost = cost(id)
     for cand in (permA, permB)

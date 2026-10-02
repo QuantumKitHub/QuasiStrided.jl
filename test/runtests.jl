@@ -9,12 +9,12 @@ using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
     zero_accumulator, add_tile, store_tile!, execute_tile!, lanewidth, contract!,
     Blocking, default_blocking, ScalarKernel, SIMDKernel, TargetProfile, CacheLevel,
     target_profile, cache_topology, unknown_target, detect_isa, detect_target,
-    derived_shape, fallback_shape, shape_override, _default_kernel, kernel_from_shape,
-    _fallback_blocking, kernel_shapes, parse_size, count_cpu_list, NR_DEFAULT,
+    derived_shape, fallback_shape, shape_override, kernel_from_shape,
+    fallback_blocking, kernel_shapes, parse_size, count_cpu_list, NR_DEFAULT,
     rule_applies, isa_nregisters, sliver_width, realtype,
     PlanarKernel, OneMKernel, FMAddSubKernel, accumulator_planes, pack_formats,
-    reals_per_element, _modelled_blocking, _scale_blocking, _real_blocking_row,
-    planar_pressure, _pack_split, _NestPath
+    reals_per_element, modelled_blocking, kernel_blocking,
+    planar_pressure, pack_split, is_split, _NestPath
 # plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 
 # All files share one scope, so helper names must be unique across files.

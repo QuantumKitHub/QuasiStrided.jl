@@ -10,24 +10,21 @@ using StridedViews: StridedView
             k = kernel_from_shape(derived_shape(u, T), T)
             @test k isa SIMDKernel
             @test (tile_size(k)..., lanewidth(k)) === fallback_shape(T)
-            @test _real_blocking_row(u, T) === _fallback_blocking(T)
+            @test default_blocking(k, u) === fallback_blocking(T)
         end
-        @test _fallback_blocking(Float64) === Blocking(128, 256, 768)
-        @test _fallback_blocking(Float32) === Blocking(96, 768, 1152)
-        # The type-argument form ignores detection.
-        @test default_blocking(Float64) === _fallback_blocking(Float64)
-        @test default_blocking(Float32) === _fallback_blocking(Float32)
+        @test fallback_blocking(Float64) === Blocking(128, 256, 768)
+        @test fallback_blocking(Float32) === Blocking(96, 768, 1152)
     end
 
     @testset "rule: MR = MV*W, NR = 6; MV = 4 on Intel :avx512, 2 on :avx2 and AMD" begin
         for (isakey, vb, MV) in ((:avx512, 64, 4), (:avx2, 32, 2)), T in (Float64, Float32)
             W = vb ÷ sizeof(T)
             @test derived_shape(synthetic(isakey), T) === (MV * W, NR_DEFAULT, W)
-            @test QuasiStrided.rule_mv(Val(isakey), SIMDKernel) == MV
+            @test QuasiStrided.rule_mv(isakey, SIMDKernel) == MV
             @test QuasiStrided.rule_shape(vb, T, MV) === (MV * W, NR_DEFAULT, W)
         end
         for K in (PlanarKernel, OneMKernel, FMAddSubKernel), key in (:avx512, :avx2)
-            @test QuasiStrided.rule_mv(Val(key), K) == 2
+            @test QuasiStrided.rule_mv(key, K) == 2
         end
         for (cpu, MV) in (("znver4", 2), ("znver5", 2), ("icelake-server", 4), ("cascadelake", 4)),
                 T in (Float64, Float32)
@@ -44,9 +41,9 @@ using StridedViews: StridedView
         end
         # No real override row on any ISA: the rule is the optimum.
         for T in (Float64, Float32), key in VALID_ISAS
-            @test shape_override(Val(key), T) === nothing
+            @test shape_override(key, T) === nothing
         end
-        @test rule_applies(Val(:avx2), SIMDKernel) && rule_applies(Val(:avx512), SIMDKernel)
+        @test rule_applies(:avx2, SIMDKernel) && rule_applies(:avx512, SIMDKernel)
     end
 
     @testset "every real menu shape is constructible and fits the register file" begin
@@ -64,7 +61,7 @@ using StridedViews: StridedView
             # The MV = 2 sibling stays in the menu as the step-down target.
             @test (2 * W, NR_DEFAULT, W) in kernel_shapes(T)
             @test kernel_shapes(T, SIMDKernel) === kernel_shapes(T)
-            k = _default_kernel(T)
+            k = host_kernel(T)
             @test k isa SIMDKernel && scalartype(k) === T
             @test (tile_size(k)..., lanewidth(k)) in kernel_shapes(T)
         end
@@ -81,11 +78,11 @@ using StridedViews: StridedView
 
     @testset "extent demotion when M cannot fill a register tile" begin
         for T in (Float64, Float32)
-            MR = tile_size(_default_kernel(T), 1)
-            @test tile_size(_default_kernel(T, 4 * MR, 256), 1) == MR
-            small = _default_kernel(T, 1, 256)
+            MR = tile_size(host_kernel(T), 1)
+            @test tile_size(auto_kernel(T, 4 * MR), 1) == MR
+            small = auto_kernel(T, 1)
             @test (tile_size(small)..., lanewidth(small)) === fallback_shape(T)
-            @test tile_size(_default_kernel(T, 0, 256), 1) == MR        # empty must not demote
+            @test tile_size(auto_kernel(T, 0), 1) == MR        # empty must not demote
         end
     end
 
@@ -107,12 +104,12 @@ using StridedViews: StridedView
             @test ext(avx2, T, 3) === avx2
             cs = derived_shape(synthetic(:avx512), ComplexF64)
             @test QuasiStrided.extent_shape(cs, ComplexF64, PlanarKernel, 3) === cs
-            # Through `_default_kernel`, where the host's shape is the tall one.
+            # Through `auto_kernel`, where the host's shape is the tall one.
             if derived_shape(target_profile(), T) === tall
-                @test tile_size(_default_kernel(T, MR + W, 256)) == (2 * W, NR)
-                @test tile_size(_default_kernel(T, 2 * W, 256), 1) == 2 * W
-                @test tile_size(_default_kernel(T, 2 * W - 1, 256), 1) == fallback_shape(T)[1]
-                @test tile_size(_default_kernel(T, 2 * MR, 256), 1) == MR
+                @test tile_size(auto_kernel(T, MR + W)) == (2 * W, NR)
+                @test tile_size(auto_kernel(T, 2 * W), 1) == 2 * W
+                @test tile_size(auto_kernel(T, 2 * W - 1), 1) == fallback_shape(T)[1]
+                @test tile_size(auto_kernel(T, 2 * MR), 1) == MR
             end
         end
     end
@@ -195,33 +192,33 @@ end
     for (T, W, swept) in ((ComplexF64, 8, (24, 3, 8)), (ComplexF32, 16, (48, 3, 16)))
         # W counts REAL lanes; the AVX-512 override replaces the spilling rule shape.
         @test QuasiStrided.rule_shape(64, T, 2) === (2 * W, NR_DEFAULT, W)
-        @test shape_override(Val(:avx512), T) === swept
+        @test shape_override(:avx512, T) === swept
         @test derived_shape(synthetic(:avx512), T) === swept === first(kernel_shapes(T, PlanarKernel))
         @test Set(kernel_shapes(T, PlanarKernel)) == Set(
             (
-                (2 * W, NR_DEFAULT, W), swept, (W, 8, W), shape_override(Val(:avx2), T),
+                (2 * W, NR_DEFAULT, W), swept, (W, 8, W), shape_override(:avx2, T),
                 (W ÷ 2, NR_DEFAULT, W ÷ 4), (W ÷ 4, NR_DEFAULT, W ÷ 4),
             )
         )
         # Every override row fits its ISA's register file with room to spare.
         for (key, nreg) in ((:avx512, 32), (:avx2, 16))
-            ovr = shape_override(Val(key), T)
+            ovr = shape_override(key, T)
             @test planar_pressure(ovr...) < nreg
             @test ovr in kernel_shapes(T, PlanarKernel)
         end
         @test fallback_shape(T) === (8, NR_DEFAULT, fallback_shape(real(T))[3])
         # Off :avx512 an override row wins whatever the width; without a row
         # the shape is fitted to the register budget.
-        @test derived_shape(synthetic(:avx2), T) === shape_override(Val(:avx2), T)
+        @test derived_shape(synthetic(:avx2), T) === shape_override(:avx2, T)
         for key in (:avx2, :neon, :unknown)
-            @test !rule_applies(Val(key), PlanarKernel)
+            @test !rule_applies(key, PlanarKernel)
         end
         for key in (:neon, :unknown)
-            @test shape_override(Val(key), T) === nothing
+            @test shape_override(key, T) === nothing
         end
         @test planar_pressure(derived_shape(synthetic(:unknown), T)...) <= 16
     end
-    @test rule_applies(Val(:avx512), PlanarKernel)
+    @test rule_applies(:avx512, PlanarKernel)
     @test derived_shape(synthetic(:neon), ComplexF64) === (4, 6, 2)
     @test derived_shape(synthetic(:neon), ComplexF32) === (8, 6, 4)
     @test planar_pressure(fallback_shape(ComplexF64)...) == 30
@@ -305,31 +302,35 @@ end
         :avx512, "cascadelake", CacheLevel(32KiB, 64, 2),
         CacheLevel(1MiB, 64, 2), CacheLevel(25952256, 64, 16)
     )
-    @test _modelled_blocking(nosmt, Float64, 8, 6) === Blocking(96, 341, 1728)
-    @test _modelled_blocking(nosmt, Float32, 16, 6) === Blocking(96, 682, 1728)
-    @test _modelled_blocking(smt2, Float64, 16, 6) === Blocking(192, 341, 1572)
-    @test _modelled_blocking(nosmt, Float64) === _modelled_blocking(nosmt, Float64, 8, 6)
-    for p in (nosmt, smt2), T in (Float64, Float32)
-        b = _modelled_blocking(p, T)
-        MR, NR, _ = derived_shape(p, T)
-        @test b.m_block % MR == 0 && b.n_block % NR == 0
-        @test NR * b.k_block * sizeof(T) <= p.l1d.bytes ÷ 2
-        @test _real_blocking_row(p, T) === b
+    @test modelled_blocking(nosmt, 8, 6, 8, 8) === Blocking(96, 341, 1728)
+    @test modelled_blocking(nosmt, 16, 6, 4, 4) === Blocking(96, 682, 1728)
+    @test modelled_blocking(smt2, 16, 6, 8, 8) === Blocking(192, 341, 1572)
+    # A complex kernel blocks by its packed bytes: 1m packs 4 reals per A
+    # element, planar 2 per B element.
+    @test default_blocking(kernel_from_shape((12, 8, 8), ComplexF64, OneMKernel), nosmt) === Blocking(60, 128, 2304)
+    for p in (nosmt, smt2), T in (Float64, Float32, ComplexF64, ComplexF32), K in (SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel)
+        for shape in kernel_shapes(T, K)
+            k = kernel_from_shape(shape, T, K)
+            b = default_blocking(k, p)
+            MR, NR = tile_size(k)
+            @test b.m_block % MR == 0 && b.n_block % NR == 0
+            @test sliver_width(k, 2) * b.k_block * sizeof(real(T)) <= p.l1d.bytes ÷ 2
+        end
     end
     # No L3: the B panel is budgeted from the L2 alone.
     nol3 = TargetProfile(
         :neon, "", CacheLevel(64KiB, 64, 1),
         CacheLevel(4MiB, 64, 4), CacheLevel()
     )
-    @test _modelled_blocking(nol3, Float64, 4, 6).n_block == (1MiB ÷ (682 * 8)) ÷ 6 * 6
+    @test modelled_blocking(nol3, 4, 6, 8, 8).n_block == (1MiB ÷ (682 * 8)) ÷ 6 * 6
     tiny = TargetProfile(
         :avx2, "", CacheLevel(64, 64, 1), CacheLevel(64, 64, 1), CacheLevel()
     )
-    @test _modelled_blocking(tiny, Float64, 8, 6) === Blocking(8, 1, 6)
-    @test _modelled_blocking(unknown_target(), Float64, 8, 6) === nothing
-    @test _modelled_blocking(
+    @test modelled_blocking(tiny, 8, 6, 8, 8) === Blocking(8, 1, 6)
+    @test modelled_blocking(unknown_target(), 8, 6, 8, 8) === nothing
+    @test modelled_blocking(
         TargetProfile(:avx2, "", CacheLevel(32KiB, 64, 1), CacheLevel(), CacheLevel()),
-        Float64, 8, 6
+        8, 6, 8, 8
     ) === nothing
 end
 
@@ -346,30 +347,21 @@ end
     end
 end
 
-@testset "complex blocking is the real row scaled by packed reals" begin
-    for base in (_fallback_blocking(Float64), _fallback_blocking(Float32), Blocking(1, 5, 1))
-        for m in (PlanarKernel, OneMKernel, FMAddSubKernel)
-            b = _scale_blocking(base, m)
-            @test b.k_block === base.k_block
-            @test b.m_block === max(1, base.m_block ÷ reals_per_element(pack_formats(m)[1]))
-            @test b.n_block === max(1, base.n_block ÷ reals_per_element(pack_formats(m)[2]))
-        end
+@testset "undetected caches: the fallback row scaled by packed reals" begin
+    u = unknown_target()
+    for T in (ComplexF64, ComplexF32), K in (PlanarKernel, OneMKernel, FMAddSubKernel)
+        b = default_blocking(kernel_from_shape(first(kernel_shapes(T, K)), T, K), u)
+        base = fallback_blocking(real(T))
+        @test b.k_block === base.k_block
+        @test b.m_block === base.m_block ÷ reals_per_element(pack_formats(K)[1])
+        @test b.n_block === base.n_block ÷ reals_per_element(pack_formats(K)[2])
     end
-    @test _scale_blocking(_fallback_blocking(Float64), PlanarKernel) === Blocking(64, 256, 384)
-    @test _scale_blocking(_fallback_blocking(Float64), OneMKernel) === Blocking(32, 256, 384)
-    for T in (ComplexF64, ComplexF32)
-        row = _real_blocking_row(target_profile(), real(T))
-        @test default_blocking(_default_kernel(T)) === _scale_blocking(row, PlanarKernel)
-    end
-    for T in (Float64, Float32)
-        @test default_blocking(_default_kernel(T)) === _real_blocking_row(target_profile(), T)
-        @test default_blocking(ScalarKernel(Val(4), Val(2), T)) === _real_blocking_row(target_profile(), T)
-    end
+    @test default_blocking(kernel_from_shape((24, 3, 8), ComplexF64, PlanarKernel), u) === Blocking(64, 256, 384)
 end
 
 @testset "kernel construction: the complex default, 1m by name, and throws" begin
     for T in (ComplexF64, ComplexF32)
-        kernel = _default_kernel(T)
+        kernel = host_kernel(T)
         @test kernel isa QuasiStrided.PlanarKernel
         @test scalartype(kernel) === T && realtype(kernel) === real(T)
         @test QuasiStrided.default_kernel_type(T) === PlanarKernel
@@ -377,9 +369,9 @@ end
         profile = target_profile()
         @test planar_pressure(shape...) <= (profile.nregisters > 0 ? profile.nregisters : 16)
         profile.isa === :avx512 && @test shape === first(kernel_shapes(T, PlanarKernel))
-        @test _default_kernel(T, 1024, 1024) isa QuasiStrided.PlanarKernel
+        @test auto_kernel(T, 1024) isa QuasiStrided.PlanarKernel
         # The small-M demotion: FMAddSub on AVX-512, planar elsewhere.
-        small = _default_kernel(T, 1, 1)
+        small = auto_kernel(T, 1)
         @test small isa (profile.isa === :avx512 ? QuasiStrided.FMAddSubKernel : QuasiStrided.PlanarKernel)
 
         shape1m = first(kernel_shapes(T, OneMKernel))
@@ -405,8 +397,7 @@ end
 end
 
 @testset "small_m_shape: AVX-512 complex small-M demotion to FMAddSub" begin
-    sms(T, m_length, p = synthetic(:avx512)) =
-        QuasiStrided.small_m_shape(QuasiStrided.small_m_candidates(Val(p.isa), p, T), m_length)
+    sms(T, m_length, p = synthetic(:avx512)) = QuasiStrided.small_m_shape(p, T, m_length)
     # Least padded rows, then the larger tile.
     @test sms(ComplexF64, 12) === (12, 8, 8)
     @test sms(ComplexF64, 16) === (8, 8, 8)

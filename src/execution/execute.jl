@@ -59,14 +59,14 @@ end
 @inline _select_path(plan::ContractPlan{T}) where {T} = _select_path(
     T, _unpacked_b_kernel_eligible(plan.kernel),
     plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan,
-    plan.blocking.k_block, _is_split(plan.mpack), _is_split(plan.npack)
+    plan.blocking.k_block, is_split(plan.mpack), is_split(plan.npack)
 )
 
 # On the plan's parts, so `plan_contract` can predict the path before the
 # plan exists (`_path_hint`). `unpack_ok`: the kernel admits unpacked B.
 # `capacity`: the plan whose workspace must hold the dot path's vector, or
-# `nothing` to assume it does. `k_block`: the requested K block, `nothing` for
-# the default. `split_a`/`split_b`: the plan packs A/B line by line.
+# `nothing` to assume it does. `split_a`/`split_b`: the plan packs A/B line by
+# line.
 @inline function _select_path(
         ::Type{T}, unpack_ok::Bool, Astorage, Bstorage, Cstorage,
         mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity, k_block,
@@ -89,11 +89,10 @@ end
 end
 
 # Whether the partial sums between K blocks must live in a compute-type panel
-# rather than in a C of narrower eltype. Static `false` unless C is narrower,
-# so the default blocking is looked up only then.
-@inline function _c_panel_needed(::Type{T}, Cstorage, k_length::Int, k_block) where {T}
+# rather than in a C of narrower eltype. Static `false` unless C is narrower.
+@inline function _c_panel_needed(::Type{T}, Cstorage, k_length::Int, k_block::Int) where {T}
     sizeof(real(eltype(Cstorage))) < sizeof(real(T)) || return false
-    return k_length > (k_block === nothing ? _resolved_defaults(T).real_row.k_block : k_block)
+    return k_length > k_block
 end
 
 # Run `path` behind a dynamic call. The plan crosses in the workspace slot
@@ -138,11 +137,17 @@ end
 
 # The path predicted before the kernel barrier, so its callee is specialised
 # on the path as well as the kernel.
-@inline _path_hint(::_Execute, req::_PlanRequest{T}, unpack_ok::Bool) where {T} = _select_path(
-    T, unpack_ok,
+@inline _path_hint(::_Execute, req::_PlanRequest{T}, shape, ::Val{K}) where {T, K} = _select_path(
+    T, _unpacked_b_kernel_eligible(K),
     req.Astorage, req.Bstorage, req.Cstorage, req.mgroup, req.ngroup, req.kgroup, nothing,
-    req.k_block
+    req.k_block === nothing ? _default_k_block(T, req.Cstorage, shape, K) : req.k_block
 )
+
+# The kernel's default `k_block`, which decides the path only under a C
+# narrower than `T`; elsewhere a static placeholder.
+@inline _default_k_block(::Type{T}, Cstorage, shape, ::Type{K}) where {T, K} =
+    sizeof(real(eltype(Cstorage))) < sizeof(real(T)) ?
+    kernel_blocking(target_profile(), T, K, shape[1], shape[2]).k_block : 0
 
 @inline _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T} =
     (_execute_hinted!(plan, e.alpha, e.beta, hint); nothing)
@@ -166,12 +171,12 @@ end
 end
 
 @inline _splits(plan::ContractPlan, hint) = false
-@inline _splits(plan::ContractPlan, ::Union{_NestPath, _PanelPath}) = _is_split(plan.mpack) || _is_split(plan.npack)
+@inline _splits(plan::ContractPlan, ::Union{_NestPath, _PanelPath}) = is_split(plan.mpack) || is_split(plan.npack)
 @inline _split_path(plan::ContractPlan, ::_NestPath{U}) where {U} = _nest_path(
-    U, plan.mgroup, plan.ngroup, plan.kgroup, _is_split(plan.mpack), _is_split(plan.npack)
+    U, plan.mgroup, plan.ngroup, plan.kgroup, is_split(plan.mpack), is_split(plan.npack)
 )
 @inline _split_path(plan::ContractPlan, ::_PanelPath{<:_NestPath{U}}) where {U} = _nest_path(
-    U, plan.mgroup, plan.ngroup, plan.kgroup, _is_split(plan.mpack), _is_split(plan.npack), true
+    U, plan.mgroup, plan.ngroup, plan.kgroup, is_split(plan.mpack), is_split(plan.npack), true
 )
 
 # The prediction differs from `_select_path(plan)` in two inputs only: the
@@ -295,8 +300,8 @@ function _execute_nest!(
     btransform = plan.btransform
 
     split_a, split_b = SPLIT
-    mgroup = split_a ? _split_group(plan.mgroup, plan.mpack) : plan.mgroup
-    ngroup = split_b ? _split_group(plan.ngroup, plan.npack) : plan.ngroup
+    mgroup = split_a ? split_group(plan.mgroup, plan.mpack) : plan.mgroup
+    ngroup = split_b ? split_group(plan.ngroup, plan.npack) : plan.ngroup
 
     # Ramp composites get closed-form block descriptors, no offset buffers; the
     # block pack reads the offsets.
@@ -366,7 +371,7 @@ function _execute_nest!(
             beta_eff = firstpanel ? betaT : one(T)
 
             if split_b
-                _pack_block_transposed!(
+                pack_block_by_lines!(
                     packed_panel(ws.packed_b, 1, b_sliver_width * k_block_length * n_tiles), sliver_spec(kernel, 2),
                     plan.Bstorage, plan.Bbase, ws.n_buf_B, rowsB_k, btransform, n_block_length, k_block_length,
                     plan.npack
@@ -405,7 +410,7 @@ function _execute_nest!(
                 checked_span_bounds(cplan.Cbase, rng_mC, rng_nC, lenC)
 
                 if split_a
-                    _pack_block_transposed!(
+                    pack_block_by_lines!(
                         packed_panel(ws.packed_a, 1, a_sliver_width * k_block_length * m_tiles), sliver_spec(kernel, 1),
                         plan.Astorage, plan.Abase, ws.m_buf_A, colsA_k, atransform, m_block_length, k_block_length,
                         plan.mpack
