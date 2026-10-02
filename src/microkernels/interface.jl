@@ -29,7 +29,7 @@ blocking and the shape menus dispatch on it:
 
 No method ranking is hardcoded: planar is the default, 1m and fmaddsub are used
 only when named (plus fmaddsub for the AVX-512 small-M demotion,
-`_small_m_shape` in src/planning/kernel_selection.jl).
+`small_m_shape` in src/planning/kernel_selection.jl).
 """
 abstract type KernelMethod end
 struct RealMethod <: KernelMethod end

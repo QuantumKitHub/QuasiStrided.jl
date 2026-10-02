@@ -185,7 +185,7 @@ function _planned(
         accumulator::AC
     ) where {F, NA, NB, NC, AC}
     T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
-    method = _default_method(T, eltype(A), eltype(B))
+    method = default_method(T, eltype(A), eltype(B))
     _check_kernel_domain(kernel, eltype(A), eltype(B))
 
     # GUARDRAIL: a conjugated `C` is rejected; the engine writes through to
@@ -205,7 +205,7 @@ function _planned(
     norder = order_free_labels(nlabels, indC, C)
 
     # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
-    run_m = T <: Real || method isa _MixedMethod ? leading_unit_run(morder, indC, C) : 0
+    run_m = T <: Real || method isa MixedMethod ? leading_unit_run(morder, indC, C) : 0
     run_n = T <: Real ? leading_unit_run(norder, indC, C) : 0
 
     mgroup = AxisGroup(morder, (indA, A), (indC, C))  # maps: (A, C)
@@ -274,13 +274,14 @@ end
 )
 
 # `m_tile` of the kernel each orientation would run, for the swap decision: a
-# named kernel either way, else `_default_shape`'s pick at that orientation's
-# extents and C run.
+# named kernel either way, else `select_shape`'s pick at that orientation's
+# extent and C run. The swap is judged before `fit_to_run`'s K-dependent
+# divisor step, which an unbounded `k_length` skips.
 @inline _candidate_m_tiles(::Type{T}, method, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
     (tile_size(kernel, 1), tile_size(kernel, 1))
 @inline function _candidate_m_tiles(::Type{T}, method, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T}
-    m_tile_asis = _default_shape(T, method, m_length, n_length, run_m)[1][1]
-    m_tile_swapped = T <: Real ? _default_shape(T, method, n_length, m_length, run_n)[1][1] : m_tile_asis
+    m_tile_asis = select_shape(T, method, m_length, typemax(Int), run_m)[1][1]
+    m_tile_swapped = T <: Real ? select_shape(T, method, n_length, typemax(Int), run_n)[1][1] : m_tile_asis
     return m_tile_asis, m_tile_swapped
 end
 
@@ -293,10 +294,8 @@ end
 @inline _plan_with_kernel(kernel, method, atransform, btransform, req::_PlanRequest) =
     _plan_contract(kernel, atransform, btransform, req, nothing)
 @inline function _plan_with_kernel(::Nothing, method, atransform, btransform, req::_PlanRequest{T}) where {T}
-    m_length = axis_length(req.mgroup)
-    shape, method = _default_shape(T, method, m_length, axis_length(req.ngroup), req.run)
-    shape = _demote_shape_for_run(T, shape, method, req.run, m_length, axis_length(req.kgroup))
-    vshape = _menu_val(shape, T, method)
+    shape, method = select_shape(T, method, axis_length(req.mgroup), axis_length(req.kgroup), req.run)
+    vshape = menu_val(shape, T, method)
     # The execution path, predicted so the callee is specialised on it. Only a
     # `Bool` crosses: a call union-split on `method` is emitted out of line and
     # boxes `req`.
@@ -315,7 +314,7 @@ function _plan_resolved(
         slot::Base.RefValue{R}, Astorage::SA, Bstorage::SB, Cstorage::SC
     ) where {S, M, TA, TB, H, T, R <: _PlanRequest{T}, SA, SB, SC}
     req = _with_storage(slot[], Astorage, Bstorage, Cstorage)
-    return _plan_contract(_kernel_from_shape(S, T, method), atransform, btransform, req, hint)
+    return _plan_contract(kernel_from_shape(S, T, method), atransform, btransform, req, hint)
 end
 
 # The storages cross the barrier as arguments, so no slot retains a user array.

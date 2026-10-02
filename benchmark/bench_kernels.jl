@@ -22,7 +22,7 @@
 include(joinpath(@__DIR__, "harness.jl"))
 
 using QuasiStrided: RealMethod, PlanarMethod, OneMMethod, FMAddSubMethod, kernel_shapes,
-    _kernel_from_shape, default_blocking, packed_panel, execute_tile!,
+    kernel_from_shape, default_blocking, packed_panel, execute_tile!,
     Tile, AffineAxis, target_profile
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32,ComplexF64,ComplexF32"))
@@ -69,7 +69,7 @@ function kernel_hot!(kernel, C, apack, bpack, k_block, reps)
 end
 
 for T in filter(t -> t <: Real, RUN_DTYPES), sh in kernel_shapes(T)
-    kernel = _kernel_from_shape(sh, T)
+    kernel = kernel_from_shape(sh, T)
     MR, NR = sh
     k_block = default_blocking(kernel).k_block
     apack = rand(T, MR * k_block); bpack = rand(T, NR * k_block); C = zeros(T, MR * NR)
@@ -92,7 +92,7 @@ for spec in SHAPES, T in RUN_DTYPES
     @assert isapprox(fx.Cmat, fx.Amat * fx.Bmat; rtol = sqrt(eps(real(T))))
     record!("engine", T, spec, "default", tag(pd.kernel), pd.blocking, td, tb)
     for m in menu_methods(T), sh in kernel_shapes(T, m)
-        k = _kernel_from_shape(sh, T, m)
+        k = kernel_from_shape(sh, T, m)
         b = default_blocking(k)
         t, _ = time_plan(fx, T; kernel = k, m_block = b.m_block, k_block = b.k_block, n_block = b.n_block)
         record!("engine", T, spec, lowercase(replace(string(nameof(typeof(m))), "Method" => "")), tag(k), b, t, tb)

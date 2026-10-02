@@ -10,7 +10,7 @@
 include(joinpath(@__DIR__, "harness.jl"))
 
 using QuasiStrided: ComplexRealKernel, RealComplexKernel, PlanarMethod, target_profile,
-    _derived_shape, _kernel_from_shape
+    derived_shape, kernel_from_shape
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "ComplexF64,ComplexF32"))
 const SIZES = parse_ints(argopt("sizes", "512,2048"))
@@ -29,8 +29,8 @@ function run(io)
     rng = MersenneTwister(1)
     for T in RUN_DTYPES, n in SIZES
         R = real(T)
-        MRr, NRr, W = _derived_shape(target_profile(), R)
-        planar = _kernel_from_shape(_derived_shape(target_profile(), T), T, PlanarMethod())
+        MRr, NRr, W = derived_shape(target_profile(), R)
+        planar = kernel_from_shape(derived_shape(target_profile(), T), T, PlanarMethod())
         cases = (
             (
                 "CR", ComplexRealKernel(Val(MRr ÷ 2), Val(NRr), T, Val(W)),

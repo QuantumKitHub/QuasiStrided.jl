@@ -1,6 +1,6 @@
 using QuasiStrided: FMAddSubKernel, FMAddSubMethod, PlanarKernel, PlanarMethod, OneMKernel,
     InterleavedFormat, KernelMethod, lanewidth, kernel_shapes, packed_panel,
-    _kernel_from_shape, _default_method, accumulator_planes, target_profile, PackedPanel
+    kernel_from_shape, default_method, accumulator_planes, target_profile, PackedPanel
 using SIMD: Vec
 using InteractiveUtils: code_native
 
@@ -138,9 +138,9 @@ const _QSF = QuasiStrided
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
             @test (bf.m_block, bf.k_block, bf.n_block) == (bp.m_block, bp.k_block, bp.n_block)  # planar's packed reals
             for s in kernel_shapes(T, FMAddSubMethod())
-                @test _kernel_from_shape(s, T, FMAddSubMethod()) isa FMAddSubKernel{s[1], s[2], T, s[3]}
+                @test kernel_from_shape(s, T, FMAddSubMethod()) isa FMAddSubKernel{s[1], s[2], T, s[3]}
             end
-            @test_throws ArgumentError _kernel_from_shape((7, 7, 7), T, FMAddSubMethod())
+            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, FMAddSubMethod())
             @test !(_QSF._default_kernel(T, 1024, 1024) isa FMAddSubKernel)
         end
     end

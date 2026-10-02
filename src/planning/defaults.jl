@@ -26,11 +26,11 @@ end
     _defaults_slot(T) === nothing ? l2_core_bytes(target_profile()) : _resolved_defaults(T).l2_core
 
 function _resolve_defaults(profile::TargetProfile, ::Type{T}) where {T}
-    method = _default_method(T)
+    method = default_method(T)
     # First, so an element type with no menu throws from here.
-    shape = _derived_shape(profile, T, method)
-    fitted = _fitted_shape(profile, T, method)
-    small_m = _small_m_candidates(Val(profile.isa), profile, T)
+    shape = derived_shape(profile, T, method)
+    fitted = fitted_shape(profile, T, method)
+    small_m = small_m_candidates(Val(profile.isa), profile, T)
     real_row = _real_blocking_row(profile, real(T))
     l2_core = l2_core_bytes(profile)
     return ResolvedDefaults(profile, shape, fitted, small_m, real_row, l2_core)
@@ -67,40 +67,12 @@ end
 end
 
 _default_kernel(::Type{T}) where {T} =
-    _kernel_from_shape(_resolved_defaults(T).shape, T, _default_method(T))
-
-# The automatic `(shape, method)` for extents `m_length`/`n_length` and C's
-# unit-stride run along M (`run = m_length`: no layout known). Returned as plain
-# values so `plan_contract` never holds a menu-wide kernel Union. The extent and
-# store step-downs apply first; then an `m_length` that cannot fill one tile
-# demotes to the fitted shape, or on AVX-512 complex to FMAddSub.
-@inline function _default_shape(::Type{T}, m_length::Int, n_length::Int, run::Int = m_length) where {T}
-    d = _resolved_defaults(T)
-    method = _default_method(T)
-    shape = _store_shape(_extent_shape(d.shape, T, method, m_length), T, method, m_length, run)
-    (m_length > 0 && m_length < shape[1]) || return (shape, method)
-    # Static, so a real `T`'s method stays a concrete `RealMethod`.
-    T <: Complex || return (d.fitted, method)
-    small = _small_m_shape(d.small_m, m_length)
-    small === nothing || return (small, FMAddSubMethod())
-    return (d.fitted, method)
-end
-
-# The automatic `(shape, method)` under `method`, `_default_method(T, TA, TB)`.
-@inline _default_shape(::Type{T}, ::KernelMethod, m_length::Int, n_length::Int, run::Int) where {T} =
-    _default_shape(T, m_length, n_length, run)
-
-# The real default shape of the real problem, mapped: the real extent, store and
-# small-M demotions carry over, on the real type's cached defaults.
-@inline function _default_shape(::Type{T}, method::_MixedMethod, m_length::Int, n_length::Int, run::Int) where {T}
-    shape, _ = _default_shape(real(T), _real_problem(method, m_length, n_length, run)...)
-    return (_mixed_shape(method, shape), method)
-end
+    kernel_from_shape(_resolved_defaults(T).shape, T, default_method(T))
 
 # `@noinline`: the return type is the Union of `T`'s menu kernels.
 @noinline function _default_kernel(::Type{T}, m_length::Int, n_length::Int) where {T}
-    shape, method = _default_shape(T, m_length, n_length)
-    return _kernel_from_shape(shape, T, method)
+    shape, method = select_shape(T, default_method(T), m_length, 0, m_length)
+    return kernel_from_shape(shape, T, method)
 end
 
 """

@@ -1,6 +1,6 @@
 using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
     KernelMethod, lanewidth, kernel_shapes,
-    _kernel_from_shape, _default_method
+    kernel_from_shape, default_method
 
 @testset "OneMKernel" begin
     full = ((ComplexF64, (12, 8, 8)), (ComplexF32, (8, 6, 8)))
@@ -38,11 +38,11 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
             @test (bm.m_block, bm.k_block, bm.n_block) == (bp.m_block ÷ 2, bp.k_block, bp.n_block)  # twice the packed A reals
             for s in kernel_shapes(T, OneMMethod())
-                @test _kernel_from_shape(s, T, OneMMethod()) isa OneMKernel{s[1], s[2], T, s[3]}
+                @test kernel_from_shape(s, T, OneMMethod()) isa OneMKernel{s[1], s[2], T, s[3]}
             end
-            @test_throws ArgumentError _kernel_from_shape((7, 7, 7), T, OneMMethod())
+            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, OneMMethod())
             # Never the default: method ranking does not transfer between machines.
-            @test _default_method(T) === PlanarMethod()
+            @test default_method(T) === PlanarMethod()
             @test QuasiStrided._default_kernel(T, 1024, 1024) isa PlanarKernel
         end
     end

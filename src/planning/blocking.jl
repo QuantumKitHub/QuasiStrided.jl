@@ -61,7 +61,7 @@ function _modelled_blocking(profile::TargetProfile, ::Type{T}, MR::Int, NR::Int)
 end
 
 function _modelled_blocking(profile::TargetProfile, ::Type{T}) where {T <: Real}
-    MR, NR, _ = _derived_shape(profile, T)
+    MR, NR, _ = derived_shape(profile, T)
     return _modelled_blocking(profile, T, MR, NR)
 end
 
