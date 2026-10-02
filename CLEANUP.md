@@ -22,7 +22,7 @@ TTFX when codegen is touched).
 | 7 | Vector kernels | now `kernels.jl`, `vecops.jl`, `steps.jl`, `stores.jl` | done |
 | 8 | Complex/mixed kernels | (merged into chunk 7's files) | done |
 | 9 | Labels | `planning/labels.jl` (`conjugation.jl` → plan.jl) | done |
-| 10 | Kernel selection | `planning/kernel_selection.jl` | |
+| 10 | Kernel selection | `planning/kernel_selection.jl` | done |
 | 11 | Blocking | `blocking.jl`, `defaults.jl`, `pack_split.jl`, the line-by-line packer | |
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | |
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | |
@@ -182,6 +182,15 @@ moves to defaults.jl; `isconj`/`op_conjugates` move into plan.jl. The K-order
 model, free-label order and swap rule are unchanged; labels.jl stays one
 file.
 
+### D14. Kernel selection (chunk 10, applied)
+
+One `select_shape` pipeline (host shape → extent → small M → `fit_to_run`,
+which merges the two C-run rules); NEON shapes pinned by a test instead of
+override rows. The kernel type (unparameterised, e.g. `PlanarKernel`) replaces
+`KernelMethod` as the shape-free identifier of a scheme; it crosses the plan
+barrier as `Val{K}()` (a bare `Type` argument misses the dispatch fast path,
++350–430 ns per call).
+
 ## Possible improvements
 
 - Piecewise-affine block descriptions instead of block-sized offset buffers:
@@ -192,6 +201,8 @@ file.
 - `PackedPanel` without a raw pointer:
   https://github.com/lkdvos/QuasiStrided.jl/issues/15.
 
+- Analytical shape selection over a bounded search space instead of the menu:
+  https://github.com/lkdvos/QuasiStrided.jl/issues/17.
 - M and N are both ordered by their C strides. Only the M side matters for the
   vector store; for N the order mainly decides ramp detection and C locality,
   while B's pack (and the unpacked-B path) would prefer B's strides. Measure on
