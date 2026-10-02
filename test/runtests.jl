@@ -12,8 +12,8 @@ using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
     derived_shape, fallback_shape, shape_override, _default_kernel, kernel_from_shape,
     _fallback_blocking, kernel_shapes, parse_size, count_cpu_list, NR_DEFAULT,
     rule_applies, isa_nregisters, sliver_width, realtype,
-    KernelMethod, RealMethod, PlanarMethod, OneMMethod, accumulator_planes, pack_formats,
-    reals_per_element, FMAddSubMethod, _modelled_blocking, _scale_blocking, _real_blocking_row,
+    PlanarKernel, OneMKernel, FMAddSubKernel, accumulator_planes, pack_formats,
+    reals_per_element, _modelled_blocking, _scale_blocking, _real_blocking_row,
     planar_pressure, _pack_split, _NestPath
 # plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 

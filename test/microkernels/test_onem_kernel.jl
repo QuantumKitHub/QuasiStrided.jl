@@ -1,13 +1,12 @@
-using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
-    KernelMethod, lanewidth, kernel_shapes,
-    kernel_from_shape, default_method
+using QuasiStrided: OneMKernel, PlanarKernel, lanewidth, kernel_shapes,
+    kernel_from_shape, default_kernel_type
 
 @testset "OneMKernel" begin
     full = ((ComplexF64, (12, 8, 8)), (ComplexF32, (8, 6, 8)))
     for (T, (MR, NR, W)) in full
         mk_contract(OneMKernel(Val(MR), Val(NR), T, Val(W)))
     end
-    for T in (ComplexF64, ComplexF32), s in (kernel_shapes(T, OneMMethod())..., (8, 4, 4))
+    for T in (ComplexF64, ComplexF32), s in (kernel_shapes(T, OneMKernel)..., (8, 4, 4))
         (T, s) in full || mk_contract(OneMKernel(Val(s[1]), Val(s[2]), T, Val(s[3])); full = false)
     end
 
@@ -15,7 +14,6 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
         k = OneMKernel(Val(12), Val(8), ComplexF64, Val(8))
         @test QuasiStrided.inner(k) isa SIMDKernel{24, 8, Float64, 8}  # the real kernel, at 2MR rows
         @test zero_accumulator(k) === zero_accumulator(QuasiStrided.inner(k))
-        @test KernelMethod(k) === OneMMethod()
         @test lanewidth(OneMKernel(Val(8), Val(4), ComplexF32)) == 8
         # 2MR, not MR, must divide by W; W must be even even where 2MR divides.
         @test_throws ArgumentError OneMKernel(Val(12), Val(8), ComplexF64, Val(16))
@@ -37,12 +35,12 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
             bm = default_blocking(OneMKernel(Val(8), Val(8), T, Val(8)))
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
             @test (bm.m_block, bm.k_block, bm.n_block) == (bp.m_block ÷ 2, bp.k_block, bp.n_block)  # twice the packed A reals
-            for s in kernel_shapes(T, OneMMethod())
-                @test kernel_from_shape(s, T, OneMMethod()) isa OneMKernel{s[1], s[2], T, s[3]}
+            for s in kernel_shapes(T, OneMKernel)
+                @test kernel_from_shape(s, T, OneMKernel) isa OneMKernel{s[1], s[2], T, s[3]}
             end
-            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, OneMMethod())
+            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, OneMKernel)
             # Never the default: method ranking does not transfer between machines.
-            @test default_method(T) === PlanarMethod()
+            @test default_kernel_type(T) === PlanarKernel
             @test QuasiStrided._default_kernel(T, 1024, 1024) isa PlanarKernel
         end
     end

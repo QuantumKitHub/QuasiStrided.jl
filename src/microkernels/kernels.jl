@@ -159,13 +159,34 @@ struct RealComplexKernel{MR, NR, T, W} <: VectorKernel{MR, NR, T, W}
     end
 end
 
-KernelMethod(::Type{<:Union{ScalarKernel, SIMDKernel}}) = RealMethod()
-KernelMethod(::Type{<:PlanarKernel}) = PlanarMethod()
-KernelMethod(::Type{<:OneMKernel}) = OneMMethod()
-KernelMethod(::Type{<:FMAddSubKernel}) = FMAddSubMethod()
-KernelMethod(::Type{<:ComplexRealKernel}) = ComplexRealMethod()
-KernelMethod(::Type{<:RealComplexKernel}) = RealComplexMethod()
-KernelMethod(kernel::Microkernel) = KernelMethod(typeof(kernel))
+"""
+    pack_formats(K::Type{<:Microkernel}) -> (a_format, b_format)
+
+The packing formats of every kernel of type `K`. A kernel type is also the
+shape-free name of its complex-arithmetic scheme, on which blocking and the
+shape menus dispatch:
+
+  - `SIMDKernel` (and `ScalarKernel`): real.
+  - `PlanarKernel`: split re/im planes, 4 real FMAs per complex MAC.
+  - `OneMKernel`: Van Zee's 1m, a real `2MR x NR` kernel.
+  - `FMAddSubKernel`: interleaved A, x86 `vfmaddsub`.
+  - `ComplexRealKernel`: complex A, real B; the real kernel on `2MR` rows.
+  - `RealComplexKernel`: real A, complex B; the real kernel on `2NR` columns.
+
+No ranking is hardcoded: planar is the complex default, 1m and fmaddsub are
+used only when named (plus fmaddsub for the AVX-512 small-M demotion,
+`small_m_shape` in src/planning/kernel_selection.jl).
+"""
+pack_formats(::Type{<:Union{ScalarKernel, SIMDKernel}}) = (RealFormat(), RealFormat())
+pack_formats(::Type{<:PlanarKernel}) = (PlanarFormat(), PlanarFormat())
+pack_formats(::Type{<:OneMKernel}) = (OneEFormat(), PlanarFormat())
+pack_formats(::Type{<:FMAddSubKernel}) = (InterleavedFormat(), PlanarFormat())
+pack_formats(::Type{<:ComplexRealKernel}) = (InterleavedFormat(), RealFormat())
+pack_formats(::Type{<:RealComplexKernel}) = (RealFormat(), InterleavedFormat())
+
+# Accumulator planes held live: planar keeps separate re/im planes.
+accumulator_planes(::Type{<:Microkernel}) = 1
+accumulator_planes(::Type{<:PlanarKernel}) = 2
 
 AccumulatorLayout(::Type{<:SIMDKernel}) = RealLayout()
 AccumulatorLayout(::Type{<:Union{PlanarKernel, RealComplexKernel}}) = SplitLayout()
@@ -180,7 +201,9 @@ accumulator_length(::SplitLayout, MV::Int, NR::Int) = 2 * MV * NR
 acc_index(MV::Int, v::Int, j::Int) = v + MV * (j - 1) + 1
 
 (::Type{K})(::Val{MR}, ::Val{NR}, ::Type{T}, ::Val{W}) where {K <: VectorKernel, MR, NR, T, W} =
-    K{MR, NR, T, W}(Descriptor(Val(MR), Val(NR), T, pack_formats(KernelMethod(K))...))
+    K{MR, NR, T, W}(Descriptor(Val(MR), Val(NR), T, pack_formats(K)...))
+(::Type{K})() where {MR, NR, T, W, K <: VectorKernel{MR, NR, T, W}} =
+    K(Descriptor(Val(MR), Val(NR), T, pack_formats(K)...))
 (::Type{K})(::Val{MR}, ::Val{NR}, ::Type{T}) where {K <: VectorKernel, MR, NR, T} =
     K(Val(MR), Val(NR), T, Val(default_lanewidth(real(T))))
 

@@ -21,7 +21,7 @@
 
 include(joinpath(@__DIR__, "harness.jl"))
 
-using QuasiStrided: RealMethod, PlanarMethod, OneMMethod, FMAddSubMethod, kernel_shapes,
+using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel, kernel_shapes,
     kernel_from_shape, default_blocking, packed_panel, execute_tile!,
     Tile, AffineAxis, target_profile
 
@@ -36,7 +36,7 @@ const CSV_PATH = joinpath(OUTDIR, "bench_kernels.csv")
 const SUMMARY_PATH = joinpath(OUTDIR, "summary_kernels.txt")
 
 tag(k) = "$(tile_size(k, 1))x$(tile_size(k, 2))/W$(lanewidth(k))"
-menu_methods(::Type{T}) where {T} = T <: Complex ? (PlanarMethod(), OneMMethod(), FMAddSubMethod()) : (RealMethod(),)
+menu_kernels(::Type{T}) where {T} = T <: Complex ? (PlanarKernel, OneMKernel, FMAddSubKernel) : (SIMDKernel,)
 
 csv = open(CSV_PATH, "w")
 println(csv, "arm,dtype,shape,M,K,N,config,kernel,m_block,k_block,n_block,seconds,gflops,frac_openblas")
@@ -91,11 +91,11 @@ for spec in SHAPES, T in RUN_DTYPES
     td, pd = time_plan(fx, T)
     @assert isapprox(fx.Cmat, fx.Amat * fx.Bmat; rtol = sqrt(eps(real(T))))
     record!("engine", T, spec, "default", tag(pd.kernel), pd.blocking, td, tb)
-    for m in menu_methods(T), sh in kernel_shapes(T, m)
-        k = kernel_from_shape(sh, T, m)
+    for K in menu_kernels(T), sh in kernel_shapes(T, K)
+        k = kernel_from_shape(sh, T, K)
         b = default_blocking(k)
         t, _ = time_plan(fx, T; kernel = k, m_block = b.m_block, k_block = b.k_block, n_block = b.n_block)
-        record!("engine", T, spec, lowercase(replace(string(nameof(typeof(m))), "Method" => "")), tag(k), b, t, tb)
+        record!("engine", T, spec, lowercase(replace(string(nameof(K)), "Kernel" => "")), tag(k), b, t, tb)
     end
     println("  ", rpad(string(T), 11), rpad(spec.name, 22), @sprintf("default %7.2f GF/s  %.2fx OpenBLAS", gflops(T, spec.Ma, spec.Ka, spec.Na, td), tb / td))
 end

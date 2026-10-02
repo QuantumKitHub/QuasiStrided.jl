@@ -4,21 +4,21 @@
 # checks the same outputs with the fast path off.
 
 using QuasiStrided: target_profile, unknown_target, TargetProfile, CacheLevel,
-    kernel_shapes, PlanarMethod, OneMMethod, FMAddSubMethod, SliverSpec, complex_contiguous_eligible,
+    kernel_shapes, PlanarKernel, OneMKernel, FMAddSubKernel, SliverSpec, complex_contiguous_eligible,
     complex_fastpath_isa_eligible
 
 const FASTPATH_ON = complex_fastpath_isa_eligible()
 
-# The extremes of each method's menu plus extents that are not multiples of any
-# lane width (interleaved shares 1e's shuffle); B is planar under every method.
-_menu_extremes(T, method, i) = extrema(s[i] for s in kernel_shapes(T, method))
+# The extremes of each kernel's menu plus extents that are not multiples of any
+# lane width (interleaved shares 1e's shuffle); B is planar under every kernel.
+_menu_extremes(T, K, i) = extrema(s[i] for s in kernel_shapes(T, K))
 const FAST_A_CASES = [
     (T, fa, MR) for T in (ComplexF64, ComplexF32)
-        for (fa, method, extra) in (
-            (PlanarFormat(), PlanarMethod(), (1, 7)), (OneEFormat(), OneMMethod(), (1, 7)),
-            (InterleavedFormat(), FMAddSubMethod(), ()),
+        for (fa, K, extra) in (
+            (PlanarFormat(), PlanarKernel, (1, 7)), (OneEFormat(), OneMKernel, (1, 7)),
+            (InterleavedFormat(), FMAddSubKernel, ()),
         )
-        for MR in unique((_menu_extremes(T, method, 1)..., extra...))
+        for MR in unique((_menu_extremes(T, K, 1)..., extra...))
 ]
 const FAST_B_NRS = (1, 3, 7, 8)
 

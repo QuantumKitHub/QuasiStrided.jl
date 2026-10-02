@@ -23,11 +23,11 @@ using StridedViews: StridedView
         for (isakey, vb, MV) in ((:avx512, 64, 4), (:avx2, 32, 2)), T in (Float64, Float32)
             W = vb ÷ sizeof(T)
             @test derived_shape(synthetic(isakey), T) === (MV * W, NR_DEFAULT, W)
-            @test QuasiStrided.rule_mv(Val(isakey), RealMethod()) == MV
+            @test QuasiStrided.rule_mv(Val(isakey), SIMDKernel) == MV
             @test QuasiStrided.rule_shape(vb, T, MV) === (MV * W, NR_DEFAULT, W)
         end
-        for m in (PlanarMethod(), OneMMethod(), FMAddSubMethod()), key in (:avx512, :avx2)
-            @test QuasiStrided.rule_mv(Val(key), m) == 2
+        for K in (PlanarKernel, OneMKernel, FMAddSubKernel), key in (:avx512, :avx2)
+            @test QuasiStrided.rule_mv(Val(key), K) == 2
         end
         for (cpu, MV) in (("znver4", 2), ("znver5", 2), ("icelake-server", 4), ("cascadelake", 4)),
                 T in (Float64, Float32)
@@ -46,7 +46,7 @@ using StridedViews: StridedView
         for T in (Float64, Float32), key in VALID_ISAS
             @test shape_override(Val(key), T) === nothing
         end
-        @test rule_applies(Val(:avx2), RealMethod()) && rule_applies(Val(:avx512), RealMethod())
+        @test rule_applies(Val(:avx2), SIMDKernel) && rule_applies(Val(:avx512), SIMDKernel)
     end
 
     @testset "every real menu shape is constructible and fits the register file" begin
@@ -57,14 +57,13 @@ using StridedViews: StridedView
             @test (MR ÷ W) * NR + (MR ÷ W) <= 32
             @test sliver_width(k) === (MR, NR)
             @test realtype(k) === T === scalartype(k)
-            @test KernelMethod(k) === RealMethod()
             @test packed_a_length(k, 7) === MR * 7 && packed_b_length(k, 7) === NR * 7
         end
         for T in (Float64, Float32)
             W = 64 ÷ sizeof(T)
             # The MV = 2 sibling stays in the menu as the step-down target.
             @test (2 * W, NR_DEFAULT, W) in kernel_shapes(T)
-            @test kernel_shapes(T, RealMethod()) === kernel_shapes(T)
+            @test kernel_shapes(T, SIMDKernel) === kernel_shapes(T)
             k = _default_kernel(T)
             @test k isa SIMDKernel && scalartype(k) === T
             @test (tile_size(k)..., lanewidth(k)) in kernel_shapes(T)
@@ -91,7 +90,7 @@ using StridedViews: StridedView
     end
 
     @testset "extent_shape: MV = 4 steps down to MV = 2 where it pads less" begin
-        ext(shape, T, m_length) = QuasiStrided.extent_shape(shape, T, RealMethod(), m_length)
+        ext(shape, T, m_length) = QuasiStrided.extent_shape(shape, T, SIMDKernel, m_length)
         for T in (Float64, Float32)
             tall = derived_shape(synthetic(:avx512), T)
             MR, NR, W = tall
@@ -103,11 +102,11 @@ using StridedViews: StridedView
             for m_length in (MR, MR + 2 * W + 1, 2 * MR - 1, 2 * MR, 2 * MR + 1, 3 * MR + W, 100 * MR)
                 @test ext(tall, T, m_length) === tall
             end
-            # Never below MV = 2, and complex methods are untouched.
+            # Never below MV = 2, and complex kernels are untouched.
             avx2 = derived_shape(synthetic(:avx2), T)
             @test ext(avx2, T, 3) === avx2
             cs = derived_shape(synthetic(:avx512), ComplexF64)
-            @test QuasiStrided.extent_shape(cs, ComplexF64, PlanarMethod(), 3) === cs
+            @test QuasiStrided.extent_shape(cs, ComplexF64, PlanarKernel, 3) === cs
             # Through `_default_kernel`, where the host's shape is the tall one.
             if derived_shape(target_profile(), T) === tall
                 @test tile_size(_default_kernel(T, MR + W, 256)) == (2 * W, NR)
@@ -120,7 +119,7 @@ using StridedViews: StridedView
 
     @testset "fit_to_run: C's run along M decides the real shape" begin
         fit(shape, T, m_length, k_length, run) =
-            QuasiStrided.fit_to_run(shape, T, RealMethod(), m_length, k_length, run)
+            QuasiStrided.fit_to_run(shape, T, SIMDKernel, m_length, k_length, run)
         largest_divisor(T, run) = argmax(s -> (run % s[1] == 0, s[1]), kernel_shapes(T))
         deep = 10^6
         for T in (Float64, Float32)
@@ -155,9 +154,9 @@ using StridedViews: StridedView
                 end
             end
             cs = derived_shape(synthetic(:avx512), ComplexF64)
-            @test QuasiStrided.fit_to_run(cs, ComplexF64, PlanarMethod(), m_length, 1, 1) === cs
+            @test QuasiStrided.fit_to_run(cs, ComplexF64, PlanarKernel, m_length, 1, 1) === cs
             if derived_shape(target_profile(), T) === tall
-                select(run) = QuasiStrided.select_shape(T, RealMethod(), m_length, deep, run)[1]
+                select(run) = QuasiStrided.select_shape(T, SIMDKernel, m_length, deep, run)[1]
                 @test select(2 * W) === half
                 @test select(MR) === tall
                 @test select(m_length) === tall
@@ -197,8 +196,8 @@ end
         # W counts REAL lanes; the AVX-512 override replaces the spilling rule shape.
         @test QuasiStrided.rule_shape(64, T, 2) === (2 * W, NR_DEFAULT, W)
         @test shape_override(Val(:avx512), T) === swept
-        @test derived_shape(synthetic(:avx512), T) === swept === first(kernel_shapes(T, PlanarMethod()))
-        @test Set(kernel_shapes(T, PlanarMethod())) == Set(
+        @test derived_shape(synthetic(:avx512), T) === swept === first(kernel_shapes(T, PlanarKernel))
+        @test Set(kernel_shapes(T, PlanarKernel)) == Set(
             (
                 (2 * W, NR_DEFAULT, W), swept, (W, 8, W), shape_override(Val(:avx2), T),
                 (W ÷ 2, NR_DEFAULT, W ÷ 4), (W ÷ 4, NR_DEFAULT, W ÷ 4),
@@ -208,21 +207,21 @@ end
         for (key, nreg) in ((:avx512, 32), (:avx2, 16))
             ovr = shape_override(Val(key), T)
             @test planar_pressure(ovr...) < nreg
-            @test ovr in kernel_shapes(T, PlanarMethod())
+            @test ovr in kernel_shapes(T, PlanarKernel)
         end
         @test fallback_shape(T) === (8, NR_DEFAULT, fallback_shape(real(T))[3])
         # Off :avx512 an override row wins whatever the width; without a row
         # the shape is fitted to the register budget.
         @test derived_shape(synthetic(:avx2), T) === shape_override(Val(:avx2), T)
         for key in (:avx2, :neon, :unknown)
-            @test !rule_applies(Val(key), PlanarMethod())
+            @test !rule_applies(Val(key), PlanarKernel)
         end
         for key in (:neon, :unknown)
             @test shape_override(Val(key), T) === nothing
         end
         @test planar_pressure(derived_shape(synthetic(:unknown), T)...) <= 16
     end
-    @test rule_applies(Val(:avx512), PlanarMethod())
+    @test rule_applies(Val(:avx512), PlanarKernel)
     @test derived_shape(synthetic(:neon), ComplexF64) === (4, 6, 2)
     @test derived_shape(synthetic(:neon), ComplexF32) === (8, 6, 4)
     @test planar_pressure(fallback_shape(ComplexF64)...) == 30
@@ -231,9 +230,9 @@ end
     # Complex menus fit AVX-512 and stay bounded.
     nreg = isa_nregisters(:avx512)
     target_profile().isa === :avx512 && @test target_profile().nregisters == nreg
-    for T in (ComplexF64, ComplexF32), m in (PlanarMethod(), OneMMethod())
-        planes = accumulator_planes(m)
-        for (MR, NR, W) in kernel_shapes(T, m)
+    for T in (ComplexF64, ComplexF32), K in (PlanarKernel, OneMKernel)
+        planes = accumulator_planes(K)
+        for (MR, NR, W) in kernel_shapes(T, K)
             rows = (2 * MR) ÷ planes
             @test rows % W == 0
             mv = rows ÷ W
@@ -241,15 +240,15 @@ end
         end
     end
     for T in (ComplexF64, ComplexF32)
-        @test length(kernel_shapes(T, PlanarMethod())) <= 6
-        @test length(kernel_shapes(T, OneMMethod())) <= 4
+        @test length(kernel_shapes(T, PlanarKernel)) <= 6
+        @test length(kernel_shapes(T, OneMKernel)) <= 4
     end
 end
 
 @testset "mixed-domain selection: the real default of real(T), mapped" begin
-    CR, RC = QuasiStrided.ComplexRealMethod(), QuasiStrided.RealComplexMethod()
+    CR, RC = QuasiStrided.ComplexRealKernel, QuasiStrided.RealComplexKernel
     mapped(m, (MR, NR, W)) = m === CR ? (MR ÷ 2, NR, W) : (MR, NR ÷ 2, W)
-    dmethod = QuasiStrided.default_method
+    dkernel = QuasiStrided.default_kernel_type
     for T in (ComplexF64, ComplexF32)
         R = real(T)
         @test all(((MR, NR, W),) -> iseven(NR) && iseven(W), kernel_shapes(R))
@@ -257,13 +256,13 @@ end
             @test kernel_shapes(T, m) === map(s -> mapped(m, s), kernel_shapes(R))
             for shape in kernel_shapes(T, m)
                 k = QuasiStrided.kernel_from_shape(shape, T, m)
-                @test KernelMethod(k) === m && (tile_size(k)..., lanewidth(k)) === shape
+                @test k isa m && (tile_size(k)..., lanewidth(k)) === shape
             end
         end
-        @test dmethod(T, T, R) === dmethod(T, ComplexF32, Float64) === CR
-        @test dmethod(T, R, T) === dmethod(T, Float32, ComplexF64) === RC
-        @test dmethod(T, R, R) === dmethod(T, T, T) === dmethod(T, ComplexF32, T) === PlanarMethod()
-        @test dmethod(R, Float32, Float64) === RealMethod()
+        @test dkernel(T, T, R) === dkernel(T, ComplexF32, Float64) === CR
+        @test dkernel(T, R, T) === dkernel(T, Float32, ComplexF64) === RC
+        @test dkernel(T, R, R) === dkernel(T, T, T) === dkernel(T, ComplexF32, T) === PlanarKernel
+        @test dkernel(R, Float32, Float64) === SIMDKernel
     end
     # Every real step carries over.
     saved = QuasiStrided.TARGET[]
@@ -273,8 +272,8 @@ end
             for T in (ComplexF64, ComplexF32), m in (CR, RC), m_length in (1, 3, 17, 40, 4096),
                     run in (0, 1, 8, m_length), k_length in (1, 1000)
                 real_m, real_run = m === CR ? (2 * m_length, 2 * run) : (m_length, run)
-                real_shape = QuasiStrided.select_shape(real(T), RealMethod(), real_m, k_length, real_run)[1]
-                @test QuasiStrided.select_shape(T, m, m_length, k_length, run) === (mapped(m, real_shape), m)
+                real_shape = QuasiStrided.select_shape(real(T), SIMDKernel, real_m, k_length, real_run)[1]
+                @test QuasiStrided.select_shape(T, m, m_length, k_length, run) === (mapped(m, real_shape), Val(m))
             end
         end
     finally
@@ -282,12 +281,12 @@ end
     end
 end
 
-@testset "derived_shape is always a constructible member of the method's menu" begin
-    methods = (
-        (Float64, RealMethod()), (Float32, RealMethod()), (ComplexF64, PlanarMethod()),
-        (ComplexF32, PlanarMethod()), (ComplexF64, OneMMethod()), (ComplexF32, OneMMethod()),
+@testset "derived_shape is always a constructible member of the kernel's menu" begin
+    pairs = (
+        (Float64, SIMDKernel), (Float32, SIMDKernel), (ComplexF64, PlanarKernel),
+        (ComplexF32, PlanarKernel), (ComplexF64, OneMKernel), (ComplexF32, OneMKernel),
     )
-    for (T, m) in methods, isakey in VALID_ISAS
+    for (T, m) in pairs, isakey in VALID_ISAS
         shape = derived_shape(synthetic(isakey), T, m)
         @test shape in kernel_shapes(T, m)
         k = QuasiStrided.kernel_from_shape(shape, T, m)
@@ -343,27 +342,28 @@ end
         QS.RealComplexKernel(Val(4), Val(2), ComplexF64),
     )
     for k in kernels
-        @test pack_formats(KernelMethod(k)) === (QS.a_format(k), QS.b_format(k))
+        @test pack_formats(typeof(k)) === (QS.a_format(k), QS.b_format(k))
     end
 end
 
 @testset "complex blocking is the real row scaled by packed reals" begin
     for base in (_fallback_blocking(Float64), _fallback_blocking(Float32), Blocking(1, 5, 1))
-        for m in (PlanarMethod(), OneMMethod(), FMAddSubMethod())
+        for m in (PlanarKernel, OneMKernel, FMAddSubKernel)
             b = _scale_blocking(base, m)
             @test b.k_block === base.k_block
             @test b.m_block === max(1, base.m_block ÷ reals_per_element(pack_formats(m)[1]))
             @test b.n_block === max(1, base.n_block ÷ reals_per_element(pack_formats(m)[2]))
         end
     end
-    @test _scale_blocking(_fallback_blocking(Float64), PlanarMethod()) === Blocking(64, 256, 384)
-    @test _scale_blocking(_fallback_blocking(Float64), OneMMethod()) === Blocking(32, 256, 384)
+    @test _scale_blocking(_fallback_blocking(Float64), PlanarKernel) === Blocking(64, 256, 384)
+    @test _scale_blocking(_fallback_blocking(Float64), OneMKernel) === Blocking(32, 256, 384)
     for T in (ComplexF64, ComplexF32)
         row = _real_blocking_row(target_profile(), real(T))
-        @test default_blocking(_default_kernel(T)) === _scale_blocking(row, PlanarMethod())
+        @test default_blocking(_default_kernel(T)) === _scale_blocking(row, PlanarKernel)
     end
     for T in (Float64, Float32)
         @test default_blocking(_default_kernel(T)) === _real_blocking_row(target_profile(), T)
+        @test default_blocking(ScalarKernel(Val(4), Val(2), T)) === _real_blocking_row(target_profile(), T)
     end
 end
 
@@ -372,36 +372,36 @@ end
         kernel = _default_kernel(T)
         @test kernel isa QuasiStrided.PlanarKernel
         @test scalartype(kernel) === T && realtype(kernel) === real(T)
-        @test KernelMethod(kernel) === PlanarMethod() === QuasiStrided.default_method(T)
+        @test QuasiStrided.default_kernel_type(T) === PlanarKernel
         shape = (tile_size(kernel)..., lanewidth(kernel))
         profile = target_profile()
         @test planar_pressure(shape...) <= (profile.nregisters > 0 ? profile.nregisters : 16)
-        profile.isa === :avx512 && @test shape === first(kernel_shapes(T, PlanarMethod()))
+        profile.isa === :avx512 && @test shape === first(kernel_shapes(T, PlanarKernel))
         @test _default_kernel(T, 1024, 1024) isa QuasiStrided.PlanarKernel
         # The small-M demotion: FMAddSub on AVX-512, planar elsewhere.
         small = _default_kernel(T, 1, 1)
         @test small isa (profile.isa === :avx512 ? QuasiStrided.FMAddSubKernel : QuasiStrided.PlanarKernel)
 
-        shape1m = first(kernel_shapes(T, OneMMethod()))
-        k1m = QuasiStrided.kernel_from_shape(shape1m, T, OneMMethod())
-        @test k1m isa QuasiStrided.OneMKernel && KernelMethod(k1m) === OneMMethod()
+        shape1m = first(kernel_shapes(T, OneMKernel))
+        k1m = QuasiStrided.kernel_from_shape(shape1m, T, OneMKernel)
+        @test k1m isa OneMKernel
         @test (tile_size(k1m)..., lanewidth(k1m)) === shape1m
-        # A method with no kernel for `T` throws, naming itself.
+        # A kernel type with no menu for `T` throws, naming itself.
         err = try
-            QuasiStrided.kernel_from_shape(shape1m, T, RealMethod())
+            QuasiStrided.kernel_from_shape(shape1m, T, SIMDKernel)
         catch e
             e
         end
         @test err isa ArgumentError
-        @test occursin("RealMethod", err.msg) && occursin(string(T), err.msg)
+        @test occursin("SIMDKernel", err.msg) && occursin(string(T), err.msg)
     end
     for T in (Float16, Int, ComplexF16)
         @test_throws ArgumentError QuasiStrided.kernel_from_shape((8, 6, 4), T)
     end
-    @test_throws ArgumentError QuasiStrided.kernel_from_shape((8, 6, 4), Float64, OneMMethod())
+    @test_throws ArgumentError QuasiStrided.kernel_from_shape((8, 6, 4), Float64, OneMKernel)
     @test_throws ArgumentError QuasiStrided.kernel_from_shape((8, 6, 5), Float64)
-    @test_throws ArgumentError QuasiStrided.menu_val((8, 6, 5), Float64, RealMethod())
-    @test QuasiStrided.menu_val((8, 6, 4), Float64, RealMethod()) === Val((8, 6, 4))
+    @test_throws ArgumentError QuasiStrided.menu_val((8, 6, 5), Float64, SIMDKernel)
+    @test QuasiStrided.menu_val((8, 6, 4), Float64, SIMDKernel) === Val(SIMDKernel{8, 6, Float64, 4})
 end
 
 @testset "small_m_shape: AVX-512 complex small-M demotion to FMAddSub" begin
@@ -415,7 +415,7 @@ end
     @test sms(ComplexF32, 16) === (16, 8, 16)
     for T in (ComplexF64, ComplexF32), m_length in 1:47
         shape = sms(T, m_length)
-        @test shape in kernel_shapes(T, FMAddSubMethod())
+        @test shape in kernel_shapes(T, FMAddSubKernel)
         @test shape[3] == 64 ÷ sizeof(real(T))
     end
     @test sms(Float64, 4) === nothing

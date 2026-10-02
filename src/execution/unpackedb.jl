@@ -36,16 +36,11 @@ end
 end
 
 # The kernels whose K step reads B through `b_scalar`/`b_complex`
-# (not 1m, whose inner kernel walks the planar panel, nor the scalar one).
-@inline _unpacked_b_kernel_eligible(::SIMDKernel) = true
-@inline _unpacked_b_kernel_eligible(::PlanarKernel) = true
-@inline _unpacked_b_kernel_eligible(::FMAddSubKernel) = true
-@inline _unpacked_b_kernel_eligible(::ComplexRealKernel) = true
-@inline _unpacked_b_kernel_eligible(::Any) = false
-
-# The same by method, to predict the path before the kernel exists.
-@inline _unpacked_b_method_eligible(::Union{RealMethod, PlanarMethod, FMAddSubMethod, ComplexRealMethod}) = true
-@inline _unpacked_b_method_eligible(::Any) = false
+# (not 1m, whose inner kernel walks the planar panel, nor the scalar one); by
+# type, to predict the path before the kernel exists.
+@inline _unpacked_b_kernel_eligible(::Type{<:Union{SIMDKernel, PlanarKernel, FMAddSubKernel, ComplexRealKernel}}) = true
+@inline _unpacked_b_kernel_eligible(::Type) = false
+@inline _unpacked_b_kernel_eligible(kernel::Microkernel) = _unpacked_b_kernel_eligible(typeof(kernel))
 
 # `:always`/`:never` override the rule below, for benchmarks and tests.
 const _UNPACKED_B_MODE = Ref{Symbol}(:auto)

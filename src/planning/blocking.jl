@@ -20,10 +20,10 @@ struct Blocking
 end
 
 # Complex blocking is the real row divided by the packed reals per element of
-# each operand, so every method gets the same packed BYTE budget (1m's
+# each operand, so every kernel type gets the same packed BYTE budget (1m's
 # `m_block` is half planar's).
-@inline function _scale_blocking(base::Blocking, m::KernelMethod)
-    a_reals, b_reals = map(reals_per_element, pack_formats(m))
+@inline function _scale_blocking(base::Blocking, ::Type{K}) where {K <: Microkernel}
+    a_reals, b_reals = map(reals_per_element, pack_formats(K))
     return Blocking(max(1, base.m_block ÷ a_reals), base.k_block, max(1, base.n_block ÷ b_reals))
 end
 

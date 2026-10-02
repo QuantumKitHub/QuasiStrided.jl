@@ -174,13 +174,11 @@ end
     U, plan.mgroup, plan.ngroup, plan.kgroup, _is_split(plan.mpack), _is_split(plan.npack), true
 )
 
-# The prediction differs from `_select_path(plan)` in three inputs only: the
-# kernel's unpacked-B eligibility (predicted from its method; folds), the
+# The prediction differs from `_select_path(plan)` in two inputs only: the
 # dot path's workspace capacity (assumed) and the panel decision (made at the
 # default `k_block`; folds to `false` unless C is narrower than `T`).
 @inline _hint_holds(plan::ContractPlan{T}, path::Union{_NestPath, _PanelPath}) where {T} =
-    _c_panel_needed(T, plan.Cstorage, axis_length(plan.kgroup), plan.blocking.k_block) === (path isa _PanelPath) &&
-    _unpacked_b_method_eligible(KernelMethod(plan.kernel)) === _unpacked_b_kernel_eligible(plan.kernel)
+    _c_panel_needed(T, plan.Cstorage, axis_length(plan.kgroup), plan.blocking.k_block) === (path isa _PanelPath)
 @inline _hint_holds(plan::ContractPlan, ::_DotPath) = _dot_capacity_ok(plan)
 @inline _hint_holds(plan::ContractPlan, ::_OuterPath) = true
 

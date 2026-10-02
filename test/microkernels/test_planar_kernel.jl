@@ -1,4 +1,4 @@
-using QuasiStrided: PlanarKernel, PlanarMethod, KernelMethod, lanewidth,
+using QuasiStrided: PlanarKernel, lanewidth,
     KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 
 @testset "PlanarKernel" begin
@@ -11,7 +11,6 @@ using QuasiStrided: PlanarKernel, PlanarMethod, KernelMethod, lanewidth,
     end
 
     k = PlanarKernel(Val(16), Val(6), ComplexF64, Val(8))
-    @test KernelMethod(k) === PlanarMethod()
     @test lanewidth(PlanarKernel(Val(8), Val(4), ComplexF64)) == 4  # from the REAL type
     @test lanewidth(PlanarKernel(Val(8), Val(4), ComplexF32)) == 8
     @test_throws ArgumentError PlanarKernel(Val(6), Val(4), ComplexF64, Val(4))

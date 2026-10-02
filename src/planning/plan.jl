@@ -185,7 +185,7 @@ function _planned(
         accumulator::AC
     ) where {F, NA, NB, NC, AC}
     T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
-    method = default_method(T, eltype(A), eltype(B))
+    K = default_kernel_type(T, eltype(A), eltype(B))
     _check_kernel_domain(kernel, eltype(A), eltype(B))
 
     # GUARDRAIL: a conjugated `C` is rejected; the engine writes through to
@@ -205,7 +205,7 @@ function _planned(
     norder = order_free_labels(nlabels, indC, C)
 
     # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
-    run_m = T <: Real || method isa MixedMethod ? leading_unit_run(morder, indC, C) : 0
+    run_m = T <: Real || K isa MixedKernel ? leading_unit_run(morder, indC, C) : 0
     run_n = T <: Real ? leading_unit_run(norder, indC, C) : 0
 
     mgroup = AxisGroup(morder, (indA, A), (indC, C))  # maps: (A, C)
@@ -219,7 +219,7 @@ function _planned(
 
     k_length = axis_length(kgroup)
 
-    m_tile_asis, m_tile_swapped = _candidate_m_tiles(T, method, kernel, m_length, n_length, run_m, run_n)
+    m_tile_asis, m_tile_swapped = _candidate_m_tiles(T, K, kernel, m_length, n_length, run_m, run_n)
 
     if T <: Real && prefer_swap(run_m, run_n, m_tile_asis, m_tile_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
@@ -230,14 +230,14 @@ function _planned(
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
             run_n, m_block, k_block, n_block, workspace, allocator, oracle
         )
-        return _plan_with_kernel(kernel, method, btransform, atransform, req_swapped)
+        return _plan_with_kernel(kernel, K, btransform, atransform, req_swapped)
     end
     req = _plan_request(
         T, f, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
         run_m, m_block, k_block, n_block, workspace, allocator, oracle
     )
-    return _plan_with_kernel(kernel, method, atransform, btransform, req)
+    return _plan_with_kernel(kernel, K, atransform, btransform, req)
 end
 
 const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
@@ -277,44 +277,49 @@ end
 # named kernel either way, else `select_shape`'s pick at that orientation's
 # extent and C run. The swap is judged before `fit_to_run`'s K-dependent
 # divisor step, which an unbounded `k_length` skips.
-@inline _candidate_m_tiles(::Type{T}, method, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
+@inline _candidate_m_tiles(::Type{T}, ::Type, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
     (tile_size(kernel, 1), tile_size(kernel, 1))
-@inline function _candidate_m_tiles(::Type{T}, method, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T}
-    m_tile_asis = select_shape(T, method, m_length, typemax(Int), run_m)[1][1]
-    m_tile_swapped = T <: Real ? select_shape(T, method, n_length, typemax(Int), run_n)[1][1] : m_tile_asis
+@inline function _candidate_m_tiles(::Type{T}, ::Type{K}, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T, K}
+    m_tile_asis = select_shape(T, K, m_length, typemax(Int), run_m)[1][1]
+    m_tile_swapped = T <: Real ? select_shape(T, K, n_length, typemax(Int), run_n)[1][1] : m_tile_asis
     return m_tile_asis, m_tile_swapped
 end
 
 # Kernel resolution. A named kernel goes straight through, never demoted. An
-# automatic one is chosen as a `(shape, method)` value and the plan is built
-# across a dispatch barrier specialised on that one shape, so only the chosen
-# kernel's code is compiled (holding the menu-wide kernel Union would box the
-# request; a static ladder would compile every menu kernel). All barrier
-# arguments are singletons or heap objects: 0 B, one method-cache hit.
-@inline _plan_with_kernel(kernel, method, atransform, btransform, req::_PlanRequest) =
+# automatic one is chosen as a `(shape, kernel type)` value and the plan is
+# built across a dispatch barrier specialised on that one concrete kernel type,
+# so only the chosen kernel's code is compiled (holding the menu-wide kernel
+# Union would box the request; a static ladder would compile every menu
+# kernel). All barrier arguments are singletons or heap objects: 0 B, one
+# method-cache hit.
+@inline _plan_with_kernel(kernel, ::Type, atransform, btransform, req::_PlanRequest) =
     _plan_contract(kernel, atransform, btransform, req, nothing)
-@inline function _plan_with_kernel(::Nothing, method, atransform, btransform, req::_PlanRequest{T}) where {T}
-    shape, method = select_shape(T, method, axis_length(req.mgroup), axis_length(req.kgroup), req.run)
-    vshape = menu_val(shape, T, method)
+@inline function _plan_with_kernel(::Nothing, ::Type{K}, atransform, btransform, req::_PlanRequest{T}) where {K, T}
+    shape, kernel_type = select_shape(T, K, axis_length(req.mgroup), axis_length(req.kgroup), req.run)
+    return _plan_at_shape(shape, kernel_type, atransform, btransform, req)
+end
+
+@inline function _plan_at_shape(shape, ::Val{K}, atransform, btransform, req::_PlanRequest{T}) where {K, T}
+    vkernel = menu_val(shape, T, K)
     # The execution path, predicted so the callee is specialised on it. Only a
-    # `Bool` crosses: a call union-split on `method` is emitted out of line and
-    # boxes `req`.
-    hint = _path_hint(req.f, req, _unpacked_b_method_eligible(method))
+    # `Bool` crosses: a call union-split on the kernel type is emitted out of
+    # line and boxes `req`.
+    hint = _path_hint(req.f, req, _unpacked_b_kernel_eligible(K))
     core = _strip_storage(req)
     slot = _barrier_slot!(req.workspace, typeof(core))
     slot[] = core
     return Base.inferencebarrier(_plan_resolved)(
-        vshape, method, atransform, btransform, hint, slot,
+        vkernel, atransform, btransform, hint, slot,
         req.Astorage, req.Bstorage, req.Cstorage
     )
 end
 
 function _plan_resolved(
-        ::Val{S}, method::M, atransform::TA, btransform::TB, hint::H,
+        ::Val{Kern}, atransform::TA, btransform::TB, hint::H,
         slot::Base.RefValue{R}, Astorage::SA, Bstorage::SB, Cstorage::SC
-    ) where {S, M, TA, TB, H, T, R <: _PlanRequest{T}, SA, SB, SC}
+    ) where {Kern, TA, TB, H, T, R <: _PlanRequest{T}, SA, SB, SC}
     req = _with_storage(slot[], Astorage, Bstorage, Cstorage)
-    return _plan_contract(kernel_from_shape(S, T, method), atransform, btransform, req, hint)
+    return _plan_contract(Kern(), atransform, btransform, req, hint)
 end
 
 # The storages cross the barrier as arguments, so no slot retains a user array.

@@ -1,6 +1,6 @@
-using QuasiStrided: FMAddSubKernel, FMAddSubMethod, PlanarKernel, PlanarMethod, OneMKernel,
-    InterleavedFormat, KernelMethod, lanewidth, kernel_shapes, packed_panel,
-    kernel_from_shape, default_method, accumulator_planes, target_profile, PackedPanel
+using QuasiStrided: FMAddSubKernel, PlanarKernel, OneMKernel,
+    InterleavedFormat, lanewidth, kernel_shapes, packed_panel,
+    kernel_from_shape, default_kernel_type, accumulator_planes, target_profile, PackedPanel
 using SIMD: Vec
 using InteractiveUtils: code_native
 
@@ -11,13 +11,12 @@ const _QSF = QuasiStrided
     for (T, (MR, NR, W)) in full
         mk_contract(FMAddSubKernel(Val(MR), Val(NR), T, Val(W)))
     end
-    for T in (ComplexF64, ComplexF32), s in (kernel_shapes(T, FMAddSubMethod())..., (2, 3, 4))
+    for T in (ComplexF64, ComplexF32), s in (kernel_shapes(T, FMAddSubKernel)..., (2, 3, 4))
         (T, s) in full || mk_contract(FMAddSubKernel(Val(s[1]), Val(s[2]), T, Val(s[3])); full = false)
     end
 
     @testset "construction" begin
-        @test KernelMethod(FMAddSubKernel(Val(8), Val(4), ComplexF64)) === FMAddSubMethod()
-        @test accumulator_planes(FMAddSubMethod()) == 1
+        @test accumulator_planes(FMAddSubKernel) == 1
         @test lanewidth(FMAddSubKernel(Val(8), Val(4), ComplexF32)) == 8
         @test_throws ArgumentError FMAddSubKernel(Val(12), Val(8), ComplexF64, Val(16))
         @test_throws ArgumentError FMAddSubKernel(Val(3), Val(4), ComplexF64, Val(3))  # odd W
@@ -110,7 +109,7 @@ const _QSF = QuasiStrided
 
     @testset "pack! InterleavedFormat A: scalar loop and fast path vs local layout" begin
         # Bitwise (`isequal` separates -0.0): packing is a copy, or a sign flip under conj.
-        for T in (ComplexF64, ComplexF32), (MR, NR, W) in (kernel_shapes(T, FMAddSubMethod())..., (3, 2, 2))
+        for T in (ComplexF64, ComplexF32), (MR, NR, W) in (kernel_shapes(T, FMAddSubKernel)..., (3, 2, 2))
             R = real(T)
             k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
             k_block_length, lda, base = 7, MR + 3, 2
@@ -137,10 +136,10 @@ const _QSF = QuasiStrided
             bf = default_blocking(FMAddSubKernel(Val(8), Val(8), T, Val(8)))
             bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
             @test (bf.m_block, bf.k_block, bf.n_block) == (bp.m_block, bp.k_block, bp.n_block)  # planar's packed reals
-            for s in kernel_shapes(T, FMAddSubMethod())
-                @test kernel_from_shape(s, T, FMAddSubMethod()) isa FMAddSubKernel{s[1], s[2], T, s[3]}
+            for s in kernel_shapes(T, FMAddSubKernel)
+                @test kernel_from_shape(s, T, FMAddSubKernel) isa FMAddSubKernel{s[1], s[2], T, s[3]}
             end
-            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, FMAddSubMethod())
+            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, FMAddSubKernel)
             @test !(_QSF._default_kernel(T, 1024, 1024) isa FMAddSubKernel)
         end
     end

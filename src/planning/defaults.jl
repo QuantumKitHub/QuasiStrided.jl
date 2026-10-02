@@ -26,10 +26,10 @@ end
     _defaults_slot(T) === nothing ? l2_core_bytes(target_profile()) : _resolved_defaults(T).l2_core
 
 function _resolve_defaults(profile::TargetProfile, ::Type{T}) where {T}
-    method = default_method(T)
+    K = default_kernel_type(T)
     # First, so an element type with no menu throws from here.
-    shape = derived_shape(profile, T, method)
-    fitted = fitted_shape(profile, T, method)
+    shape = derived_shape(profile, T, K)
+    fitted = fitted_shape(profile, T, K)
     small_m = small_m_candidates(Val(profile.isa), profile, T)
     real_row = _real_blocking_row(profile, real(T))
     l2_core = l2_core_bytes(profile)
@@ -67,12 +67,12 @@ end
 end
 
 _default_kernel(::Type{T}) where {T} =
-    kernel_from_shape(_resolved_defaults(T).shape, T, default_method(T))
+    kernel_from_shape(_resolved_defaults(T).shape, T, default_kernel_type(T))
 
 # `@noinline`: the return type is the Union of `T`'s menu kernels.
 @noinline function _default_kernel(::Type{T}, m_length::Int, n_length::Int) where {T}
-    shape, method = select_shape(T, default_method(T), m_length, 0, m_length)
-    return kernel_from_shape(shape, T, method)
+    shape, kernel_type = select_shape(T, default_kernel_type(T), m_length, 0, m_length)
+    return kernel_from_shape(shape, T, kernel_type)
 end
 
 """
@@ -80,11 +80,11 @@ end
 
 Cache-blocking factors for `kernel` on this host: an analytical model of the
 detected cache geometry ([`target_profile`](@ref)), or fixed constants where
-L1d or L2 is undetected, scaled for complex methods by packed reals per
+L1d or L2 is undetected, scaled for complex kernels by packed reals per
 element. `plan_contract` rounds `m_block`/`n_block` to multiples of the tile
 size and clamps all three to the contraction's extents.
 """
 function default_blocking(kernel)
     T = scalartype(kernel)
-    return _scale_blocking(_resolved_defaults(T).real_row, KernelMethod(kernel))
+    return _scale_blocking(_resolved_defaults(T).real_row, typeof(kernel))
 end

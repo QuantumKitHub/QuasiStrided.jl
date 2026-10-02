@@ -1,5 +1,5 @@
-# The microkernel contract, the complex-arithmetic methods, and the validation
-# and store helpers every kernel shares.
+# The microkernel contract, and the validation and store helpers every kernel
+# shares.
 
 """
     Microkernel{MR, NR, T}
@@ -13,43 +13,6 @@ kernels match `ScalarKernel` only to within rounding (FMA grouping differs),
 never bitwise.
 """
 abstract type Microkernel{MR, NR, T} end
-
-"""
-    KernelMethod(kernel)
-
-How a kernel maps its multiply-adds onto real arithmetic, as singletons so
-blocking and the shape menus dispatch on it:
-
-  - `RealMethod`: a real kernel.
-  - `PlanarMethod`: split re/im planes, 4 real FMAs per complex MAC.
-  - `OneMMethod`: Van Zee's 1m, a real `2MR x NR` kernel.
-  - `FMAddSubMethod`: interleaved A, x86 `vfmaddsub`.
-  - `ComplexRealMethod`: complex A, real B; the real kernel on `2MR` rows.
-  - `RealComplexMethod`: real A, complex B; the real kernel on `2NR` columns.
-
-No method ranking is hardcoded: planar is the default, 1m and fmaddsub are used
-only when named (plus fmaddsub for the AVX-512 small-M demotion,
-`small_m_shape` in src/planning/kernel_selection.jl).
-"""
-abstract type KernelMethod end
-struct RealMethod <: KernelMethod end
-struct PlanarMethod <: KernelMethod end
-struct OneMMethod <: KernelMethod end
-struct FMAddSubMethod <: KernelMethod end
-struct ComplexRealMethod <: KernelMethod end
-struct RealComplexMethod <: KernelMethod end
-
-# The (A, B) packing formats of every kernel of a method.
-pack_formats(::RealMethod) = (RealFormat(), RealFormat())
-pack_formats(::PlanarMethod) = (PlanarFormat(), PlanarFormat())
-pack_formats(::OneMMethod) = (OneEFormat(), PlanarFormat())
-pack_formats(::FMAddSubMethod) = (InterleavedFormat(), PlanarFormat())
-pack_formats(::ComplexRealMethod) = (InterleavedFormat(), RealFormat())
-pack_formats(::RealComplexMethod) = (RealFormat(), InterleavedFormat())
-
-# Accumulator planes held live: planar keeps separate re/im planes.
-accumulator_planes(::KernelMethod) = 1
-accumulator_planes(::PlanarMethod) = 2
 
 realtype(k::Microkernel) = realtype(k.descriptor)
 sliver_width(k::Microkernel) = sliver_width(k.descriptor)
