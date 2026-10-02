@@ -17,7 +17,7 @@
     @test_throws ArgumentError contract!(Cv, 1.0, Av, (1, 2), Bv, (2, 3), 0.0, (1, 9))
 
     # Dangling label: only in indA, then only in indB. Distinct code paths
-    # (the A loop vs. the B loop in _classify_labels).
+    # (the A loop vs. the B loop in classify_labels).
     @test_throws ArgumentError contract!(Cv, 1.0, Av, (1, 2), Bv, (5, 3), 0.0, (1, 3))
     @test_throws ArgumentError contract!(Cv, 1.0, Av, (1, 2), Bv, (2, 9), 0.0, (1, 3))
 
@@ -76,23 +76,23 @@ end
 end
 
 
-@testset "_op_conjugates is a total table with a throwing fallback" begin
-    @test QuasiStrided._op_conjugates(identity) === false
-    @test QuasiStrided._op_conjugates(conj) === true
-    @test QuasiStrided._op_conjugates(transpose) === false   # elementwise identity
-    @test QuasiStrided._op_conjugates(adjoint) === true
-    @test_throws ArgumentError QuasiStrided._op_conjugates(sin)
+@testset "op_conjugates is a total table with a throwing fallback" begin
+    @test QuasiStrided.op_conjugates(identity) === false
+    @test QuasiStrided.op_conjugates(conj) === true
+    @test QuasiStrided.op_conjugates(transpose) === false   # elementwise identity
+    @test QuasiStrided.op_conjugates(adjoint) === true
+    @test_throws ArgumentError QuasiStrided.op_conjugates(sin)
 
     # A real element type is conjugated by nothing; a complex one composes
     # the flag and the op with XOR.
     for op in (identity, conj, transpose, adjoint), flag in (false, true)
         v = StridedView(randn(16), (4, 4), (1, 4), 0, op)
-        @test QuasiStrided._qs_isconj(v, flag) === false
+        @test QuasiStrided.isconj(v, flag) === false
     end
     for (op, oc) in ((identity, false), (conj, true), (transpose, false), (adjoint, true)),
             flag in (false, true)
         v = StridedView(randn(ComplexF64, 16), (4, 4), (1, 4), 0, op)
-        @test QuasiStrided._qs_isconj(v, flag) === (flag ⊻ oc)
+        @test QuasiStrided.isconj(v, flag) === (flag ⊻ oc)
     end
 end
 
@@ -153,7 +153,7 @@ end
         @test err isa ArgumentError
         @test occursin("conjugated", err.msg)
     end
-    # StridedViews bounds `op` to exactly the four functions `_op_conjugates`
+    # StridedViews bounds `op` to exactly the four functions `op_conjugates`
     # tabulates; fail here if that ever widens.
     @test_throws TypeError StridedView(Cc, (6, 4), (1, 6), 0, sin)
     Fbound = fieldtype(typeof(StridedView(Cc, (6, 4), (1, 6), 0, conj)), :op)
@@ -165,9 +165,9 @@ end
 
 
 # Label order within M/N and the M/N orientation swap.
-const _lo_order = QuasiStrided._order_free_labels
-const _lo_run = QuasiStrided._leading_unit_run
-_lo_swap(morder, norder, indC, C, m_tile_asis, m_tile_swapped = m_tile_asis) = QuasiStrided._prefer_swap(
+const _lo_order = QuasiStrided.order_free_labels
+const _lo_run = QuasiStrided.leading_unit_run
+_lo_swap(morder, norder, indC, C, m_tile_asis, m_tile_swapped = m_tile_asis) = QuasiStrided.prefer_swap(
     _lo_run(morder, indC, C), _lo_run(norder, indC, C), m_tile_asis, m_tile_swapped
 )
 
@@ -224,7 +224,7 @@ function _lo_reference_loop!(
     return acc
 end
 
-@testset "label order: _order_free_labels sorts by |C-stride|, stably" begin
+@testset "label order: order_free_labels sorts by |C-stride|, stably" begin
     Cv = _lo_view((5, 3, 2, 4), (12, 1, 60, 3))
     indC = (10, 20, 30, 40)
     labels = (10, 20, 30, 40)
@@ -259,7 +259,7 @@ end
     end
 end
 
-@testset "label order: _leading_unit_run / _prefer_swap" begin
+@testset "label order: leading_unit_run / prefer_swap" begin
     d = 4
     C6 = StridedView(zeros(Float64, d, d, d, d, d, d))  # strides 1, d, d^2, ...
     indC = (1, 2, 3, 4, 5, 6)                            # a,b,c,i,j,k
@@ -298,7 +298,7 @@ end
     @test !_lo_swap((b, i, j), (), indC, C6, 1)
 end
 
-@testset "label order: _leading_unit_run's full-coverage condition is a single-map affine_ramp on C's own strides" begin
+@testset "label order: leading_unit_run's full-coverage condition is a single-map affine_ramp on C's own strides" begin
     # The whole composite is one run iff C's own single-map group is a unit
     # ramp. Empty and all-singleton composites are excluded: `affine_ramp`
     # reports step 0 there while the run is trivially 1.
@@ -316,7 +316,7 @@ end
         m_length == 1 && continue
         ntested += 1
 
-        run = QuasiStrided._leading_unit_run(order, indCr, Cr)
+        run = QuasiStrided.leading_unit_run(order, indCr, Cr)
 
         clens = ntuple(d -> lens[order[d]], nlabels)
         cstrides = ntuple(d -> strides[order[d]], nlabels)
@@ -337,7 +337,7 @@ end
         Av, Bv, Cv = StridedView(A), StridedView(B), StridedView(C)
         cst = Base.strides(Cv)
         cstride(l) = cst[findfirst(==(l), indC)]
-        mlab, nlab, klab = QuasiStrided._classify_labels(indA, indB, indC)
+        mlab, nlab, klab = QuasiStrided.classify_labels(indA, indB, indC)
         @test length(klab) == 1
         kA = Base.strides(Av)[findfirst(==(klab[1]), indA)]
         kB = Base.strides(Bv)[findfirst(==(klab[1]), indB)]
@@ -405,7 +405,7 @@ end
         C = zeros(T, d, extra, extra, extra, extra, extra)  # (a, b, c, i, j, k)
         Av, Bv, Cv = StridedView(A), StridedView(B), StridedView(C)
 
-        mlab, nlab, klab = QuasiStrided._classify_labels(indA, indB, indC)
+        mlab, nlab, klab = QuasiStrided.classify_labels(indA, indB, indC)
         msorted = _lo_order(mlab, indC, Cv)
         run = _lo_run(msorted, indC, Cv)
         cpos(l) = findfirst(==(l), indC)::Int
@@ -494,7 +494,7 @@ end
         Cv2, Av2, Bv2 = _run_demote_fixture(T, a, m_shallow)
         plan_shallow = plan_contract(Cv2, Av2, indA, Bv2, indB, indC)
         @test plan_shallow.Astorage === parent(Av2)
-        mlab, = QuasiStrided._classify_labels(indA, indB, indC)
+        mlab, = QuasiStrided.classify_labels(indA, indB, indC)
         msorted = _lo_order(mlab, indC, Cv2)
         run = _lo_run(msorted, indC, Cv2)
         if m_length == run || run % tile_size(default_kernel, 1) == 0
@@ -640,7 +640,7 @@ end
 # `_KO_EXT` fits any L2; `_KO_BIG` makes B's lines touched before `d` advances
 # (b*c*e*64 B) exceed THIS host's L2 share, with e >= 40, so the model reorders
 # K wherever the suite runs.
-function _ko_big(l2 = QuasiStrided._l2_core_bytes(Float64))
+function _ko_big(l2 = QuasiStrided.l2_core_bytes(Float64))
     e = max(40, fld(l2, 40 * 40 * 64) + 1)
     return Dict(1 => 9, 2 => 40, 3 => 40, 4 => 5, 5 => e)
 end
@@ -650,11 +650,11 @@ _ko_array(::Type{T}, ind, ext = _KO_EXT) where {T} = randn(T, Tuple(ext[l] for l
 _ko_stride(v, ind, l) = Base.strides(v)[findfirst(==(l), ind)]
 
 function _ko_order(Av, indA, Bv, indB, Cv, indC; l2bytes)
-    mlabels, nlabels, klabels = QuasiStrided._classify_labels(indA, indB, indC)
-    morder = QuasiStrided._order_free_labels(mlabels, indC, Cv)
-    norder = QuasiStrided._order_free_labels(nlabels, indC, Cv)
+    mlabels, nlabels, klabels = QuasiStrided.classify_labels(indA, indB, indC)
+    morder = QuasiStrided.order_free_labels(mlabels, indC, Cv)
+    norder = QuasiStrided.order_free_labels(nlabels, indC, Cv)
     ext(ls) = prod((size(Cv, findfirst(==(l), indC)) for l in ls); init = 1)
-    return QuasiStrided._choose_k_order(
+    return QuasiStrided.order_contract_labels(
         klabels, indA, Av, morder, indB, Bv, norder, ext(mlabels), ext(nlabels), l2bytes
     )
 end
@@ -701,15 +701,15 @@ end
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))
     Cv = StridedView(zeros(T, ext[1], ext[5]))
     klabels, morder, norder = (2, 3, 4), (1,), (5,)
-    f(l2) = QuasiStrided._choose_k_order(klabels, (1, 2, 3, 4), Av, morder, (4, 3, 2, 5), Bs, norder, ext[1], ext[5], l2)
-    g() = QuasiStrided._order_contract_labels(klabels, (1, 2, 3, 4), Av, morder, (4, 3, 2, 5), Bs, norder, ext[1], ext[5])
+    f(l2) = QuasiStrided.order_contract_labels(klabels, (1, 2, 3, 4), Av, morder, (4, 3, 2, 5), Bs, norder, ext[1], ext[5], l2)
+    g() = QuasiStrided.order_contract_labels(klabels, (1, 2, 3, 4), Av, morder, (4, 3, 2, 5), Bs, norder, ext[1], ext[5])
     @test @inferred(f(0)) === (4, 3, 2)
     @test @inferred(g()) isa NTuple{3, Int}
     f(0); g()
     @test (@allocated f(0)) == 0 skip = (VERSION < v"1.11")
     @test (@allocated g()) == 0 skip = (VERSION < v"1.11")
-    h1() = QuasiStrided._order_contract_labels((2,), (1, 2), Av, (1,), (2, 5), Bs, (5,), 9, 40)
-    h0() = QuasiStrided._order_contract_labels((), (1,), Av, (1,), (5,), Bs, (5,), 9, 40)
+    h1() = QuasiStrided.order_contract_labels((2,), (1, 2), Av, (1,), (2, 5), Bs, (5,), 9, 40)
+    h0() = QuasiStrided.order_contract_labels((), (1,), Av, (1,), (5,), Bs, (5,), 9, 40)
     @test @inferred(h1()) === (2,)
     @test @inferred(h0()) === ()
 end
@@ -717,7 +717,7 @@ end
 @testset "K order: plan_contract flips contract_scrambled at an L2-exceeding size" begin
     T = Float64
     ext = _KO_BIG
-    @test ext[2] * ext[3] * ext[5] * 64 > QuasiStrided._l2_core_bytes(T)
+    @test ext[2] * ext[3] * ext[5] * 64 > QuasiStrided.l2_core_bytes(T)
     Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))   # B[d,c,b,e]
     Cv = StridedView(zeros(T, ext[1], ext[5]))

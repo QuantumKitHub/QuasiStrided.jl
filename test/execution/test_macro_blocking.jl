@@ -19,8 +19,8 @@ end
 
 # The engine's conjugation rule re-derived independently: the flag and the
 # view's `op` compose by XOR; real eltypes never conjugate.
-_macro_op_conjugates(op) = op === conj || op === adjoint
-_macro_conjugated(::Type{T}, flag::Bool, op) where {T} = (T <: Complex) && (flag ⊻ _macro_op_conjugates(op))
+_macro_conj_op(op) = op === conj || op === adjoint
+_macro_conjugated(::Type{T}, flag::Bool, op) where {T} = (T <: Complex) && (flag ⊻ _macro_conj_op(op))
 
 const _MACRO_OPS = (identity, conj, adjoint, transpose)
 const _MACRO_SHAPES = ((Val(4), Val(3)), (Val(8), Val(6)))
@@ -160,7 +160,7 @@ end
             _macro_op_view(C, op), _macro_op_view(Amat, op), (1, 2), _macro_op_view(Bmat, op), (2, 3), (1, 3);
             kernel = kernel, conjA = true, conjB = true, m_block = 4, k_block = 3, n_block = 4
         )
-        if T <: Complex && _macro_op_conjugates(op)
+        if T <: Complex && _macro_conj_op(op)
             @test_throws ArgumentError mkplan()
         else
             plan = mkplan()

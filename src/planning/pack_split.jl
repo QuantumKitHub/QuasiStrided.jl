@@ -90,7 +90,7 @@ end
 # share, plus its L3 share unless the sliver steps a whole number of pages,
 # which folds the lines it gathers into a few sets of every level.
 function _split_capacity(profile::TargetProfile, aliased::Bool)
-    l2 = _l2_core_bytes(profile)
+    l2 = l2_core_bytes(profile)
     l3 = profile.l3
     (aliased || l3.bytes <= 0) && return l2
     return l2 + core_bytes(profile, l3)

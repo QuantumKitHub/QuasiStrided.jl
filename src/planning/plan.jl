@@ -150,6 +150,29 @@ end
     )
 end
 
+# Conjugation: folding `conjA`/`conjB` with each view's `.op`. The engine never
+# indexes through a `StridedView`, so an unfolded `.op` would be silently dropped.
+
+# GUARDRAIL: a TOTAL table with a throwing fallback, not an `op === conj` test,
+# which classifies a directly constructed `adjoint` view as unconjugated.
+op_conjugates(::typeof(identity)) = false
+op_conjugates(::typeof(conj)) = true
+# Elementwise on a `Number`, these are identity/conj; the axes are already resolved.
+op_conjugates(::typeof(transpose)) = false
+op_conjugates(::typeof(adjoint)) = true
+@noinline op_conjugates(f) = throw(
+    ArgumentError(
+        "unsupported StridedView.op $f: QuasiStrided folds a view's `op` into the " *
+            "packing transform and recognizes only identity/conj/transpose/adjoint"
+    )
+)
+
+# GUARDRAIL: `⊻`, not `||`: the flag and the view's `op` are independent
+# conjugations and `conj` is involutive. Always `false` for real `T`, so the
+# real path never gets a `conj` specialization.
+isconj(v::StridedView{T}, flag::Bool) where {T} =
+    (T <: Complex) && (flag ⊻ op_conjugates(v.op))
+
 # `plan_contract`'s body, positional, with a continuation `f` applied to the
 # plan inside the barrier, where its type is concrete (the TensorOperations
 # adapter passes an executor).
@@ -167,23 +190,23 @@ function _planned(
 
     # GUARDRAIL: a conjugated `C` is rejected; the engine writes through to
     # its parent, so there is nowhere to absorb its `op`.
-    _qs_isconj(C, false) && throw(
+    isconj(C, false) && throw(
         ArgumentError(
             "plan_contract: cannot write into a conjugated view (C has op $(C.op)); " *
                 "writing a conjugated output is not supported"
         )
     )
-    atransform = _qs_isconj(A, conjA) ? conj : identity
-    btransform = _qs_isconj(B, conjB) ? conj : identity
+    atransform = isconj(A, conjA) ? conj : identity
+    btransform = isconj(B, conjB) ? conj : identity
 
-    mlabels, nlabels, klabels = _classify_labels(indA, indB, indC)
+    mlabels, nlabels, klabels = classify_labels(indA, indB, indC)
 
-    morder = _order_free_labels(mlabels, indC, C)
-    norder = _order_free_labels(nlabels, indC, C)
+    morder = order_free_labels(mlabels, indC, C)
+    norder = order_free_labels(nlabels, indC, C)
 
     # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
-    run_m = T <: Real || method isa _MixedMethod ? _leading_unit_run(morder, indC, C) : 0
-    run_n = T <: Real ? _leading_unit_run(norder, indC, C) : 0
+    run_m = T <: Real || method isa _MixedMethod ? leading_unit_run(morder, indC, C) : 0
+    run_n = T <: Real ? leading_unit_run(norder, indC, C) : 0
 
     mgroup = AxisGroup(morder, (indA, A), (indC, C))  # maps: (A, C)
     ngroup = AxisGroup(norder, (indB, B), (indC, C))  # maps: (B, C)
@@ -191,14 +214,14 @@ function _planned(
     m_length = axis_length(mgroup)
     n_length = axis_length(ngroup)
 
-    korder = _order_contract_labels(klabels, indA, A, morder, indB, B, norder, m_length, n_length)
+    korder = order_contract_labels(klabels, indA, A, morder, indB, B, norder, m_length, n_length)
     kgroup = AxisGroup(korder, (indA, A), (indB, B))  # maps: (A, B)
 
     k_length = axis_length(kgroup)
 
     m_tile_asis, m_tile_swapped = _candidate_m_tiles(T, method, kernel, m_length, n_length, run_m, run_n)
 
-    if T <: Real && _prefer_swap(run_m, run_n, m_tile_asis, m_tile_swapped)
+    if T <: Real && prefer_swap(run_m, run_n, m_tile_asis, m_tile_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
         # together; the sum is unchanged.
         kgroup_swapped = AxisGroup(korder, (indB, B), (indA, A))  # maps: (B, A)

@@ -1,6 +1,7 @@
 module QuasiStrided
 
 using StridedViews: StridedView, offset
+import TupleTools
 using Base.Checked: checked_abs, checked_add, checked_mul
 
 # TensorOperations names are always qualified: a bare `using` collides on `scalartype`.
@@ -31,9 +32,8 @@ include("microkernels/vecops.jl")
 include("microkernels/steps.jl")
 include("microkernels/stores.jl")
 
-# --- Planning: labels, conjugation, kernel and blocking choice, the plan ---
+# --- Planning: labels, kernel and blocking choice, the plan ---
 include("planning/labels.jl")
-include("planning/conjugation.jl")
 include("planning/kernel_selection.jl")
 include("planning/blocking.jl")
 include("planning/defaults.jl")

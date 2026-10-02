@@ -1,7 +1,6 @@
 # TensorOperations backend. The engine itself knows nothing about TO.
 import TensorOperations as TO
 using TensorOperations: Index2Tuple, linearize
-import TupleTools
 using StridedViews: StridedView, isstrided
 
 """
@@ -100,7 +99,7 @@ end
     (Base.mightalias(Cv, Av) || Base.mightalias(Cv, Bv)) && _qs_throw(
         "output tensor must not be aliased with an input tensor in $(TO.tensorcontract!)"
     )
-    _qs_isconj(Cv, false) && _qs_throw(
+    isconj(Cv, false) && _qs_throw(
         "output tensor of $(TO.tensorcontract!) must not be a conjugated view: " *
             "QuasiStrided writes through to the parent array and does not apply " *
             "`StridedView.op` on store, so a conjugated `C` would be silently wrong"

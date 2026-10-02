@@ -9,7 +9,7 @@ const _pcf_exec = QuasiStrided.execute!
 const _pcf_exec_tw = QuasiStrided.execute_tilewise!
 const _pcf_Plan = QuasiStrided.ContractPlan
 
-@testset "per-call floor: _classify_labels" begin
+@testset "per-call floor: classify_labels" begin
     for (indA, indB, indC, want) in (
             ((1, 2), (2, 3), (1, 3), ((1,), (3,), (2,))),                          # GEMM
             ((1, 2), (2, 3), (3, 1), ((1,), (3,), (2,))),                          # transposed C
@@ -19,14 +19,14 @@ const _pcf_Plan = QuasiStrided.ContractPlan
             ((1,), (1, 2), (2,), ((), (2,), (1,))),                                # no M
             ((1, 2), (3, 4), (1, 2, 3, 4), ((1, 2), (3, 4), ())),                  # outer product
         )
-        got = QS._classify_labels(indA, indB, indC)
+        got = QS.classify_labels(indA, indB, indC)
         @test got === want
-        @test map(length, got) == QS._group_ranks(length(indA), length(indB), length(indC))
+        @test map(length, got) == QS.group_ranks(length(indA), length(indB), length(indC))
     end
-    @test_throws ArgumentError QS._classify_labels((1, 1), (1, 2), (1, 2))
-    @test_throws ArgumentError QS._classify_labels((1, 2), (2, 3), (1, 2, 3))  # all three
-    @test_throws ArgumentError QS._classify_labels((1, 2), (3, 4), (1, 3))     # dangling in A
-    @test_throws ArgumentError QS._classify_labels((1, 2), (3, 4), (1, 2, 3, 9))
+    @test_throws ArgumentError QS.classify_labels((1, 1), (1, 2), (1, 2))
+    @test_throws ArgumentError QS.classify_labels((1, 2), (2, 3), (1, 2, 3))  # all three
+    @test_throws ArgumentError QS.classify_labels((1, 2), (3, 4), (1, 3))     # dangling in A
+    @test_throws ArgumentError QS.classify_labels((1, 2), (3, 4), (1, 2, 3, 9))
 end
 
 @testset "per-call floor: AxisGroup from labels matches a direct construction" begin

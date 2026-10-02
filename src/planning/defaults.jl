@@ -15,6 +15,16 @@ struct ResolvedDefaults
     l2_core::Int
 end
 
+# The core's private L2 share, or 1 MB when undetected.
+function l2_core_bytes(profile::TargetProfile)
+    profile.l2.bytes > 0 || return 1 << 20
+    return core_bytes(profile, profile.l2)
+end
+
+# Through the per-eltype cache; an eltype without a slot fails later in planning.
+@inline l2_core_bytes(::Type{T}) where {T} =
+    _defaults_slot(T) === nothing ? l2_core_bytes(target_profile()) : _resolved_defaults(T).l2_core
+
 function _resolve_defaults(profile::TargetProfile, ::Type{T}) where {T}
     method = _default_method(T)
     # First, so an element type with no menu throws from here.
@@ -22,7 +32,7 @@ function _resolve_defaults(profile::TargetProfile, ::Type{T}) where {T}
     fitted = _fitted_shape(profile, T, method)
     small_m = _small_m_candidates(Val(profile.isa), profile, T)
     real_row = _real_blocking_row(profile, real(T))
-    l2_core = _l2_core_bytes(profile)
+    l2_core = l2_core_bytes(profile)
     return ResolvedDefaults(profile, shape, fitted, small_m, real_row, l2_core)
 end
 
