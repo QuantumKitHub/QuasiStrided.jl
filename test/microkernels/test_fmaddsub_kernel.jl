@@ -1,5 +1,5 @@
 using QuasiStrided: FMAddSubKernel, FMAddSubMethod, PlanarKernel, PlanarMethod, OneMKernel,
-    InterleavedFormat, complex_method, lanewidth, kernel_shapes, packed_panel,
+    InterleavedFormat, KernelMethod, lanewidth, kernel_shapes, packed_panel,
     _kernel_from_shape, _default_method, accumulator_planes, target_profile, PackedPanel
 using SIMD: Vec
 using InteractiveUtils: code_native
@@ -16,7 +16,7 @@ const _QSF = QuasiStrided
     end
 
     @testset "construction" begin
-        @test complex_method(FMAddSubKernel(Val(8), Val(4), ComplexF64)) === FMAddSubMethod()
+        @test KernelMethod(FMAddSubKernel(Val(8), Val(4), ComplexF64)) === FMAddSubMethod()
         @test accumulator_planes(FMAddSubMethod()) == 1
         @test lanewidth(FMAddSubKernel(Val(8), Val(4), ComplexF32)) == 8
         @test_throws ArgumentError FMAddSubKernel(Val(12), Val(8), ComplexF64, Val(16))

@@ -1,5 +1,5 @@
 # The microkernel contract, the complex-arithmetic methods, and the validation
-# and store helpers the kernels share.
+# and store helpers every kernel shares.
 
 """
     Microkernel{MR, NR, T}
@@ -15,7 +15,7 @@ never bitwise.
 abstract type Microkernel{MR, NR, T} end
 
 """
-    KernelMethod
+    KernelMethod(kernel)
 
 How a kernel maps its multiply-adds onto real arithmetic, as singletons so
 blocking and the shape menus dispatch on it:
@@ -50,8 +50,6 @@ pack_formats(::RealComplexMethod) = (RealFormat(), InterleavedFormat())
 # Accumulator planes held live: planar keeps separate re/im planes.
 accumulator_planes(::KernelMethod) = 1
 accumulator_planes(::PlanarMethod) = 2
-
-complex_method(::Any) = RealMethod()
 
 realtype(k::Microkernel) = realtype(k.descriptor)
 sliver_width(k::Microkernel) = sliver_width(k.descriptor)

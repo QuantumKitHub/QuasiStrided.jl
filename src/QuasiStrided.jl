@@ -26,13 +26,10 @@ include("packing/pack_contiguous.jl")
 
 # --- Microkernels: add one packed K block to a register tile, store into C ---
 include("microkernels/interface.jl")
-include("microkernels/types.jl")
-include("microkernels/scalar.jl")
-include("microkernels/simd.jl")
-include("microkernels/planar.jl")
-include("microkernels/onem.jl")
-include("microkernels/fmaddsub.jl")
-include("microkernels/mixed.jl")
+include("microkernels/kernels.jl")
+include("microkernels/vecops.jl")
+include("microkernels/steps.jl")
+include("microkernels/stores.jl")
 
 # --- Planning: labels, conjugation, kernel and blocking choice, the plan ---
 include("planning/labels.jl")

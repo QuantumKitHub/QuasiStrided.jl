@@ -1,5 +1,5 @@
 using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
-    complex_method, lanewidth, kernel_shapes,
+    KernelMethod, lanewidth, kernel_shapes,
     _kernel_from_shape, _default_method
 
 @testset "OneMKernel" begin
@@ -15,7 +15,7 @@ using QuasiStrided: OneMKernel, OneMMethod, PlanarKernel, PlanarMethod,
         k = OneMKernel(Val(12), Val(8), ComplexF64, Val(8))
         @test QuasiStrided.inner(k) isa SIMDKernel{24, 8, Float64, 8}  # the real kernel, at 2MR rows
         @test zero_accumulator(k) === zero_accumulator(QuasiStrided.inner(k))
-        @test complex_method(k) === OneMMethod()
+        @test KernelMethod(k) === OneMMethod()
         @test lanewidth(OneMKernel(Val(8), Val(4), ComplexF32)) == 8
         # 2MR, not MR, must divide by W; W must be even even where 2MR divides.
         @test_throws ArgumentError OneMKernel(Val(12), Val(8), ComplexF64, Val(16))

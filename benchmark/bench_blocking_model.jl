@@ -14,7 +14,7 @@
 include(joinpath(@__DIR__, "harness.jl"))
 
 using QuasiStrided: Blocking, target_profile, _default_kernel, _modelled_blocking,
-    _fallback_blocking, _scale_blocking, complex_method
+    _fallback_blocking, _scale_blocking, KernelMethod
 
 const SMOKE = hasflag("smoke")
 const REPS = SMOKE ? 1 : argopt("reps", 21)
@@ -132,7 +132,7 @@ for T in DTYPES
 end
 for T in CDTYPES
     kernel = _default_kernel(T)
-    rows = map(v -> v === nothing ? nothing : _scale_blocking(v, complex_method(kernel)), named_rows(real(T)))
+    rows = map(v -> v === nothing ? nothing : _scale_blocking(v, KernelMethod(kernel)), named_rows(real(T)))
     println("\n$T kernel $(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))  ", rows)
     for spec in thin(MAIN_SHAPES)
         sweep_shape!(raw, kernel, T, spec, named_points(rows))

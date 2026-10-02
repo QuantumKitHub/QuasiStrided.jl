@@ -57,7 +57,7 @@ using StridedViews: StridedView
             @test (MR ÷ W) * NR + (MR ÷ W) <= 32
             @test sliver_width(k) === (MR, NR)
             @test realtype(k) === T === scalartype(k)
-            @test complex_method(k) === RealMethod()
+            @test KernelMethod(k) === RealMethod()
             @test packed_a_length(k, 7) === MR * 7 && packed_b_length(k, 7) === NR * 7
         end
         for T in (Float64, Float32)
@@ -236,7 +236,7 @@ end
             @test kernel_shapes(T, m) === map(s -> mapped(m, s), kernel_shapes(R))
             for shape in kernel_shapes(T, m)
                 k = QuasiStrided._kernel_from_shape(shape, T, m)
-                @test complex_method(k) === m && (tile_size(k)..., lanewidth(k)) === shape
+                @test KernelMethod(k) === m && (tile_size(k)..., lanewidth(k)) === shape
             end
         end
         @test dmethod(T, T, R) === dmethod(T, ComplexF32, Float64) === CR
@@ -321,7 +321,7 @@ end
         QS.RealComplexKernel(Val(4), Val(2), ComplexF64),
     )
     for k in kernels
-        @test pack_formats(complex_method(k)) === (QS.a_format(k), QS.b_format(k))
+        @test pack_formats(KernelMethod(k)) === (QS.a_format(k), QS.b_format(k))
     end
 end
 
@@ -350,7 +350,7 @@ end
         kernel = _default_kernel(T)
         @test kernel isa QuasiStrided.PlanarKernel
         @test scalartype(kernel) === T && realtype(kernel) === real(T)
-        @test complex_method(kernel) === PlanarMethod() === QuasiStrided._default_method(T)
+        @test KernelMethod(kernel) === PlanarMethod() === QuasiStrided._default_method(T)
         shape = (tile_size(kernel)..., lanewidth(kernel))
         profile = target_profile()
         @test _planar_pressure(shape...) <= (profile.nregisters > 0 ? profile.nregisters : 16)
@@ -362,7 +362,7 @@ end
 
         shape1m = first(kernel_shapes(T, OneMMethod()))
         k1m = QuasiStrided._kernel_from_shape(shape1m, T, OneMMethod())
-        @test k1m isa QuasiStrided.OneMKernel && complex_method(k1m) === OneMMethod()
+        @test k1m isa QuasiStrided.OneMKernel && KernelMethod(k1m) === OneMMethod()
         @test (tile_size(k1m)..., lanewidth(k1m)) === shape1m
         # A method with no kernel for `T` throws, naming itself.
         err = try

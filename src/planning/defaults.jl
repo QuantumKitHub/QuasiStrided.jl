@@ -104,5 +104,5 @@ size and clamps all three to the contraction's extents.
 """
 function default_blocking(kernel)
     T = scalartype(kernel)
-    return _scale_blocking(_resolved_defaults(T).real_row, complex_method(kernel))
+    return _scale_blocking(_resolved_defaults(T).real_row, KernelMethod(kernel))
 end

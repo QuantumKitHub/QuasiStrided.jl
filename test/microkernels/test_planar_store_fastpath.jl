@@ -65,7 +65,7 @@ function mk_store_fastpath(K, T, shapes; beta0_exact = false, S = T)
             for (alpha, beta) in mk_store_ab(T)
                 fast = mk_dense(cold)
                 dfast = Tile(fast, 0, AffineAxis(0, 1, m), AffineAxis(0, m, n))
-                @test QuasiStrided.vector_store_eligible(QuasiStrided.accumulator_layout(k), dfast, T) == STORE_FASTPATH_ON
+                @test QuasiStrided.vector_store_eligible(QuasiStrided.AccumulatorLayout(k), dfast, T) == STORE_FASTPATH_ON
                 store_tile!(dfast, acc, alpha, beta, k)
                 scal = copy(cold)  # scattered rows: always the scalar store
                 store_tile!(Tile(scal, 0, view(collect(0:(m - 1)), 1:m), AffineAxis(0, m, n)), acc, alpha, beta, k)
