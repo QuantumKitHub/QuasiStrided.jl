@@ -25,7 +25,7 @@ TTFX when codegen is touched).
 | 10 | Kernel selection | `planning/kernel_selection.jl` | done |
 | 11 | Blocking | `blocking.jl`, line packing (now `packing/line_packing.jl`) | done |
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | done |
-| 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | |
+| 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | done |
 | 14 | Five-loop nest | `execution/macrokernel.jl`, `execute.jl` | |
 | 15 | Alternative paths | `oracle.jl`, `unpackedb.jl` | |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | |
@@ -66,14 +66,25 @@ where the underscore meant "internal helper of `foo`" (known clashes:
 LinearAlgebra, SIMD or the package's own names. Explicit imports instead of
 `using LinearAlgebra`, so later shadowing is an error (applied up front).
 
-### D3. Dispatch barriers (chunks 12–14)
+### D3. Dispatch barriers (chunk 13, applied: 308c07b)
 
-Keep barrier #1 (kernel choice). Remove barrier #2 (execution path) by
-deciding the path at plan time and making it a `ContractPlan` type parameter;
-this deletes `_path_hint`/`_continue`/`_execute_hinted!`/`_hint_holds`/
-`_splits`/`_split_path`. To verify first: the path is fully fixed at plan
-time, including dot-path workspace capacity under a reused grow-only
-workspace. Measured: one crossing ~13 ns; a 2×2 `tensorcontract!` ~320 ns.
+One barrier, at plan time. Blocking (including line packing and the C panel)
+and the execution path are resolved before the kernel barrier, from the kernel
+type and shape; the barrier crosses once with `Val{Kern}()` and the path, and
+the path is a `ContractPlan` field/type parameter, so `execute!` dispatches on
+it statically. Deletes the hint family, `_strip_storage`/`_with_storage` and
+the workspace's `SlotCache`. The TensorOperations route keeps its continuation
+(one crossing per call); a reused plan has none. Accepted: a named-kernel
+`plan_contract` is no longer inferable. The dot/outer/unpacked-B mode switches
+become an internal `plan_contract` keyword instead of global `Ref`s. Also: a
+keyword copy method for `ContractPlan`, blocking resolution as its own
+function, underscores dropped, `barrier.jl` → `paths.jl`. Tests stay where they
+are until chunk 18. As applied: named kernels cross as their (singleton)
+instance; `pack_split` takes the pack format instead of a `SliverSpec` (whose
+`MR` is runtime before the barrier); the dot-path fit is checked at plan time
+from `workspace_sizes(K, …)`. Results and chosen paths bitwise identical to
+before on 172 cases; per-call floor, TTFX and nest specialisations unchanged
+within noise.
 
 ### D4. Precompile workload (later, separate)
 
@@ -229,11 +240,8 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Chunk 13: `planning/plan.jl` (+ `test_plan_contract.jl`,
-   `test_per_call_overhead.jl`), including D3 (execution path as a plan type
-   parameter, removing barrier #2 and the hint machinery; kernel types cross
-   the barrier as `Val`, `::Type{K}` everywhere after it) and the open items
-   for chunks 13/14 below.
+1. Chunk 14: five-loop nest (`execution/macrokernel.jl`, `execute.jl`),
+   including the open items marked chunk 14 below.
 2. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
@@ -270,15 +278,12 @@ blocking.jl (uncommitted until the full suite passes).
 - Internal constants still use `_UPPER` names; drop the underscores in one pass
   at the end (D2).
 
-- Detected `l1d.line` is unused: `_K_LINE_BYTES = 64` in `labels.jl` (K-order
-  cost model) and `pack_split.jl`; thread the detected line size through
-  planning (chunks 9/11).
-- 16-argument `ContractPlan(...)` spelled out five times, `_PlanRequest`
-  twice more: one "copy with fields replaced" helper (chunk 13/14).
-- `execute.jl` mixes public API, barrier/hint machinery, the C-panel path and
-  the nest; `_c_panel_needed` lives there but is used by `plan.jl` (chunk 14).
-- `_select_path` has 12 positional arguments, two optional (chunk 14).
-- `oracle = true` default makes every user plan allocate test-path buffers;
-  consider defaulting to `false` (chunk 13/15).
+- `execute.jl` mixes public API, the C-panel path and the nest (chunk 14).
+- Plans with empty extents or K = 0 now compile their path although the
+  short-circuit always fires first; `select_path` could return a trivial
+  path for them (chunk 14).
+- `_execute_dot!` takes `matB` as a runtime `Bool` although `DotPath{MATB}`
+  makes it static (chunk 16).
+- `plan_request` is spelled out twice in `planned` (swapped and not).
 - `workspace.jl`/`barrier.jl` live in `execution/` but are included in the
   planning section (chunk 12).
