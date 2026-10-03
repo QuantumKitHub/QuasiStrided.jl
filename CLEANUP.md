@@ -220,8 +220,27 @@ Same-node A/B, `bench_complex_blocking.jl`, jobs 7160147–9: the kernel's own
 model is faster on Icelake for large sizes (0.58–0.92; the old scaled row was
 rounded *up* to MR past the L2 budget), but 1–10% slower on Genoa/Rome and at
 small M, following the smaller `k_block`. Rerun with a third "hybrid"
-variant (real row's `k_block`, own `m_block`/`n_block` rounded down) to pick
-one.
+variant (jobs 7160543–5, commit d0100e6): hybrid/old 0.99–1.00 on all three
+nodes (worst single case 1.02), new/old up to 1.10 at small M on AMD; the
+Icelake 0.58 did not reproduce (noise). Decision: the hybrid — `k_block` from
+the real default kernel's B sliver (`l1_k_block`), `m_block`/`n_block` from
+the kernel's byte budget at that `k_block`, rounded down. Implemented in
+blocking.jl (uncommitted until the full suite passes).
+
+## Resume here
+
+1. Chunk 13: `planning/plan.jl` (+ `test_plan_contract.jl`,
+   `test_per_call_overhead.jl`), including D3 (execution path as a plan type
+   parameter, removing barrier #2 and the hint machinery; kernel types cross
+   the barrier as `Val`, `::Type{K}` everywhere after it) and the open items
+   for chunks 13/14 below.
+2. Workflow: present each chunk (purpose, reading order, design decisions,
+   proposed fixes, questions), then hand the agreed changes to an Opus agent
+   with the standard checks (Runic, full suite, per-call floor/allocations,
+   TTFX, equivalence script where behaviour must not change); perf claims
+   need Slurm runs (user submits; `--reservation=rocky8`), never poll Slurm.
+   Only quote commit SHAs read from `git log`.
+
 
 ## Possible improvements
 

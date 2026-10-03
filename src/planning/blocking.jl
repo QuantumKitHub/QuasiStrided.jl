@@ -31,12 +31,14 @@ default_blocking(kernel, profile::TargetProfile = target_profile()) =
     kernel_blocking(profile, scalartype(kernel), typeof(kernel), tile_size(kernel)...)
 
 # The default blocking of a kernel of type `K` for `T` with an `MR x NR` tile.
-# The fallback rows are divided by the packed reals per element of each
-# operand, so every kernel type gets the same packed byte budget.
+# `k_block` is the real default kernel's for `real(T)`: derived from a complex
+# B sliver it halves or worse, which is slower, most at small M. The fallback rows are divided by the packed reals per element of
+# each operand, so every kernel type gets the same packed byte budget.
 @inline function kernel_blocking(profile::TargetProfile, ::Type{T}, ::Type{K}, MR::Int, NR::Int) where {T, K}
     R = real(T)
     a_reals, b_reals = map(reals_per_element, pack_formats(K))
-    modelled = modelled_blocking(profile, MR, NR, a_reals * sizeof(R), b_reals * sizeof(R))
+    k_block = l1_k_block(profile, derived_shape(profile, R)[2], sizeof(R))
+    modelled = modelled_blocking(profile, MR, NR, a_reals * sizeof(R), b_reals * sizeof(R), k_block)
     modelled === nothing || return modelled
     base = fallback_blocking(R)
     return Blocking(max(1, base.m_block ÷ a_reals), base.k_block, max(1, base.n_block ÷ b_reals))
@@ -52,7 +54,7 @@ fallback_blocking(::Type{Float32}) = Blocking(96, 768, 1152)
 # `m_block*k_block`, and one `NR x k_block` B sliver is reused by every A
 # sliver of the block:
 #
-#     NR*k_block*SB       <= L1/2              the reused B sliver
+#     NR*k_block*SB       <= L1/2              the reused B sliver (real kernels)
 #     m_block*k_block*SA  <= L2core/2          the A block
 #     n_block*k_block*SB  <= L2core + L3core   the B panel
 #
@@ -61,15 +63,18 @@ fallback_blocking(::Type{Float32}) = Blocking(96, 768, 1152)
 # oversized B panel only re-streams B, an undersized one repacks A once per N
 # block.
 # `nothing` when L1d or L2 is undetected.
-@inline function modelled_blocking(profile::TargetProfile, MR::Int, NR::Int, SA::Int, SB::Int)
-    l1 = profile.l1d
-    (l1.bytes > 0 && profile.l2.bytes > 0) || return nothing
+@inline function modelled_blocking(
+        profile::TargetProfile, MR::Int, NR::Int, SA::Int, SB::Int, k_block::Int = l1_k_block(profile, NR, SB)
+    )
+    (profile.l1d.bytes > 0 && profile.l2.bytes > 0) || return nothing
     l2core, l3core = profile.l2_share, profile.l3_share
-    k_block = max(1, (l1.bytes ÷ 2) ÷ (NR * SB))
     m_block = max(MR, ((l2core ÷ 2) ÷ (k_block * SA)) ÷ MR * MR)
     n_block = max(NR, ((l2core + l3core) ÷ (k_block * SB)) ÷ NR * NR)
     return Blocking(m_block, k_block, n_block)
 end
+
+# The K depth at which an `NR`-wide B sliver of `SB`-byte elements fills half of L1d.
+@inline l1_k_block(profile::TargetProfile, NR::Int, SB::Int) = max(1, (profile.l1d.bytes ÷ 2) ÷ (NR * SB))
 
 # Smallest multiple of `n` that is >= `x` (`x >= 0`, `n >= 1`).
 @inline roundup(x::Int, n::Int) = cld(x, n) * n

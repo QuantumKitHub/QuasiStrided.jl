@@ -305,16 +305,17 @@ end
     @test modelled_blocking(nosmt, 8, 6, 8, 8) === Blocking(96, 341, 1728)
     @test modelled_blocking(nosmt, 16, 6, 4, 4) === Blocking(96, 682, 1728)
     @test modelled_blocking(smt2, 16, 6, 8, 8) === Blocking(192, 341, 1572)
-    # A complex kernel blocks by its packed bytes: 1m packs 4 reals per A
-    # element, planar 2 per B element.
-    @test default_blocking(kernel_from_shape((12, 8, 8), ComplexF64, OneMKernel), nosmt) === Blocking(60, 128, 2304)
+    # A complex kernel keeps the real default kernel's `k_block` and blocks M
+    # and N by its packed bytes: 1m packs 4 reals per A element, 2 per B element.
+    @test default_blocking(kernel_from_shape((12, 8, 8), ComplexF64, OneMKernel), nosmt) === Blocking(24, 341, 864)
     for p in (nosmt, smt2), T in (Float64, Float32, ComplexF64, ComplexF32), K in (SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel)
         for shape in kernel_shapes(T, K)
             k = kernel_from_shape(shape, T, K)
             b = default_blocking(k, p)
             MR, NR = tile_size(k)
             @test b.m_block % MR == 0 && b.n_block % NR == 0
-            @test sliver_width(k, 2) * b.k_block * sizeof(real(T)) <= p.l1d.bytes ÷ 2
+            real_default = kernel_from_shape(derived_shape(p, real(T)), real(T), SIMDKernel)
+            @test b.k_block == default_blocking(real_default, p).k_block
         end
     end
     # No L3: the B panel is budgeted from the L2 alone.
