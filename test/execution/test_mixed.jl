@@ -25,16 +25,16 @@ const _CR, _RC = QuasiStrided.ComplexRealKernel, QuasiStrided.RealComplexKernel
 const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
 
 @testset "mixed eltypes: $TA x $TB -> $TC, accumulator = $acc, $layout" for (TA, TB, TC, acc, layout, MKN, beta, conjA, conjB, path, K) in (
-        (Float32, Float64, Float64, nothing, :dense, (23, 37, 19), 0, false, false, QuasiStrided._NestPath, SIMDKernel),
-        (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided._NestPath, SIMDKernel),
-        (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided._NestPath, _RC),
-        (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided._NestPath, _CR),
-        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, _NestPath{false, <:Any, (true, false)}, _RC),
-        (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided._NestPath, _PROMOTED),
-        (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided._NestPath, _PROMOTED),
-        (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided._NestPath, _CR),
-        (Float32, Float64, Float64, nothing, :dense, (1, 70, 29), 0.5, false, false, QuasiStrided._DotPath, SIMDKernel),
-        (Float64, Float32, Float64, nothing, :dense, (37, 1, 21), 1, false, false, QuasiStrided._OuterPath, SIMDKernel),
+        (Float32, Float64, Float64, nothing, :dense, (23, 37, 19), 0, false, false, QuasiStrided.NestPath, SIMDKernel),
+        (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided.NestPath, SIMDKernel),
+        (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided.NestPath, _RC),
+        (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided.NestPath, _CR),
+        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, NestPath{false, <:Any, (true, false)}, _RC),
+        (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided.NestPath, _PROMOTED),
+        (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided.NestPath, _PROMOTED),
+        (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided.NestPath, _CR),
+        (Float32, Float64, Float64, nothing, :dense, (1, 70, 29), 0.5, false, false, QuasiStrided.DotPath, SIMDKernel),
+        (Float64, Float32, Float64, nothing, :dense, (37, 1, 21), 1, false, false, QuasiStrided.OuterPath, SIMDKernel),
     )
     fx = _mixed_fixture(TA, TB, TC, MKN..., layout, 7)
     alpha = 1.5
@@ -84,10 +84,10 @@ end
         allocator = case === :manual_n_block_16 ? TO.ManualAllocator() : TO.DefaultAllocator()
         n_block = case === :manual_n_block_16 ? 16 : nothing
         plan = plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3); accumulator = acc, k_block = 4, n_block, allocator)
-        @test _path_of(plan) isa QuasiStrided._PanelPath
+        @test _path_of(plan) isa QuasiStrided.PanelPath
         @test axis_length(plan.mgroup) == M
         case === :manual_n_block_16 && @test N > plan.blocking.n_block && !(plan.workspace.c_panel isa Vector)
-        case === :packed_b && @test _path_of(plan) isa QuasiStrided._PanelPath{<:QuasiStrided._NestPath{false}}
+        case === :packed_b && @test _path_of(plan) isa QuasiStrided.PanelPath{<:QuasiStrided.NestPath{false}}
         TB <: Complex && @test plan.kernel isa _RC
         execute!(plan, 1, beta)
         QuasiStrided.release!(plan.workspace, allocator)
@@ -101,6 +101,6 @@ end
     rng = MersenneTwister(3)
     Amat, Bmat, Cmat = randn(rng, TA, 64, K), randn(rng, TB, K, 40), zeros(TC, 64, 40)
     plan = _mm_plan(Cmat, Amat, Bmat; accumulator = acc, k_block = 256)
-    @test _path_of(plan) isa (TC === Float32 ? QuasiStrided._PanelPath : QuasiStrided._NestPath)
+    @test _path_of(plan) isa (TC === Float32 ? QuasiStrided.PanelPath : QuasiStrided.NestPath)
     @test _steady_allocs!(execute!, plan, Cmat) == 0 skip = (VERSION < v"1.11")
 end

@@ -88,21 +88,16 @@ end
         rng = MersenneTwister(4242)
         A, B, C0 = rand(rng, TA, 37, 41), rand(rng, TB, 41, 23), rand(rng, TC, 37, 23)
         alpha, beta = 1.5 - 0.25im, -0.75 + 0.5im
-        saved = QuasiStrided._UNPACKED_B_MODE[]
-        QuasiStrided._UNPACKED_B_MODE[] = mode
-        try
-            for (cA, cB) in ((false, false), (true, true))
-                C = copy(C0)
-                plan = plan_contract(
-                    StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
-                    kernel = k, k_block = 16, conjA = cA, conjB = cB, accumulator = acc
-                )
-                execute!(plan, alpha, beta)
-                want = alpha .* ((cA ? conj.(A) : A) * (cB ? conj.(B) : B)) .+ beta .* C0
-                @test maximum(abs, C .- want) <= 64 * mk_tol(TC) * maximum(abs, want)
-            end
-        finally
-            QuasiStrided._UNPACKED_B_MODE[] = saved
+        for (cA, cB) in ((false, false), (true, true))
+            C = copy(C0)
+            plan = plan_contract(
+                StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
+                kernel = k, k_block = 16, conjA = cA, conjB = cB, accumulator = acc,
+                path_modes = QuasiStrided.PathModes(unpacked_b = mode)
+            )
+            execute!(plan, alpha, beta)
+            want = alpha .* ((cA ? conj.(A) : A) * (cB ? conj.(B) : B)) .+ beta .* C0
+            @test maximum(abs, C .- want) <= 64 * mk_tol(TC) * maximum(abs, want)
         end
     end
 end

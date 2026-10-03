@@ -29,17 +29,17 @@ const _NO_SPLIT = PackSplit(0, 0, 0, false, 0, 0)
 
 is_split(s::PackSplit) = s.L != 0
 
-# The split for the free group `g` of the operand packed as `spec` (A for M, B
-# for N), whose storage eltype takes `S` bytes, and the block extent it needs,
-# or `(eff, _NO_SPLIT)`. `eff` is the plan's extent, `rounded` the requested
-# one rounded to the tile; a split block may take the budget the blocking
-# reserved for `k_block_requested` when the K extent clamps `k_block`.
-# `l2bytes = nothing`: `split_capacity`, doubled for complex, whose block walk
-# costs more per element.
+# The split for the free group `g` of operand `side` (1: A for M, 2: B for N),
+# packed in slivers of `lanes` elements of `format`, whose storage eltype takes
+# `S` bytes, and the block extent it needs, or `(eff, _NO_SPLIT)`. `eff` is the
+# plan's extent, `rounded` the requested one rounded to the tile; a split block
+# may take the budget the blocking reserved for `k_block_requested` when the K
+# extent clamps `k_block`. `l2bytes = nothing`: `split_capacity`, doubled for
+# complex, whose block walk costs more per element.
 @inline function pack_split(
-        g::AxisGroup{D}, kg::AxisGroup, spec::SliverSpec{I, R, F}, S::Int, k_block::Int,
+        g::AxisGroup{D}, kg::AxisGroup, side::Int, lanes::Int, format::PackFormat, S::Int, k_block::Int,
         eff::Int, rounded::Int, k_block_requested::Int; l2bytes::Union{Int, Nothing} = nothing
-    ) where {D, I, R, F}
+    ) where {D}
     D < 256 || return (eff, _NO_SPLIT)
     line = line_bytes(target_profile())
     d1 = 0
@@ -52,7 +52,7 @@ is_split(s::PackSplit) = s.L != 0
         g.lengths[d] > 1 && abs(g.strides[1][d]) == 1 && (dj = d; break)
     end
     dj == 0 && return (eff, _NO_SPLIT)
-    return pack_split_window(g, kg, I, d1, dj, R, S, F !== RealFormat, line, k_block, eff, rounded, k_block_requested, l2bytes)
+    return pack_split_window(g, kg, side, d1, dj, lanes, S, !(format isa RealFormat), line, k_block, eff, rounded, k_block_requested, l2bytes)
 end
 
 # Out of line: shared by every eltype, and most plans never get here.

@@ -14,7 +14,7 @@ using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
     rule_applies, isa_nregisters, sliver_width, realtype,
     PlanarKernel, OneMKernel, FMAddSubKernel, accumulator_planes, pack_formats,
     reals_per_element, modelled_blocking, kernel_blocking,
-    planar_pressure, pack_split, is_split, _NestPath
+    planar_pressure, pack_split, is_split, NestPath
 # plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 
 # All files share one scope, so helper names must be unique across files.

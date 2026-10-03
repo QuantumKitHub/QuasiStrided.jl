@@ -43,20 +43,12 @@ function _run_fresh(run!, mk, alpha, beta; plankw...)
     return Array(Cv), plan
 end
 
-# `execute!` forced onto the nest with B packed, through the mode switches
-# the benchmarks use: the baseline for the dedicated paths.
-const _PATH_MODES = (QuasiStrided._DOT_MODE, QuasiStrided._OUTER_MODE, QuasiStrided._UNPACKED_B_MODE)
-function _run_nest!(plan, alpha, beta)
-    old = map(getindex, _PATH_MODES)
-    foreach(m -> m[] = :never, _PATH_MODES)
-    try
-        return execute!(plan, alpha, beta)
-    finally
-        foreach(setindex!, _PATH_MODES, old)
-    end
-end
+# `_run_fresh` planned onto the nest with B packed, through the path modes the
+# benchmarks use: the baseline for the dedicated paths.
+const _NEST_ONLY = QuasiStrided.PathModes(dot = :never, outer = :never, unpacked_b = :never)
+_run_nest(mk, alpha, beta; plankw...) = _run_fresh(execute!, mk, alpha, beta; path_modes = _NEST_ONLY, plankw...)
 
-_path_of(plan) = QuasiStrided._select_path(plan)
+_path_of(plan) = plan.path
 
 # A DenseMatrix that is not a DenseVector: a plan keeps it as storage, so paths
 # that need raw-pointer loads must decline it.
@@ -182,11 +174,7 @@ end
     plans = (
         p,
         _mm_plan(Cmat, Amat, Bmat; kernel = kernel, m_block = 16, k_block = 5, n_block = 8),
-        ContractPlan(
-            p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
-            p.Astorage, p.Abase, p.Bstorage, p.Bbase, p.Cstorage, p.Cbase,
-            conj, conj, p.workspace, p.mpack, p.npack,
-        ),
+        ContractPlan(p; atransform = conj, btransform = conj),
     )
     @test parent(StridedView(Cmat)) isa DenseVector{Float64}
     for plan in plans
@@ -253,28 +241,26 @@ function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
     k, k_block, d, T = p.kernel, p.blocking.k_block, default_blocking(p.kernel), eltype(Cv)
     function split(g, i, eff, req)
         R = tile_size(k, i)
-        return pack_split(g, p.kgroup, sliver_spec(k, i), sizeof(T), k_block, eff, cld(req, R) * R, d.k_block; l2bytes = 0)
+        return pack_split(g, p.kgroup, i, R, pack_formats(typeof(k))[i], sizeof(T), k_block, eff, cld(req, R) * R, d.k_block; l2bytes = 0)
     end
     (m_block, ms) = split(p.mgroup, 1, p.blocking.m_block, something(get(kw, :m_block, nothing), d.m_block))
     (n_block, ns) = split(p.ngroup, 2, p.blocking.n_block, d.n_block)
     q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, m_block, n_block)
     @assert q.mgroup == p.mgroup && q.ngroup == p.ngroup
-    return ContractPlan(
-        k, q.mgroup, q.ngroup, q.kgroup, q.blocking, q.Astorage, q.Abase,
-        q.Bstorage, q.Bbase, q.Cstorage, q.Cbase, q.atransform, q.btransform, q.workspace, ms, ns
-    )
+    path = QuasiStrided.nest_path(false, q.mgroup, q.ngroup, q.kgroup, is_split(ms), is_split(ns))
+    return ContractPlan(q; path, mpack = ms, npack = ns)
 end
 
 @testset "line-by-line packing: the planner splits A of intensli_7 past the cache" begin
     plan_of(d) = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...)
     p = plan_of(16)
     k, b = p.kernel, p.blocking
-    splits(l2bytes) = is_split(pack_split(p.mgroup, p.kgroup, sliver_spec(k, 1), 8, b.k_block, b.m_block, b.m_block, default_blocking(k).k_block; l2bytes)[2])
+    splits(l2bytes) = is_split(pack_split(p.mgroup, p.kgroup, 1, tile_size(k, 1), pack_formats(typeof(k))[1], 8, b.k_block, b.m_block, b.m_block, default_blocking(k).k_block; l2bytes)[2])
     @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
     host = splits(QuasiStrided.split_capacity(target_profile(), true))
     @test is_split(p.mpack) == host
-    host && @test _path_of(p) isa _NestPath{false, <:Any, (true, false)}
-    @test _path_of(plan_of(4)) isa _NestPath{<:Any, <:Any, (false, false)}
+    host && @test _path_of(p) isa NestPath{false, <:Any, (true, false)}
+    @test _path_of(plan_of(4)) isa NestPath{<:Any, <:Any, (false, false)}
 end
 
 @testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
@@ -288,7 +274,7 @@ end
         iszero(beta) && fill!(Cv, NaN)
         Cref = _lo_reference(iszero(beta) ? zero(Array(Cv)) : Array(Cv), Av, iA, Bv, iB, iC; conjB, alpha = 1.3, beta)
         plan = _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; conjB, m_block, kernel)
-        @test _path_of(plan) isa _NestPath{false, <:Any, (true, ind === _SP_BOTH)}
+        @test _path_of(plan) isa NestPath{false, <:Any, (true, ind === _SP_BOTH)}
         execute!(plan, 1.3, beta)
         @test Array(Cv) ≈ Cref rtol = 100 * eps(real(T))
     end

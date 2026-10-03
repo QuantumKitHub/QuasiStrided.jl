@@ -6,9 +6,6 @@
 # and unpacked, one horizontal reduction per output. Only the K-vector is
 # gathered, once per K block, with its conjugation folded in.
 
-# Forces the path off (`:never`) for benchmarks and tests; `:auto` otherwise.
-const _DOT_MODE = Ref{Symbol}(:auto)
-
 # One full hardware vector register of `real(T)`.
 @inline function _dot_lanewidth(::Type{T}) where {T}
     R = real(T)
@@ -24,7 +21,6 @@ _dot_group_width(::Type{T}) where {T} = T <: Complex ? 4 : 8
 # free extent, a matrix operand with unit-ramp K in dense storage (raw-pointer
 # loads), and at least one vector of K.
 function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, m_length::Int, n_length::Int, k_length::Int) where {T}
-    _DOT_MODE[] === :never && return false
     (m_length == 1 || n_length == 1) || return false
     k_length >= _dot_lanewidth(T) || return false
     if m_length == 1
@@ -38,13 +34,10 @@ function _dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, m_len
 end
 
 # The gathered vector (and, complex, its pair-swapped copy) lives in the
-# packed-A buffer. Always true for an automatically chosen kernel; `nothing`
-# is the prediction's "assume so".
-function _dot_capacity_ok(plan::ContractPlan{T}) where {T}
-    need = (T <: Complex ? 2 : 1) * plan.blocking.k_block
-    return (length(plan.workspace.packed_a) * sizeof(real(T))) ÷ sizeof(T) >= need
-end
-_dot_capacity_ok(::Nothing) = true
+# packed-A buffer of `packed_a` reals. Always true for an automatically chosen
+# kernel.
+dot_fits(::Type{T}, packed_a::Int, k_block::Int) where {T} =
+    packed_a * sizeof(real(T)) ÷ sizeof(T) >= (T <: Complex ? 2 : 1) * k_block
 
 function _execute_dot!(plan::ContractPlan{T}, alphaT::T, betaT::T, matB::Bool, ::Val{W}) where {T, W}
     ws = plan.workspace

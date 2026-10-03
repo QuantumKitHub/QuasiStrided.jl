@@ -37,21 +37,17 @@ end
 
 # The kernels whose K step reads B through `b_scalar`/`b_complex`
 # (not 1m, whose inner kernel walks the planar panel, nor the scalar one); by
-# type, to predict the path before the kernel exists.
+# type, to decide the path before the kernel exists.
 @inline _unpacked_b_kernel_eligible(::Type{<:Union{SIMDKernel, PlanarKernel, FMAddSubKernel, ComplexRealKernel}}) = true
 @inline _unpacked_b_kernel_eligible(::Type) = false
-@inline _unpacked_b_kernel_eligible(kernel::Microkernel) = _unpacked_b_kernel_eligible(typeof(kernel))
-
-# `:always`/`:never` override the rule below, for benchmarks and tests.
-const _UNPACKED_B_MODE = Ref{Symbol}(:auto)
 
 # Whether B is read in place (given an eligible kernel): small M, and every B
 # column contiguous along K. Packing pays off only through reuse across M
 # slivers, while `n_tile` contiguous columns read in place cost the kernel
 # nothing. A large K stride in B (each step its own cache line, and for a
-# power of two only a few L1 sets) is what packing exists for.
-@inline function _unpacked_b_rule(mgroup::AxisGroup, kgroup::AxisGroup)
-    mode = _UNPACKED_B_MODE[]
+# power of two only a few L1 sets) is what packing exists for. `mode`:
+# `:always`/`:never` override the rule (`PathModes`).
+@inline function _unpacked_b_rule(mode::Symbol, mgroup::AxisGroup, kgroup::AxisGroup)
     mode === :always && return true
     mode === :never && return false
     axis_length(mgroup) <= _UNPACKED_B_MMAX || return false

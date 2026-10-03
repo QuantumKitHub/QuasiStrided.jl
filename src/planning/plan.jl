@@ -1,23 +1,25 @@
 # The plan: everything `execute!` needs, resolved once so it can be reused.
 # `plan_contract` runs the planning stages (labels, conjugation, kernel
-# selection, blocking) and sizes the `ContractWorkspace`.
+# selection, blocking, execution path) and sizes the `ContractWorkspace`.
 
 """
     ContractPlan
 
 Reusable, concretely typed plan from [`plan_contract`](@ref): the M/N/K
-`AxisGroup`s, kernel, operand storages, effective [`Blocking`](@ref), packing
-transforms and the [`ContractWorkspace`](@ref) holding every buffer
-[`execute!`](@ref) needs. Reusing a plan reuses its buffers. A plan, and so
-its workspace, must be used by one task at a time. Field layout is not part
-of the public interface; after an M/N orientation swap the `A*` fields
-describe the original `B`.
+`AxisGroup`s, kernel, execution path, operand storages, effective
+[`Blocking`](@ref), packing transforms and the [`ContractWorkspace`](@ref)
+holding every buffer [`execute!`](@ref) needs. Reusing a plan reuses its
+buffers. A plan, and so its workspace, must be used by one task at a time.
+Field layout is not part of the public interface; after an M/N orientation
+swap the `A*` fields describe the original `B`.
 """
 struct ContractPlan{
-        T, Kern, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
+        T, Kern, P, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC,
         TA, TB, VT <: AbstractVector, PT <: AbstractVector,
     }
     kernel::Kern
+    # The singleton selecting the `execute_path!` method (src/execution/paths.jl).
+    path::P
     mgroup::GM
     ngroup::GN
     kgroup::GK
@@ -40,6 +42,25 @@ struct ContractPlan{
     # their natural order, and the nest path enumerates the split ones.
     mpack::PackSplit
     npack::PackSplit
+end
+
+# `p` with some fields replaced.
+@inline ContractPlan(
+    p::ContractPlan; path = p.path, mgroup = p.mgroup, ngroup = p.ngroup,
+    Astorage = p.Astorage, Abase = p.Abase, Bstorage = p.Bstorage, Bbase = p.Bbase,
+    Cstorage = p.Cstorage, Cbase = p.Cbase, atransform = p.atransform, btransform = p.btransform,
+    mpack = p.mpack, npack = p.npack
+) = ContractPlan(
+    p.kernel, path, mgroup, ngroup, p.kgroup, p.blocking, Astorage, Abase, Bstorage, Bbase,
+    Cstorage, Cbase, atransform, btransform, p.workspace, mpack, npack
+)
+
+# Internal, for tests and benchmarks: `:never` rules out the dot, outer-product
+# or unpacked-B path, `:always` forces unpacked B where the kernel admits it.
+Base.@kwdef struct PathModes
+    dot::Symbol = :auto
+    outer::Symbol = :auto
+    unpacked_b::Symbol = :auto
 end
 
 """
@@ -102,18 +123,19 @@ function plan_contract(
         k_block::Union{Int, Nothing} = nothing,
         n_block::Union{Int, Nothing} = nothing,
         allocator = TO.DefaultAllocator(),
-        accumulator::Union{Nothing, Type{Float32}, Type{Float64}} = nothing
+        accumulator::Union{Nothing, Type{Float32}, Type{Float64}} = nothing,
+        path_modes::PathModes = PathModes()
     ) where {NA, NB, NC}
-    return _planned(
+    return planned(
         identity, C, A, indA, B, indB, indC,
-        kernel, conjA, conjB, m_block, k_block, n_block, allocator, accumulator
+        kernel, conjA, conjB, m_block, k_block, n_block, allocator, accumulator, path_modes
     )
 end
 
-# Everything `_plan_contract` needs that is concretely typed before the kernel
-# is known (`run` is the chosen M composite's unit-stride run in C), as one
-# value that crosses the kernel barrier. `T` is the phantom compute type.
-struct _PlanRequest{
+# Everything planning needs that is concretely typed before the kernel is
+# known (`run` is the chosen M composite's unit-stride run in C). `T` is the
+# phantom compute type.
+struct PlanRequest{
         T, F, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC, AL,
     }
     f::F
@@ -131,16 +153,17 @@ struct _PlanRequest{
     k_block::Union{Int, Nothing}
     n_block::Union{Int, Nothing}
     allocator::AL
+    modes::PathModes
 end
 
-@inline function _plan_request(
+@inline function plan_request(
         ::Type{T}, f::F, mgroup::GM, ngroup::GN, kgroup::GK,
         Astorage::SA, Abase::Int, Bstorage::SB, Bbase::Int, Cstorage::SC, Cbase::Int,
-        run::Int, m_block, k_block, n_block, allocator::AL
+        run::Int, m_block, k_block, n_block, allocator::AL, modes::PathModes
     ) where {T, F, GM, GN, GK, SA, SB, SC, AL}
-    return _PlanRequest{T, F, GM, GN, GK, SA, SB, SC, AL}(
+    return PlanRequest{T, F, GM, GN, GK, SA, SB, SC, AL}(
         f, mgroup, ngroup, kgroup, Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
-        run, m_block, k_block, n_block, allocator
+        run, m_block, k_block, n_block, allocator, modes
     )
 end
 
@@ -168,18 +191,18 @@ isconj(v::StridedView{T}, flag::Bool) where {T} =
     (T <: Complex) && (flag ⊻ op_conjugates(v.op))
 
 # `plan_contract`'s body, positional, with a continuation `f` applied to the
-# plan inside the barrier, where its type is concrete (the TensorOperations
-# adapter passes an executor).
-function _planned(
+# plan behind the kernel barrier, where its type is concrete (the
+# TensorOperations adapter passes an executor).
+function planned(
         f::F, C::StridedView, A::StridedView, indA::NTuple{NA, Int},
         B::StridedView, indB::NTuple{NB, Int}, indC::NTuple{NC, Int},
         kernel, conjA::Bool, conjB::Bool,
         m_block::Union{Int, Nothing}, k_block::Union{Int, Nothing}, n_block::Union{Int, Nothing},
-        allocator, accumulator::AC
+        allocator, accumulator::AC, modes::PathModes
     ) where {F, NA, NB, NC, AC}
-    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    T = compute_type(eltype(A), eltype(B), eltype(C), accumulator)
     K = default_kernel_type(T, eltype(A), eltype(B))
-    _check_kernel_domain(kernel, eltype(A), eltype(B))
+    check_kernel_domain(kernel, eltype(A), eltype(B))
 
     # GUARDRAIL: a conjugated `C` is rejected; the engine writes through to
     # its parent, so there is nowhere to absorb its `op`.
@@ -212,57 +235,57 @@ function _planned(
 
     k_length = axis_length(kgroup)
 
-    m_tile_asis, m_tile_swapped = _candidate_m_tiles(T, K, kernel, m_length, n_length, run_m, run_n)
+    m_tile_asis, m_tile_swapped = candidate_m_tiles(T, K, kernel, m_length, n_length, run_m, run_n)
 
     if T <: Real && prefer_swap(run_m, run_n, m_tile_asis, m_tile_swapped)
         # B takes the M role: groups, K maps, storages, run and transforms move
         # together; the sum is unchanged.
         kgroup_swapped = AxisGroup(korder, (indB, B), (indA, A))  # maps: (B, A)
-        req_swapped = _plan_request(
+        req_swapped = plan_request(
             T, f, ngroup, mgroup, kgroup_swapped,
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
-            run_n, m_block, k_block, n_block, allocator
+            run_n, m_block, k_block, n_block, allocator, modes
         )
-        return _plan_with_kernel(kernel, K, btransform, atransform, req_swapped)
+        return plan_with_kernel(kernel, K, btransform, atransform, req_swapped)
     end
-    req = _plan_request(
+    req = plan_request(
         T, f, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
-        run_m, m_block, k_block, n_block, allocator
+        run_m, m_block, k_block, n_block, allocator, modes
     )
-    return _plan_with_kernel(kernel, K, atransform, btransform, req)
+    return plan_with_kernel(kernel, K, atransform, btransform, req)
 end
 
 const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
 
 # A named mixed-domain kernel's `RealFormat` side packs a real operand only.
-@inline _check_kernel_domain(kernel, ::Type, ::Type) = nothing
-@inline _check_kernel_domain(kernel::ComplexRealKernel, ::Type, ::Type{TB}) where {TB} =
-    TB <: Real || _throw_kernel_domain(kernel, "B", TB)
-@inline _check_kernel_domain(kernel::RealComplexKernel, ::Type{TA}, ::Type) where {TA} =
-    TA <: Real || _throw_kernel_domain(kernel, "A", TA)
+@inline check_kernel_domain(kernel, ::Type, ::Type) = nothing
+@inline check_kernel_domain(kernel::ComplexRealKernel, ::Type, ::Type{TB}) where {TB} =
+    TB <: Real || throw_kernel_domain(kernel, "B", TB)
+@inline check_kernel_domain(kernel::RealComplexKernel, ::Type{TA}, ::Type) where {TA} =
+    TA <: Real || throw_kernel_domain(kernel, "A", TA)
 
-@noinline _throw_kernel_domain(kernel, side, T) = throw(
+@noinline throw_kernel_domain(kernel, side, T) = throw(
     ArgumentError("plan_contract: $(typeof(kernel)) needs a real $side, got eltype $T")
 )
 
 # Fold to the compute type, or a throw, at compile time.
-@inline function _compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Nothing) where {TA, TB, TC}
+@inline function compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Nothing) where {TA, TB, TC}
     (TA in _QS_ELTYPES && TB in _QS_ELTYPES && TC in _QS_ELTYPES) ||
-        _throw_eltypes(TA, TB, TC)
-    (TC <: Real && !(TA <: Real && TB <: Real)) && _throw_complex_into_real(TA, TB, TC)
+        throw_eltypes(TA, TB, TC)
+    (TC <: Real && !(TA <: Real && TB <: Real)) && throw_complex_into_real(TA, TB, TC)
     return promote_type(TA, TB, TC)
 end
-@inline _compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Type{R}) where {TA, TB, TC, R <: Union{Float32, Float64}} =
-    _compute_type(TA, TB, TC, nothing) <: Complex ? Complex{R} : R
+@inline compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Type{R}) where {TA, TB, TC, R <: Union{Float32, Float64}} =
+    compute_type(TA, TB, TC, nothing) <: Complex ? Complex{R} : R
 
-@noinline _throw_eltypes(TA, TB, TC) = throw(
+@noinline throw_eltypes(TA, TB, TC) = throw(
     ArgumentError(
         "plan_contract: eltypes (A, B, C) = ($TA, $TB, $TC); each must be one of " *
             "Float32, Float64, ComplexF32, ComplexF64"
     )
 )
-@noinline _throw_complex_into_real(TA, TB, TC) = throw(
+@noinline throw_complex_into_real(TA, TB, TC) = throw(
     ArgumentError("plan_contract: a complex operand (A: $TA, B: $TB) needs a complex C, got $TC")
 )
 
@@ -270,68 +293,61 @@ end
 # named kernel either way, else `select_shape`'s pick at that orientation's
 # extent and C run. The swap is judged before `fit_to_run`'s K-dependent
 # divisor step, which an unbounded `k_length` skips.
-@inline _candidate_m_tiles(::Type{T}, ::Type, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
+@inline candidate_m_tiles(::Type{T}, ::Type, kernel, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T} =
     (tile_size(kernel, 1), tile_size(kernel, 1))
-@inline function _candidate_m_tiles(::Type{T}, ::Type{K}, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T, K}
+@inline function candidate_m_tiles(::Type{T}, ::Type{K}, ::Nothing, m_length::Int, n_length::Int, run_m::Int, run_n::Int) where {T, K}
     m_tile_asis = select_shape(T, K, m_length, typemax(Int), run_m)[1][1]
     m_tile_swapped = T <: Real ? select_shape(T, K, n_length, typemax(Int), run_n)[1][1] : m_tile_asis
     return m_tile_asis, m_tile_swapped
 end
 
 # Kernel resolution. A named kernel goes straight through, never demoted. An
-# automatic one is chosen as a `(shape, kernel type)` value and the plan is
-# built across a dispatch barrier specialised on that one concrete kernel type,
-# so only the chosen kernel's code is compiled (holding the menu-wide kernel
-# Union would box the request; a static ladder would compile every menu
-# kernel). All barrier arguments are singletons or heap objects (the request
-# in a `Ref`): one method-cache hit.
-@inline _plan_with_kernel(kernel, ::Type, atransform, btransform, req::_PlanRequest) =
-    _plan_contract(kernel, atransform, btransform, req, nothing)
-@inline function _plan_with_kernel(::Nothing, ::Type{K}, atransform, btransform, req::_PlanRequest{T}) where {K, T}
+# automatic one is chosen as a `(shape, kernel type)` value. The blocking and
+# execution path follow from the kernel type and tile, so they are resolved
+# here, before the kernel exists; the plan is then built across a dispatch
+# barrier specialised on the one concrete kernel and path, so only their code
+# is compiled (holding the menu-wide kernel Union would box the request; a
+# static ladder would compile every menu kernel). All barrier arguments are
+# singletons or heap objects (the request in a `Ref`): one method-cache hit.
+@inline function plan_with_kernel(kernel, ::Type, atransform, btransform, req::PlanRequest{T}) where {T}
+    scalartype(kernel) === T ||
+        throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match the compute type $T"))
+    return plan_across_barrier(kernel, typeof(kernel), tile_size(kernel)..., atransform, btransform, req)
+end
+@inline function plan_with_kernel(::Nothing, ::Type{K}, atransform, btransform, req::PlanRequest{T}) where {K, T}
     shape, kernel_type = select_shape(T, K, axis_length(req.mgroup), axis_length(req.kgroup), req.run)
-    return _plan_at_shape(shape, kernel_type, atransform, btransform, req)
+    return plan_at_shape(shape, kernel_type, atransform, btransform, req)
 end
 
-@inline function _plan_at_shape(shape, ::Val{K}, atransform, btransform, req::_PlanRequest{T}) where {K, T}
-    vkernel = menu_val(shape, T, K)
-    # The execution path, predicted so the callee is specialised on it. From
-    # the shape and kernel type, not the kernel: a call union-split on the
-    # kernel type is emitted out of line and boxes `req`.
-    hint = _path_hint(req.f, req, shape, Val(K))
-    return Base.inferencebarrier(_plan_resolved)(
-        vkernel, atransform, btransform, hint, Base.RefValue{typeof(req)}(req)
+# Nothing here is called on the kernel `Val`: a call union-split on the kernel
+# type is emitted out of line and boxes `req`.
+@inline plan_at_shape(shape, ::Val{K}, atransform, btransform, req::PlanRequest{T}) where {K, T} =
+    plan_across_barrier(menu_val(shape, T, K), K, shape[1], shape[2], atransform, btransform, req)
+
+@inline function plan_across_barrier(
+        kernel, ::Type{K}, m_tile::Int, n_tile::Int, atransform, btransform, req::PlanRequest
+    ) where {K}
+    resolved = resolve_blocking(K, m_tile, n_tile, req)
+    path = select_path(K, m_tile, n_tile, req, resolved)
+    return Base.inferencebarrier(build_plan)(
+        kernel, path, atransform, btransform, Base.RefValue((req, resolved))
     )
 end
 
-function _plan_resolved(
-        ::Val{Kern}, atransform::TA, btransform::TB, hint::H, slot::Base.RefValue{R}
-    ) where {Kern, TA, TB, H, R <: _PlanRequest}
-    return _plan_contract(Kern(), atransform, btransform, slot[], hint)
-end
-
-# `nothing` for a continuation that does not execute (see src/execution/execute.jl).
-@inline _path_hint(f, req::_PlanRequest, shape, kernel_type) = nothing
-
-# Plan construction on a concrete kernel and transform pair (a named kernel's
-# transform Unions die here). `req.f` runs in here, on the concrete plan type.
-function _plan_contract(
-        kernel::K, atransform::TA, btransform::TB, req::_PlanRequest{T}, hint::H
-    ) where {K, TA, TB, T, H}
-    scalartype(kernel) === T ||
-        throw(ArgumentError("kernel scalar type $(scalartype(kernel)) does not match the compute type $T"))
-
+# The effective blocking for a kernel of type `K` with an `m_tile x n_tile`
+# tile, its line-by-line packing (`mpack`/`npack`) and whether partial sums
+# live in a panel of C (`panel`).
+function resolve_blocking(::Type{K}, m_tile::Int, n_tile::Int, req::PlanRequest{T}) where {K, T}
     m_length = axis_length(req.mgroup)
     n_length = axis_length(req.ngroup)
     k_length = axis_length(req.kgroup)
 
-    defaults = default_blocking(kernel)
+    defaults = kernel_blocking(target_profile(), T, K, m_tile, n_tile)
     requested = Blocking(
-        req.m_block === nothing ? defaults.m_block : req.m_block,
-        req.k_block === nothing ? defaults.k_block : req.k_block,
-        req.n_block === nothing ? defaults.n_block : req.n_block
+        something(req.m_block, defaults.m_block),
+        something(req.k_block, defaults.k_block),
+        something(req.n_block, defaults.n_block)
     )
-
-    m_tile, n_tile = tile_size(kernel)
 
     # Empty extents: the drivers never read these; the floors keep them valid.
     m_block_rounded = roundup(requested.m_block, m_tile)
@@ -339,38 +355,75 @@ function _plan_contract(
     m_block = m_length == 0 ? m_tile : min(m_block_rounded, roundup(m_length, m_tile))
     n_block = n_length == 0 ? n_tile : min(n_block_rounded, roundup(n_length, n_tile))
     k_block = k_length == 0 ? 1 : min(requested.k_block, k_length)
-    panel = _c_panel_needed(T, req.Cstorage, k_length, k_block)
+    panel = c_panel_needed(T, req.Cstorage, k_length, k_block)
     mpack = npack = _NO_SPLIT
     # Cache lines hold each operand's storage eltype, and the block walk costs
     # what its packed format's scatter does. B is not split under a panel of C:
     # the panel holds N blocks in C's own N order, which a split N group does
     # not enumerate contiguously.
     if m_length > 0 && n_length > 0 && k_length > 0
+        a_format, b_format = pack_formats(K)
         m_block, mpack = pack_split(
-            req.mgroup, req.kgroup, sliver_spec(kernel, 1), sizeof(eltype(req.Astorage)),
+            req.mgroup, req.kgroup, 1, m_tile, a_format, sizeof(eltype(req.Astorage)),
             k_block, m_block, m_block_rounded, requested.k_block
         )
         if !panel
             n_block, npack = pack_split(
-                req.ngroup, req.kgroup, sliver_spec(kernel, 2), sizeof(eltype(req.Bstorage)),
+                req.ngroup, req.kgroup, 2, n_tile, b_format, sizeof(eltype(req.Bstorage)),
                 k_block, n_block, n_block_rounded, requested.k_block
             )
         end
     end
-    blocking = Blocking(m_block, k_block, n_block)
-    ws = ContractWorkspace(
-        T, kernel, blocking; allocator = req.allocator, panel = panel ? m_length * min(n_block, n_length) : 0
-    )
+    return (blocking = Blocking(m_block, k_block, n_block), mpack, npack, panel)
+end
 
+# Whether the partial sums between K blocks must live in a compute-type panel
+# rather than in a C of narrower eltype. Static `false` unless C is narrower.
+@inline function c_panel_needed(::Type{T}, Cstorage, k_length::Int, k_block::Int) where {T}
+    sizeof(real(eltype(Cstorage))) < sizeof(real(T)) || return false
+    return k_length > k_block
+end
+
+# The path `execute!` runs past its short-circuits: the dot path, else the
+# outer-product path, else the nest (B packed or read in place).
+function select_path(::Type{K}, m_tile::Int, n_tile::Int, req::PlanRequest{T}, resolved) where {K, T}
+    (; mgroup, ngroup, kgroup, modes) = req
+    (; blocking, mpack, npack, panel) = resolved
+    m_length = axis_length(mgroup)
+    n_length = axis_length(ngroup)
+    k_length = axis_length(kgroup)
+    if (m_length == 1 || n_length == 1) && !panel && modes.dot !== :never &&
+            _dot_applicable(T, req.Astorage, req.Bstorage, kgroup, m_length, n_length, k_length) &&
+            dot_fits(T, workspace_sizes(K, m_tile, n_tile, blocking).packed_a, blocking.k_block)
+        W = _dot_lanewidth(T)
+        return m_length == 1 ? lane_path(DotPath{true}, W) : lane_path(DotPath{false}, W)
+    end
+    k_length == 1 && modes.outer !== :never && _outer_applicable(T, req.Astorage, req.Cstorage, mgroup, m_length) &&
+        return lane_path(OuterPath, _dot_lanewidth(T))
+    unpacked_b = _unpacked_b_kernel_eligible(K) && _unpacked_b_rule(modes.unpacked_b, mgroup, kgroup)
+    return nest_path(unpacked_b, mgroup, ngroup, kgroup, is_split(mpack), is_split(npack), panel)
+end
+
+# Type parameters on the transforms force specialisation on them: the
+# compiler does not specialise on a `Function` argument it only passes on.
+build_plan(::Val{Kern}, path, atransform::TA, btransform::TB, slot::Base.RefValue) where {Kern, TA, TB} =
+    build_plan(Kern(), path, atransform, btransform, slot)
+
+# The plan on a concrete kernel, path and transform pair (a named kernel's
+# transform Unions die here). `req.f` runs in here, on the concrete plan type.
+function build_plan(
+        kernel::Microkernel, path::P, atransform::TA, btransform::TB, slot::Base.RefValue{R}
+    ) where {P, TA, TB, R}
+    T = scalartype(kernel)
+    req, (; blocking, mpack, npack, panel) = slot[]
+    panel_length = panel ? axis_length(req.mgroup) * min(blocking.n_block, axis_length(req.ngroup)) : 0
+    ws = ContractWorkspace(T, kernel, blocking; allocator = req.allocator, panel = panel_length)
     plan = ContractPlan(
-        kernel, req.mgroup, req.ngroup, req.kgroup, blocking,
+        kernel, path, req.mgroup, req.ngroup, req.kgroup, blocking,
         req.Astorage, req.Abase, req.Bstorage, req.Bbase, req.Cstorage, req.Cbase,
         atransform, btransform, ws, mpack, npack
     )
-    return _continue(req.f, plan, hint)
+    return req.f(plan)
 end
-
-# `hint` is used only by an executing continuation (src/execution/execute.jl).
-@inline _continue(f::F, plan::ContractPlan, hint) where {F} = f(plan)
 
 release!(plan::ContractPlan, allocator) = release!(plan.workspace, allocator)

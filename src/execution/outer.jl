@@ -6,12 +6,8 @@
 # complex K = 1 tiles are not the bottleneck, and the path would need its own
 # interleaved arithmetic.
 
-# `:never` forces the path off, for benchmarks and tests.
-const _OUTER_MODE = Ref{Symbol}(:auto)
-
 # N and B may have any layout: B is read one scalar per column.
 function _outer_applicable(::Type{T}, Astorage, Cstorage, mgroup::AxisGroup, m_length::Int) where {T}
-    _OUTER_MODE[] === :never && return false
     T <: Real || return false
     (Astorage isa DenseVector{T} && Cstorage isa DenseVector{T}) || return false
     m_length >= _dot_lanewidth(T) || return false

@@ -36,13 +36,13 @@ block. Allocation-free.
 function execute!(plan::ContractPlan{T}, alpha::Number, beta::Number) where {T}
     alphaT = convert(T, alpha)
     betaT = convert(T, beta)
-    _execute_short_circuit!(plan, alphaT, betaT) && return plan.Cstorage
-    _execute_across_barrier!(plan, alphaT, betaT, _select_path(plan))
+    execute_short_circuit!(plan, alphaT, betaT) && return plan.Cstorage
+    execute_path!(plan, alphaT, betaT, plan.path)
     return plan.Cstorage
 end
 
 # The short-circuits every path shares; `true` when the call is finished.
-@inline function _execute_short_circuit!(plan::ContractPlan{T}, alphaT::T, betaT::T) where {T}
+@inline function execute_short_circuit!(plan::ContractPlan{T}, alphaT::T, betaT::T) where {T}
     m_length = axis_length(plan.mgroup)
     n_length = axis_length(plan.ngroup)
     (m_length == 0 || n_length == 0) && return true
@@ -53,155 +53,17 @@ end
     return false
 end
 
-# The path `execute!` runs past its short-circuits: the dot path, else the
-# outer-product path, else the nest (B packed or read in place).
-@inline _select_path(plan::ContractPlan{T}) where {T} = _select_path(
-    T, _unpacked_b_kernel_eligible(plan.kernel),
-    plan.Astorage, plan.Bstorage, plan.Cstorage, plan.mgroup, plan.ngroup, plan.kgroup, plan,
-    plan.blocking.k_block, is_split(plan.mpack), is_split(plan.npack)
-)
-
-# On the plan's parts, so `plan_contract` can predict the path before the
-# plan exists (`_path_hint`). `unpack_ok`: the kernel admits unpacked B.
-# `capacity`: the plan whose workspace must hold the dot path's vector, or
-# `nothing` to assume it does. `split_a`/`split_b`: the plan packs A/B line by
-# line.
-@inline function _select_path(
-        ::Type{T}, unpack_ok::Bool, Astorage, Bstorage, Cstorage,
-        mgroup::AxisGroup, ngroup::AxisGroup, kgroup::AxisGroup, capacity, k_block,
-        split_a::Bool = false, split_b::Bool = false
-    ) where {T}
-    m_length = axis_length(mgroup)
-    n_length = axis_length(ngroup)
-    k_length = axis_length(kgroup)
-    panel = _c_panel_needed(T, Cstorage, k_length, k_block)
-    if (m_length == 1 || n_length == 1) && !panel && _dot_applicable(T, Astorage, Bstorage, kgroup, m_length, n_length, k_length) &&
-            _dot_capacity_ok(capacity)
-        W = _dot_lanewidth(T)
-        return m_length == 1 ? _lane_path(_DotPath{true}, W) : _lane_path(_DotPath{false}, W)
-    end
-    k_length == 1 && _outer_applicable(T, Astorage, Cstorage, mgroup, m_length) &&
-        return _lane_path(_OuterPath, _dot_lanewidth(T))
-    return _nest_path(
-        unpack_ok && _unpacked_b_rule(mgroup, kgroup), mgroup, ngroup, kgroup, split_a, split_b, panel
-    )
-end
-
-# Whether the partial sums between K blocks must live in a compute-type panel
-# rather than in a C of narrower eltype. Static `false` unless C is narrower.
-@inline function _c_panel_needed(::Type{T}, Cstorage, k_length::Int, k_block::Int) where {T}
-    sizeof(real(eltype(Cstorage))) < sizeof(real(T)) || return false
-    return k_length > k_block
-end
-
-# Run `path` behind a dynamic call. The plan crosses in the workspace slot
-# with its storages stripped; they cross as arguments.
-@inline function _execute_across_barrier!(plan::ContractPlan{T}, alphaT::T, betaT::T, path) where {T}
-    core = _strip_storage(plan)
-    slot = barrier_slot!(plan.workspace.slots, Tuple{typeof(core), T, T})
-    slot[] = (core, alphaT, betaT)
-    Base.inferencebarrier(_execute_resolved!)(
-        path, slot, plan.Astorage, plan.Bstorage, plan.Cstorage
-    )
-    return nothing
-end
-
-function _execute_resolved!(
-        path::P, slot::Base.RefValue{Tuple{R, T, T}}, Astorage::SA, Bstorage::SB, Cstorage::SC
-    ) where {P, R <: ContractPlan, T, SA, SB, SC}
-    core, alphaT, betaT = slot[]
-    _execute_path!(_with_storage(core, Astorage, Bstorage, Cstorage), alphaT, betaT, path)
-    return nothing
-end
-
-@inline _strip_storage(p::ContractPlan) = ContractPlan(
-    p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
-    nothing, p.Abase, nothing, p.Bbase, nothing, p.Cbase,
-    p.atransform, p.btransform, p.workspace, p.mpack, p.npack
-)
-@inline _with_storage(p::ContractPlan, Astorage, Bstorage, Cstorage) = ContractPlan(
-    p.kernel, p.mgroup, p.ngroup, p.kgroup, p.blocking,
-    Astorage, p.Abase, Bstorage, p.Bbase, Cstorage, p.Cbase,
-    p.atransform, p.btransform, p.workspace, p.mpack, p.npack
-)
-
-# The continuation the TensorOperations adapter hands `_planned`: `execute!`
-# and `release!` inside the planning barrier. A struct, not a closure, so the
-# fields are concretely typed.
-struct _Execute{T, AL}
-    alpha::T
-    beta::T
-    allocator::AL
-end
-
-# The path predicted before the kernel barrier, so its callee is specialised
-# on the path as well as the kernel.
-@inline _path_hint(::_Execute, req::_PlanRequest{T}, shape, ::Val{K}) where {T, K} = _select_path(
-    T, _unpacked_b_kernel_eligible(K),
-    req.Astorage, req.Bstorage, req.Cstorage, req.mgroup, req.ngroup, req.kgroup, nothing,
-    req.k_block === nothing ? _default_k_block(T, req.Cstorage, shape, K) : req.k_block
-)
-
-# The kernel's default `k_block`, which decides the path only under a C
-# narrower than `T`; elsewhere a static placeholder.
-@inline _default_k_block(::Type{T}, Cstorage, shape, ::Type{K}) where {T, K} =
-    sizeof(real(eltype(Cstorage))) < sizeof(real(T)) ?
-    kernel_blocking(target_profile(), T, K, shape[1], shape[2]).k_block : 0
-
-@inline function _continue(e::_Execute{T}, plan::ContractPlan{T}, hint) where {T}
-    if hint === nothing
-        execute!(plan, e.alpha, e.beta)
-    else
-        _execute_hinted!(plan, e.alpha, e.beta, hint)
-    end
-    release!(plan, e.allocator)
-    return nothing
-end
-
-# Runs the predicted path statically when it provably equals the plan's own
-# `_select_path` (always, for an automatically chosen kernel); otherwise
-# falls back to `execute!`'s barrier. The prediction assumes no split, so a
-# split plan crosses the barrier to its own nest path.
-@inline function _execute_hinted!(plan::ContractPlan{T}, alphaT::T, betaT::T, hint) where {T}
-    _execute_short_circuit!(plan, alphaT, betaT) && return nothing
-    if !_hint_holds(plan, hint)
-        _execute_across_barrier!(plan, alphaT, betaT, _select_path(plan))
-    elseif _splits(plan, hint)
-        _execute_across_barrier!(plan, alphaT, betaT, _split_path(plan, hint))
-    else
-        _execute_path!(plan, alphaT, betaT, hint)
-    end
-    return nothing
-end
-
-@inline _splits(plan::ContractPlan, hint) = false
-@inline _splits(plan::ContractPlan, ::Union{_NestPath, _PanelPath}) = is_split(plan.mpack) || is_split(plan.npack)
-@inline _split_path(plan::ContractPlan, ::_NestPath{U}) where {U} = _nest_path(
-    U, plan.mgroup, plan.ngroup, plan.kgroup, is_split(plan.mpack), is_split(plan.npack)
-)
-@inline _split_path(plan::ContractPlan, ::_PanelPath{<:_NestPath{U}}) where {U} = _nest_path(
-    U, plan.mgroup, plan.ngroup, plan.kgroup, is_split(plan.mpack), is_split(plan.npack), true
-)
-
-# The prediction differs from `_select_path(plan)` in two inputs only: the
-# dot path's workspace capacity (assumed) and the panel decision (made at the
-# default `k_block`; folds to `false` unless C is narrower than `T`).
-@inline _hint_holds(plan::ContractPlan{T}, path::Union{_NestPath, _PanelPath}) where {T} =
-    _c_panel_needed(T, plan.Cstorage, axis_length(plan.kgroup), plan.blocking.k_block) === (path isa _PanelPath)
-@inline _hint_holds(plan::ContractPlan, ::_DotPath) = _dot_capacity_ok(plan)
-@inline _hint_holds(plan::ContractPlan, ::_OuterPath) = true
-
-_execute_path!(plan::ContractPlan, alphaT, betaT, ::_DotPath{MATB, W}) where {MATB, W} =
+execute_path!(plan::ContractPlan, alphaT, betaT, ::DotPath{MATB, W}) where {MATB, W} =
     (_execute_dot!(plan, alphaT, betaT, MATB, Val(W)); nothing)
 
-_execute_path!(plan::ContractPlan, alphaT, betaT, ::_OuterPath{W}) where {W} = (
+execute_path!(plan::ContractPlan, alphaT, betaT, ::OuterPath{W}) where {W} = (
     _execute_outer!(
         plan, alphaT, betaT, axis_length(plan.mgroup), axis_length(plan.ngroup), Val(W)
     ); nothing
 )
 
-function _execute_path!(
-        plan::ContractPlan{T}, alphaT::T, betaT::T, path::_NestPath
+function execute_path!(
+        plan::ContractPlan{T}, alphaT::T, betaT::T, path::NestPath
     ) where {T}
     kernel = plan.kernel
     ws = plan.workspace
@@ -217,18 +79,17 @@ function _execute_path!(
 end
 
 # The nest over `pplan`, a copy of `plan` whose C is the workspace panel with
-# dense M/N maps, one N block at a time: `_panel_enter!` loads the block of
-# C into the panel and `_panel_exit!` rounds it back.
-function _execute_path!(
-        plan::ContractPlan{T}, alphaT::T, betaT::T, ::_PanelPath{P}
+# dense M/N maps, one N block at a time: `panel_enter!` loads the block of
+# C into the panel and `panel_exit!` rounds it back.
+function execute_path!(
+        plan::ContractPlan{T}, alphaT::T, betaT::T, ::PanelPath{P}
     ) where {T, P}
     kernel = plan.kernel
     ws = plan.workspace
     m_length = axis_length(plan.mgroup)
     pplan = ContractPlan(
-        kernel, _dense_second_map(plan.mgroup, 1), _dense_second_map(plan.ngroup, m_length),
-        plan.kgroup, plan.blocking, plan.Astorage, plan.Abase, plan.Bstorage, plan.Bbase,
-        ws.c_panel, 0, plan.atransform, plan.btransform, ws, plan.mpack, plan.npack
+        plan; mgroup = dense_second_map(plan.mgroup, 1), ngroup = dense_second_map(plan.ngroup, m_length),
+        Cstorage = ws.c_panel, Cbase = 0
     )
     GC.@preserve ws begin
         _execute_nest!(
@@ -241,31 +102,26 @@ function _execute_path!(
 end
 
 # `g` with its second map replaced by the column-major one scaled by `step`.
-@inline function _dense_second_map(g::AxisGroup{D, 2}, step::Int) where {D}
+@inline function dense_second_map(g::AxisGroup{D, 2}, step::Int) where {D}
     dense = ntuple(d -> step * prod(ntuple(i -> i < d ? g.lengths[i] : 1, Val(D))), Val(D))
     return AxisGroup(g.lengths, (g.strides[1], dense))
 end
 
 # `target`: `nothing`, or the plan whose C the panel stands in for.
-@inline _panel_enter!(::Nothing, plan, n_block_start, n_block_length, betaT) = plan
-@inline _panel_exit!(::Nothing, n_block_start, n_block_length) = nothing
+@inline panel_enter!(::Nothing, plan, n_block_start, n_block_length, betaT) = plan
+@inline panel_exit!(::Nothing, n_block_start, n_block_length) = nothing
 
-function _panel_enter!(target::ContractPlan, plan::ContractPlan, n_block_start::Int, n_block_length::Int, betaT)
-    iszero(betaT) || _panel_copy!(target, n_block_start, n_block_length, true)
-    return ContractPlan(
-        plan.kernel, plan.mgroup, plan.ngroup, plan.kgroup, plan.blocking,
-        plan.Astorage, plan.Abase, plan.Bstorage, plan.Bbase, plan.Cstorage,
-        -n_block_start * axis_length(plan.mgroup), plan.atransform, plan.btransform, plan.workspace,
-        plan.mpack, plan.npack
-    )
+function panel_enter!(target::ContractPlan, plan::ContractPlan, n_block_start::Int, n_block_length::Int, betaT)
+    iszero(betaT) || panel_copy!(target, n_block_start, n_block_length, true)
+    return ContractPlan(plan; Cbase = -n_block_start * axis_length(plan.mgroup))
 end
 
-_panel_exit!(target::ContractPlan, n_block_start::Int, n_block_length::Int) = _panel_copy!(target, n_block_start, n_block_length, false)
+panel_exit!(target::ContractPlan, n_block_start::Int, n_block_length::Int) = panel_copy!(target, n_block_start, n_block_length, false)
 
 # Columns `n_block_start .+ (0:n_block_length-1)` of `target`'s C into
 # (`load`) or out of the panel, converting to the destination's eltype. Borrows
 # the M/N offset buffers, which the nest refills before reading them again.
-function _panel_copy!(target::ContractPlan, n_block_start::Int, n_block_length::Int, load::Bool)
+function panel_copy!(target::ContractPlan, n_block_start::Int, n_block_length::Int, load::Bool)
     ws = target.workspace
     panel = ws.c_panel
     C = target.Cstorage
@@ -295,7 +151,7 @@ end
 function _execute_nest!(
         plan::ContractPlan{T}, ws, kernel::K, m_tile::Int, n_tile::Int,
         m_length::Int, n_length::Int, k_length::Int, m_block::Int, k_block::Int, n_block::Int,
-        alphaT::T, betaT::T, ::_NestPath{UNPACKED_B, AFF, SPLIT}, target
+        alphaT::T, betaT::T, ::NestPath{UNPACKED_B, AFF, SPLIT}, target
     ) where {T, K, UNPACKED_B, AFF, SPLIT}
     # GUARDRAIL: reals per sliver per K step address the packed panels;
     # `m_tile`/`n_tile` count register-tile rows. They differ for complex
@@ -327,7 +183,7 @@ function _execute_nest!(
     n_block_start = 0
     while n_block_start < n_length
         n_block_length = min(n_block, n_length - n_block_start)
-        cplan = _panel_enter!(target, plan, n_block_start, n_block_length, betaT)
+        cplan = panel_enter!(target, plan, n_block_start, n_block_length, betaT)
         n_tiles = cld(n_block_length, n_tile)
         (rng_nB, rng_nC) = if n_ramp
             _ramp_slivers!(
@@ -445,7 +301,7 @@ function _execute_nest!(
             k_block_start += k_block_length
         end
 
-        _panel_exit!(target, n_block_start, n_block_length)
+        panel_exit!(target, n_block_start, n_block_length)
         n_block_start += n_block_length
     end
 

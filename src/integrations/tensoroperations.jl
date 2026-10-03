@@ -58,7 +58,7 @@ end
 end
 
 @inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β, accumulator)
-    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    T = compute_type(eltype(A), eltype(B), eltype(C), accumulator)
     _qs_check_eligible(C, A, B)
     TO.argcheck_tensorcontract(C, A, pA, B, pB, pAB)
     TO.dimcheck_tensorcontract(C, A, pA, B, pB, pAB)
@@ -80,7 +80,22 @@ end
     return Cv, Av, Bv, indA, indB, indC, convert(T, α), convert(T, β)
 end
 
-# `_planned` builds, runs and releases the plan behind the kernel dispatch
+# The continuation handed to `planned`: `execute!` and `release!` on the
+# concretely typed plan. A struct, not a closure, so the fields are concretely
+# typed.
+struct Execute{T, AL}
+    alpha::T
+    beta::T
+    allocator::AL
+end
+
+function (e::Execute)(plan::ContractPlan)
+    execute!(plan, e.alpha, e.beta)
+    release!(plan, e.allocator)
+    return nothing
+end
+
+# `planned` builds, runs and releases the plan behind the kernel dispatch
 # barrier, so the plan is never boxed (as `execute!(plan_contract(...), ...)`
 # would be). Bracketed with checkpoint/reset like TO's own `blas_contract!`.
 function TO.tensorcontract!(
@@ -93,9 +108,9 @@ function TO.tensorcontract!(
     ) where {AC}
     Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β, AC)
     checkpoint = TO.allocator_checkpoint!(allocator)
-    _planned(
-        _Execute(α′, β′, allocator), Cv, Av, indA, Bv, indB, indC,
-        nothing, conjA, conjB, nothing, nothing, nothing, allocator, AC
+    planned(
+        Execute(α′, β′, allocator), Cv, Av, indA, Bv, indB, indC,
+        nothing, conjA, conjB, nothing, nothing, nothing, allocator, AC, PathModes()
     )
     TO.allocator_reset!(allocator, checkpoint)
     return C

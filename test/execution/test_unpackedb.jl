@@ -3,7 +3,7 @@
 # (same arithmetic, same values, different address), and the packed-B buffer
 # must stay untouched.
 
-_ub_takes(plan) = _path_of(plan) isa QuasiStrided._NestPath{true}
+_ub_takes(plan) = _path_of(plan) isa QuasiStrided.NestPath{true}
 
 # Poison the packed-B buffer, then run.
 function _ub_run!(plan, alpha, beta)
@@ -16,7 +16,7 @@ _ub_untouched(plan) = all(isnan, plan.workspace.packed_b)
 # and the reference.
 function _ub_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     C_unp, plan = _run_fresh(_ub_run!, mk, alpha, beta; conjA, conjB, plankw...)
-    C_packed, _ = _run_fresh(_run_nest!, mk, alpha, beta; conjA, conjB, plankw...)
+    C_packed, _ = _run_nest(mk, alpha, beta; conjA, conjB, plankw...)
     @test _ub_takes(plan)
     @test _ub_untouched(plan)
     @test C_unp == C_packed
@@ -98,7 +98,7 @@ end
     allocs = _steady_allocs!(execute!, plan, Cmat)
     @test allocs == 0 skip = (VERSION < v"1.11")
     @test Cmat ≈ Amat * Bmat
-    # The backend runs the path predicted before planning (`_path_hint`).
+    # The backend plans and runs in one call.
     fill!(Cmat, 0)
     TO.tensorcontract!(Cmat, Amat, ((1,), (2,)), false, Bmat, ((1,), (2,)), false, ((1, 2), ()), 1.0, 0.0, QuasiStridedBackend())
     @test Cmat ≈ Amat * Bmat

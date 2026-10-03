@@ -2,7 +2,7 @@
 # matrix operand runs a K-vectorized gemv. Results match the nest and the
 # reference to a tolerance (the K summation order differs).
 
-_dot_takes(plan) = _path_of(plan) isa QuasiStrided._DotPath
+_dot_takes(plan) = _path_of(plan) isa QuasiStrided.DotPath
 
 const _DOT_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
 
@@ -37,7 +37,7 @@ end
 # The dot path against the nest and the reference.
 function _dot_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     C_dot, plan = _run_fresh(execute!, mk, alpha, beta; conjA, conjB, plankw...)
-    C_nest, _ = _run_fresh(_run_nest!, mk, alpha, beta; conjA, conjB, plankw...)
+    C_nest, _ = _run_nest(mk, alpha, beta; conjA, conjB, plankw...)
     @test _dot_takes(plan)
     @test C_dot ≈ C_nest
     return @test C_dot ≈ _ref_of(mk, alpha, beta; conjA, conjB)
@@ -117,7 +117,7 @@ end
         execute!(plan, 1.0, 0.0)
         @test (@allocated execute!(plan, 1.0, 0.0)) == 0 skip = (VERSION < v"1.11")
     end
-    # The backend runs the path predicted before planning (`_path_hint`).
+    # The backend plans and runs in one call.
     d = 6
     A, B, C = randn(T, d, d), randn(T, d, d, d, d, d), zeros(T, d, d, d)
     pA, pB, pAB = TO.contract_indices((:a, :b), (:a, :b, :c, :d, :e), (:c, :d, :e))

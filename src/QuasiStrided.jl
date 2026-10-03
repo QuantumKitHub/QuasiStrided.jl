@@ -37,11 +37,11 @@ include("microkernels/stores.jl")
 include("planning/labels.jl")
 include("planning/kernel_selection.jl")
 include("planning/blocking.jl")
-include("execution/barrier.jl")
 include("execution/workspace.jl")
 include("planning/plan.jl")
 
 # --- Execution: the five-loop nest and the specialised paths ---
+include("execution/paths.jl")
 include("execution/macrokernel.jl")
 include("execution/execute.jl")
 include("execution/unpackedb.jl")

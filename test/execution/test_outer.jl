@@ -2,7 +2,7 @@
 # in A and C streams `alpha * A * B[n]` column by column. Results match the
 # nest and the reference (`≈`: the two differ on a signed zero).
 
-_outer_takes(plan) = _path_of(plan) isa QuasiStrided._OuterPath
+_outer_takes(plan) = _path_of(plan) isa QuasiStrided.OuterPath
 
 # `C[a, b] = A[a] * B[b]` at extents `(M, N)`:
 #   :bstrided  B every other element of a longer vector
@@ -55,7 +55,7 @@ end
             (alpha, beta) in ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
         mk = _outer_maker(T, M, N, 10 + idx; variant)
         C_out, plan = _run_fresh(execute!, mk, alpha, beta)
-        C_nest, _ = _run_fresh(_run_nest!, mk, alpha, beta)
+        C_nest, _ = _run_nest(mk, alpha, beta)
         @test _outer_takes(plan) == (axis_length(plan.mgroup) >= W)
         @test C_out ≈ C_nest
         @test C_out ≈ _ref_of(mk, alpha, beta)
@@ -96,19 +96,13 @@ end
     @test C ≈ a * transpose(b)
 end
 
-@testset "the mode switches override path selection" begin
-    d, o, u = QuasiStrided._DOT_MODE, QuasiStrided._OUTER_MODE, QuasiStrided._UNPACKED_B_MODE
-    pd = plan_contract(_mm_maker(Float64, 1, 64, 9, 1)()...)
-    po = plan_contract(_outer_maker(Float64, 16, 9, 1)()...)
-    pu = plan_contract(_mm_maker(Float64, 20, 12, 9, 1)()...)
-    ps = plan_contract(_mm_maker(Float64, 20, 12, 9, 1; B = :transposed)()...)
-    @test _dot_takes(pd) && _outer_takes(po) && _ub_takes(pu) && !_ub_takes(ps)
-    try
-        d[] = o[] = u[] = :never
-        @test !_dot_takes(pd) && !_outer_takes(po) && !_ub_takes(pu)
-        u[] = :always
-        @test _ub_takes(ps)
-    finally
-        d[] = o[] = u[] = :auto
-    end
+@testset "the path modes override path selection" begin
+    pd(; kw...) = plan_contract(_mm_maker(Float64, 1, 64, 9, 1)()...; kw...)
+    po(; kw...) = plan_contract(_outer_maker(Float64, 16, 9, 1)()...; kw...)
+    pu(; kw...) = plan_contract(_mm_maker(Float64, 20, 12, 9, 1)()...; kw...)
+    ps(; kw...) = plan_contract(_mm_maker(Float64, 20, 12, 9, 1; B = :transposed)()...; kw...)
+    @test _dot_takes(pd()) && _outer_takes(po()) && _ub_takes(pu()) && !_ub_takes(ps())
+    @test !_dot_takes(pd(; path_modes = _NEST_ONLY)) && !_outer_takes(po(; path_modes = _NEST_ONLY)) &&
+        !_ub_takes(pu(; path_modes = _NEST_ONLY))
+    @test _ub_takes(ps(; path_modes = QuasiStrided.PathModes(unpacked_b = :always)))
 end

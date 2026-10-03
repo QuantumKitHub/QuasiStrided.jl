@@ -210,11 +210,7 @@ Base.IndexStyle(::Type{<:CountingStorage}) = IndexLinear()
     cstore = CountingStorage(zeros(Ma * Na))
     astore = CountingStorage(copy(vec(Amat)))
     bstore = CountingStorage(copy(vec(Bmat)))
-    p = _pcf_Plan(
-        base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
-        astore, 0, bstore, 0, cstore, 0,
-        base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
-    )
+    p = _pcf_Plan(base; Astorage = astore, Abase = 0, Bstorage = bstore, Bbase = 0, Cstorage = cstore, Cbase = 0)
     astore.n = 0; bstore.n = 0; cstore.n = 0
     _pcf_exec(p, 1.0, 0.0)
     @test reshape(cstore.data, Ma, Na) ≈ Amat * Bmat
@@ -241,11 +237,7 @@ end
             Cstorage = vec(Cmat), Astorage = vec(Amat), Bstorage = vec(Bmat),
             Cbase = 0, Abase = 0, Bbase = 0
         )
-        return _pcf_Plan(
-            base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
-            Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
-            base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
-        )
+        return _pcf_Plan(base; Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase)
     end
 
     # One element short: rejected before anything is written.
@@ -302,11 +294,7 @@ end
 
     # One element short: only the address at `binding` overflows.
     short_C = zeros(M * N1 * N2 - 1)
-    pshort = _pcf_Plan(
-        base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
-        base.Astorage, base.Abase, base.Bstorage, base.Bbase, short_C, base.Cbase,
-        base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
-    )
+    pshort = _pcf_Plan(base; Cstorage = short_C)
     @test_throws BoundsError _pcf_exec(pshort, 1.0, 0.0)
     @test all(iszero, short_C)                            # nothing written before the throw
 
@@ -325,12 +313,7 @@ end
     @test QS.checked_span_bounds(base.Cbase, mrange, lastonly, shortlen) === nothing
 
     # An interior-sliver minimum: the base shifted down by one.
-    plow = _pcf_Plan(
-        base.kernel, base.mgroup, base.ngroup, base.kgroup, base.blocking,
-        base.Astorage, base.Abase, base.Bstorage, base.Bbase,
-        zeros(M * N1 * N2), base.Cbase - 1,
-        base.atransform, base.btransform, base.workspace, base.mpack, base.npack,
-    )
+    plow = _pcf_Plan(base; Cstorage = zeros(M * N1 * N2), Cbase = base.Cbase - 1)
     @test_throws BoundsError _pcf_exec(plow, 1.0, 0.0)
 end
 

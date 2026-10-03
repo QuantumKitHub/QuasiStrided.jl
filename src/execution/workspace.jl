@@ -19,8 +19,8 @@ be [`release!`](@ref)d. `T` is the plan's compute type; the packed panels
 (`VT`) hold `real(T)`, the panel of C (`PT`) holds `T`. Field layout is an
 implementation detail.
 """
-# A `mutable struct` with `const` fields so a plan and a barrier slot hold one
-# pointer to it instead of copying every GC-tracked field.
+# A `mutable struct` with `const` fields so a plan holds one pointer to it
+# instead of copying every GC-tracked field.
 mutable struct ContractWorkspace{T, VT <: AbstractVector, PT <: AbstractVector}
     const m::GroupBuffers
     const n::GroupBuffers
@@ -31,10 +31,8 @@ mutable struct ContractWorkspace{T, VT <: AbstractVector, PT <: AbstractVector}
     const packed_a::VT
     const packed_b::VT
     # The compute-type panel of C for an eltype of C narrower than `T` (see
-    # `_PanelPath`); empty otherwise.
+    # `PanelPath`); empty otherwise.
     const c_panel::PT
-
-    const slots::SlotCache
 
     # GUARDRAIL: the packed panels hold `real(T)`, never `T`.
     function ContractWorkspace{T}(
@@ -47,20 +45,22 @@ mutable struct ContractWorkspace{T, VT <: AbstractVector, PT <: AbstractVector}
                     "(the real type of the compute type $T), got $(eltype(VT))"
             )
         )
-        return new{T, VT, PT}(m, n, k, packed_a, packed_b, c_panel, SlotCache())
+        return new{T, VT, PT}(m, n, k, packed_a, packed_b, c_panel)
     end
 end
 
-# GUARDRAIL: `packed_a_length` already counts reals, the sliver counts are in
-# logical `m_tile`/`n_tile`; do not rescale either.
-@inline function workspace_sizes(kernel, blocking::Blocking)
-    m_tile, n_tile = tile_size(kernel)
+# For a kernel of type `K` with an `m_tile x n_tile` tile, from its type so
+# that planning can size the workspace before the kernel exists. GUARDRAIL:
+# the packed lengths count reals, the sliver counts logical `m_tile`/`n_tile`;
+# do not rescale either.
+@inline function workspace_sizes(::Type{K}, m_tile::Int, n_tile::Int, blocking::Blocking) where {K}
+    a_reals, b_reals = map(reals_per_element, pack_formats(K))
     m_tiles = cld(blocking.m_block, m_tile)
     n_tiles = cld(blocking.n_block, n_tile)
     return (
         m_tiles = m_tiles, n_tiles = n_tiles,
-        packed_a = m_tiles * packed_a_length(kernel, blocking.k_block),
-        packed_b = n_tiles * packed_b_length(kernel, blocking.k_block),
+        packed_a = m_tiles * m_tile * a_reals * blocking.k_block,
+        packed_b = n_tiles * n_tile * b_reals * blocking.k_block,
     )
 end
 
@@ -78,7 +78,7 @@ function ContractWorkspace(
         ::Type{T}, kernel, blocking::Blocking;
         allocator = TO.DefaultAllocator(), panel::Int = 0
     ) where {T}
-    s = workspace_sizes(kernel, blocking)
+    s = workspace_sizes(typeof(kernel), tile_size(kernel)..., blocking)
     R = realtype(kernel)
     # `release!` frees in exactly the reverse order, for arena allocators.
     packed_a = TO.tensoralloc(Vector{R}, (s.packed_a,), Val(true), allocator)
