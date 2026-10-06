@@ -30,10 +30,10 @@ include("packing/line_packing.jl")
 include("microkernels/interface.jl")
 include("microkernels/kernels.jl")
 include("microkernels/vecops.jl")
+# B read in place: a B source beside `PackedPanel`, ahead of the K steps' generators.
+include("packing/unpacked_b.jl")
 include("microkernels/steps.jl")
 include("microkernels/stores.jl")
-# B read in place: a B source beside `PackedPanel`, after the kernel interface it extends.
-include("packing/unpacked_b.jl")
 
 # --- Planning: labels, kernel and blocking choice, the plan ---
 include("planning/labels.jl")

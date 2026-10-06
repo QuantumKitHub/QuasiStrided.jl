@@ -41,16 +41,23 @@ function zero_accumulator(kernel::VectorKernel{MR, NR, T, W}) where {MR, NR, T, 
     return ntuple(_ -> z, Val(accumulator_length(layout, MR ÷ rows_per_vector(layout, W), NR)))
 end
 
-@inline function add_tile(
+# Not unrolled over an `UnpackedBView`: B's K stride is a runtime value, so
+# every unrolled step needs its own column addresses, which spill.
+@generated function add_tile(
         kernel::VectorKernel, acc::NTuple{NA, Vec{W, R}},
         packed_a::PA, packed_b::PB, k_block_length::Int
     ) where {NA, W, R, PA <: PackedPanel, PB}
-    k_block_length == 0 && return acc
-    k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
-    @inbounds for p in 1:k_steps(kernel, k_block_length)
-        acc = accumulate_step(kernel, acc, packed_a, packed_b, p)
+    no_unroll = PB <: UnpackedBView ? Expr(:loopinfo, (Symbol("llvm.loop.unroll.disable"),)) : nothing
+    return quote
+        Base.@_inline_meta
+        k_block_length == 0 && return acc
+        k_block_length > 0 || throw_negative_k_block_length(:add_tile, k_block_length)
+        @inbounds for p in 1:k_steps(kernel, k_block_length)
+            acc = accumulate_step(kernel, acc, packed_a, packed_b, p)
+            $no_unroll
+        end
+        return acc
     end
-    return acc
 end
 
 # B column `j` at K step `p`, as a real or as `(re, im)`; `UnpackedBView`

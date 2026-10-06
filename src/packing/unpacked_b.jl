@@ -26,6 +26,14 @@ Base.length(u::UnpackedBView) = u.per_k * length(u.ksteps)
     @inbounds z = u.storage[u.colbase[j] + u.ksteps[p] + 1]
     return u.transform(z)
 end
+# Column pointer plus one K index shared by all columns: indexed, LLVM's SLP
+# vectoriser can turn the `NR` per-column indices into vector arithmetic inside
+# the K loop, which costs a vector register and spills accumulators.
+@inline function unpacked_b_element(u::UnpackedBView{S, K, NR, F}, j::Int, p::Int) where {S <: DenseVector, K, NR, F}
+    s = u.storage
+    z = GC.@preserve s unsafe_load(pointer(s) + u.colbase[j] * sizeof(eltype(s)), @inbounds(u.ksteps[p]) + 1)
+    return u.transform(z)
+end
 
 @inline b_scalar(u::UnpackedBView, kernel, j::Int, p::Int) =
     convert(scalartype(kernel), unpacked_b_element(u, j, p))
