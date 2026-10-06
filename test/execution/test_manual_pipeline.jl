@@ -16,7 +16,7 @@
     (dN_B, dN_C) = block_descriptors!(nb, N, 0, 4)
     # Scatter axes borrow pointers into the offset buffers.
     GC.@preserve mb nb kb begin
-        axis(d, buf) = QuasiStrided._axis_of(d, buf, 0)
+        axis(d, buf) = QuasiStrided.axis_of(d, buf, 0)
         row_A, row_C = axis(dM_A, mb[1]), axis(dM_C, mb[2])
         col_B, col_C = axis(dN_B, nb[1]), axis(dN_C, nb[2])
 

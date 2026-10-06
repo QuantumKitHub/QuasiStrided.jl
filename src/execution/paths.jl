@@ -2,6 +2,12 @@
 # `plan_contract` decides the path (`select_path`) and stores it in the plan,
 # so `execute!` reaches the path's code statically.
 
+# Nothing to compute: M or N is empty.
+struct EmptyPath end
+
+# `C *= beta`: K is empty.
+struct ScalePath end
+
 # The five-loop nest. `UNPACKED_B`: B read in place instead of packed. `AFF`:
 # per map, in the order M-in-A, M-in-C, N-in-B, N-in-C, K-in-A, K-in-B,
 # whether it is an affine ramp, so that its sliver axes are statically

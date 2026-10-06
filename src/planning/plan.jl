@@ -384,14 +384,17 @@ end
     return k_length > k_block
 end
 
-# The path `execute!` runs past its short-circuits: the dot path, else the
-# outer-product path, else the nest (B packed or read in place).
+# The path `execute!` runs for a nonzero `alpha`: none for an empty C, scaling C
+# for an empty K, else the dot path, the outer-product path or the nest (B
+# packed or read in place).
 function select_path(::Type{K}, m_tile::Int, n_tile::Int, req::PlanRequest{T}, resolved) where {K, T}
     (; mgroup, ngroup, kgroup, modes) = req
     (; blocking, mpack, npack, panel) = resolved
     m_length = axis_length(mgroup)
     n_length = axis_length(ngroup)
     k_length = axis_length(kgroup)
+    (m_length == 0 || n_length == 0) && return EmptyPath()
+    k_length == 0 && return ScalePath()
     if (m_length == 1 || n_length == 1) && !panel && modes.dot !== :never &&
             _dot_applicable(T, req.Astorage, req.Bstorage, kgroup, m_length, n_length, k_length) &&
             dot_fits(T, workspace_sizes(K, m_tile, n_tile, blocking).packed_a, blocking.k_block)

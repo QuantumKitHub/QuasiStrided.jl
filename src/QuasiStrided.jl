@@ -42,8 +42,9 @@ include("planning/plan.jl")
 
 # --- Execution: the five-loop nest and the specialised paths ---
 include("execution/paths.jl")
-include("execution/macrokernel.jl")
+include("execution/nest.jl")
 include("execution/execute.jl")
+include("execution/c_panel.jl")
 include("execution/unpackedb.jl")
 include("execution/dot.jl")
 include("execution/outer.jl")

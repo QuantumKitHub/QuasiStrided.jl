@@ -130,7 +130,7 @@ end
     @test_throws BoundsError QS.checked_span_bounds(0, (0, 0), (0, 0), 0)
 end
 
-@testset "per-call floor: _classify_slivers! accumulates the TRUE block range" begin
+@testset "per-call floor: classify_slivers! accumulates the TRUE block range" begin
     # The range handed to `checked_span_bounds` is the true min/max over the
     # whole block; a too-small range would silently under-validate.
     Random.seed!(20260922)
@@ -142,7 +142,7 @@ end
         buf2 = [rand(-40:40) for _ in 1:blocklen]
         d1 = Vector{BlockDescriptor}(undef, nsliv)
         d2 = Vector{BlockDescriptor}(undef, nsliv)
-        (r1, r2) = QS._classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, nsliv)
+        (r1, r2) = QS.classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, nsliv)
         @test r1 == (minimum(buf1), maximum(buf1))
         @test r2 == (minimum(buf2), maximum(buf2))
         @test all(s -> d1[s].count == min(reg, blocklen - (s - 1) * reg), 1:nsliv)
@@ -155,7 +155,7 @@ end
     buf2[7:12] .= [0, -7, -14, -21, -28, -35]                 # sliver 2, REGULAR, stride -7
     d1 = Vector{BlockDescriptor}(undef, 3)
     d2 = Vector{BlockDescriptor}(undef, 3)
-    (r1, r2) = QS._classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, 3)
+    (r1, r2) = QS.classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, 3)
     @test !d1[2].regular && d1[2].count == 6        # scan branch
     @test d2[2].regular && d2[2].stride == -7       # affine branch, negative stride
     @test r1 == (-500, 500)
@@ -171,7 +171,7 @@ end
         buf = [rand(-30:30) for _ in 1:n]
         rand() < 0.4 && (buf = [3 + 5 * (t - 1) for t in 1:n])   # force a regular run
         d = describe_block(buf, 0, n)
-        GC.@preserve buf @test QS.descriptor_offset_range(d, buf, 0) == extrema(QS._axis_of(d, buf, 0))
+        GC.@preserve buf @test QS.descriptor_offset_range(d, buf, 0) == extrema(QS.axis_of(d, buf, 0))
     end
     @test QS.descriptor_offset_range(BlockDescriptor(0, 0, 0, true), Int[], 0) == (0, -1)
 end
@@ -377,7 +377,7 @@ end
     end
 end
 
-@testset "per-call floor: _ramp_slivers! reproduces _classify_slivers! exactly" begin
+@testset "per-call floor: ramp_slivers! reproduces classify_slivers! exactly" begin
     Random.seed!(31337)
     for trial in 1:150
         D = rand(1:3)
@@ -410,11 +410,11 @@ end
         d1 = Vector{BlockDescriptor}(undef, nsliv)
         d2 = Vector{BlockDescriptor}(undef, nsliv)
         fill_offsets!((buf1, buf2), g, first, blocklen)
-        want = QS._classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, nsliv)
+        want = QS.classify_slivers!(QS.GroupBuffers((buf1, buf2), (d1, d2)), blocklen, reg, nsliv)
 
         r1 = Vector{BlockDescriptor}(undef, nsliv)
         r2 = Vector{BlockDescriptor}(undef, nsliv)
-        got = QS._ramp_slivers!(QS.GroupBuffers((buf1, buf2), (r1, r2)), steps[1], steps[2], first, blocklen, reg, nsliv)
+        got = QS.ramp_slivers!(QS.GroupBuffers((buf1, buf2), (r1, r2)), steps[1], steps[2], first, blocklen, reg, nsliv)
 
         for s in 1:nsliv
             @test r1[s].base == d1[s].base && r1[s].stride == d1[s].stride

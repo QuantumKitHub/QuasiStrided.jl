@@ -122,16 +122,18 @@ end
     for (Ka, alpha) in ((0, 1.0), (Ka, 0.0)), beta in (0.5, 0.0)
         # A and B are poisoned: neither may be read.
         mk = _mm_maker(Float64, Ma, Ka, Na, 1; ABfill = NaN)
-        C, _ = _run_fresh(execute!, mk, alpha, beta)
+        C, plan = _run_fresh(execute!, mk, alpha, beta)
         @test C == beta .* Array(mk()[1])
+        Ka == 0 && @test _path_of(plan) isa QuasiStrided.ScalePath
     end
     # beta = 0 never reads a NaN C, across several blocks.
     C, _ = _run_fresh(execute!, _mm_maker(Float64, 11, 10, 9, 2; Cfill = NaN), 2.5, 0.0; m_block = 4, k_block = 4, n_block = 4)
     @test C ≈ _ref_of(_mm_maker(Float64, 11, 10, 9, 2), 2.5, 0.0)
     # Empty M or N: a no-op.
     for (M, N) in ((3, 0), (0, 3))
-        C, _ = _run_fresh(execute!, _mm_maker(Float64, M, 4, N, 3; Cfill = NaN), 1.0, 2.0)
+        C, plan = _run_fresh(execute!, _mm_maker(Float64, M, 4, N, 3; Cfill = NaN), 1.0, 2.0)
         @test size(C) == (M, N)
+        @test _path_of(plan) isa QuasiStrided.EmptyPath
     end
     # Singleton extents, and two K labels against a singleton free label.
     mk2K = () -> (
@@ -168,7 +170,7 @@ end
     kernel = SIMDKernel(Val(8), Val(6), Float64, Val(4))
     # Default everything; several blocks with tail tiles in M and N (the
     # vectorized store's row tail); a conj transform, which the real path never
-    # builds but which must still cross `_pack_sliver!` concretely typed.
+    # builds but which must still cross `pack_sliver!` concretely typed.
     Cmat = zeros(Ma, Na)
     p = _mm_plan(Cmat, Amat, Bmat)
     plans = (
