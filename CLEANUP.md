@@ -30,7 +30,7 @@ TTFX when codegen is touched).
 | 15 | Alternative paths | `unpackedb.jl` (oracle gone in chunk 12) | done |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | done |
-| 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | |
+| 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | in progress |
 | 19 | Benchmarks (optional) | `benchmark/` | |
 
 ## Decisions
@@ -311,10 +311,25 @@ Conjugated-output check only in `planned`; the aliasing check moves into
 ours (TO's `contract_labels` builds `Vector{Char}`s, allocating and
 non-inferable); `tensoradd!`/`tensortrace!` stay forwarded to StridedNative.
 As applied: `planned`'s options are keywords (free); `contract!` 530 → 455 ns
-at 2×2. Open: the aliasing check (`Base.mightalias` on StridedViews) rejects
-any output sharing a parent with A or B, even disjoint slices; `build_plan`
+at 2×2. The aliasing check (`Base.mightalias` on StridedViews) rejects any
+output sharing a parent with A or B, even disjoint slices: deferred to
+https://github.com/lkdvos/QuasiStrided.jl/issues/18; `build_plan`
 specialises separately for plan-only and executing requests (200 → 304 on a
 mixed workload, nothing below it grows).
+
+### D21. Test infrastructure (chunk 18, decided)
+
+Data: the suite is ~98% compilation (10m22s outside `Pkg.test`; 19–22 min
+under `Pkg.test`'s `--check-bounds=yes`, which stays the default; document
+`julia_args = ["--check-bounds=auto"]` for a fast local run). Pass 1:
+ParallelTestRunner.jl (each file in its own process/module); one helper file
+per folder plus shared fixtures in `test/helpers.jl`, no test file depending
+on another; test files mirror `src/` (`test_per_call_overhead.jl` split by
+concern, label-order tests to `test_labels.jl`, panel tests to
+`test_c_panel.jl`); Aqua ambiguities for our package only. Pass 2: an audit
+of what is tested more than once (low-level tests subsumed by high-level ones
+or vice versa) and of compile-heavy loops, then agreed trims, checked against
+the set of kernel/path/store instantiations the suite compiles.
 
 ### Complex blocking benchmark (after chunk 11)
 
