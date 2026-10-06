@@ -27,7 +27,7 @@ TTFX when codegen is touched).
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | done |
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | done |
 | 14 | Five-loop nest | `execution/macrokernel.jl` (now `nest.jl`), `execute.jl`, `c_panel.jl` | done (ramp flags pending) |
-| 15 | Alternative paths | `oracle.jl`, `unpackedb.jl` | |
+| 15 | Alternative paths | `unpackedb.jl` (oracle gone in chunk 12) | done |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | |
 | 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | |
@@ -245,6 +245,20 @@ nests of degenerate plans are gone. Ramp-flag A/B: `benchmark/bench_ramp_flags.j
 (flags cleared also disables the closed-form ramp descriptors, so it bounds
 the cost of dropping them). Workstation, indicative: large cases equal, 24³
 and 64³ 20–50% slower without flags.
+Slurm round 1 (jobs 7183225–7, Icelake/Genoa/Rome; Icelake and Rome ran on a
+tree with chunk-15 edits in progress, ratios are within-process): off/on
+1.07–1.35 at 24³, up to 1.10 at 64³, 1.00 at 512³, ccsd(t) up to 1.07. But
+off is *faster* in three cases: C64 12×512×512 on Icelake (0.52), F64
+12×512×512 (0.75) and 64³ (0.91) on Genoa, all unpacked-B. Next: explain
+that anomaly, then a round with a runtime-closed-form-ramp variant.
+
+### D18. Unpacked B (chunk 15, applied: 337dc4a)
+
+`UnpackedBView` is a B source next to `PackedPanel` (`packing/unpacked_b.jl`);
+one tile loop in `nest.jl` takes its B sliver from either, by the path's
+`UNPACKED_B`; the rule moves to `plan.jl`; eligibility is a kernel trait
+(`reads_b_by_element`) defined beside each kernel. `unpackedb.jl` goes. The
+`M <= 256` cutoff stays until measured (see possible improvements).
 
 ### Complex blocking benchmark (after chunk 11)
 
@@ -261,9 +275,10 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Ramp-flag benchmark: user submits `bench_ramp_flags.jl` on Icelake/Genoa/
-   Rome; decide on the `NestPath` flags (D17) from it.
-2. Chunk 15: alternative paths (`unpackedb.jl`; the oracle is already gone).
+1. Ramp flags (D17): investigate why clearing them is faster on the
+   unpacked-B small-M cases, then round 2 with a variant keeping closed-form
+   ramps at runtime but no static axis-type flags.
+2. Chunk 16: degenerate paths (`dot.jl`, `outer.jl`).
 3. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
@@ -291,6 +306,10 @@ blocking.jl (uncommitted until the full suite passes).
   vector store; for N the order mainly decides ramp detection and C locality,
   while B's pack (and the unpacked-B path) would prefer B's strides. Measure on
   suite layouts where B's and C's N strides disagree.
+
+- Unpacked-B cutoff `M <= 256` is a constant; a cutoff from the reuse a
+  packed B sliver would get (about `m_length / MR` M slivers) may be more
+  principled. Benchmark before changing.
 
 ## Open items (to revisit in their chunk)
 
