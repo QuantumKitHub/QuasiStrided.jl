@@ -29,7 +29,7 @@ TTFX when codegen is touched).
 | 14 | Five-loop nest | `execution/macrokernel.jl` (now `nest.jl`), `execute.jl`, `c_panel.jl` | done (ramp flags pending) |
 | 15 | Alternative paths | `unpackedb.jl` (oracle gone in chunk 12) | done |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
-| 17 | TensorOperations backend | `integrations/tensoroperations.jl` | in progress |
+| 17 | TensorOperations backend | `integrations/tensoroperations.jl` | done |
 | 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | |
 | 19 | Benchmarks (optional) | `benchmark/` | |
 
@@ -300,7 +300,7 @@ complex 1×2 kernels at M = 1 now take the dot path (agree to rounding). Dot
 plans allocate 8.5 KB instead of 150 KB; specialisation counts and TTFX
 unchanged.
 
-### D20. TensorOperations backend (chunk 17, decided)
+### D20. TensorOperations backend (chunk 17, applied: e2bf2ec)
 
 No continuation: α/β become ordinary arguments of `planned` and fields of the
 request (`nothing` = build the plan only); after the barrier `build_plan`
@@ -310,6 +310,11 @@ Conjugated-output check only in `planned`; the aliasing check moves into
 `planned` so `plan_contract`/`contract!` get it too. Label translation stays
 ours (TO's `contract_labels` builds `Vector{Char}`s, allocating and
 non-inferable); `tensoradd!`/`tensortrace!` stay forwarded to StridedNative.
+As applied: `planned`'s options are keywords (free); `contract!` 530 → 455 ns
+at 2×2. Open: the aliasing check (`Base.mightalias` on StridedViews) rejects
+any output sharing a parent with A or B, even disjoint slices; `build_plan`
+specialises separately for plan-only and executing requests (200 → 304 on a
+mixed workload, nothing below it grows).
 
 ### Complex blocking benchmark (after chunk 11)
 
@@ -326,7 +331,7 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Chunk 17 being applied (D20); then chunk 18 (test infrastructure).
+1. Chunk 18: test infrastructure (`runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/`; suite time, cross-file helpers, misplaced testsets).
 2. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
