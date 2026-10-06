@@ -28,7 +28,7 @@ TTFX when codegen is touched).
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | done |
 | 14 | Five-loop nest | `execution/macrokernel.jl` (now `nest.jl`), `execute.jl`, `c_panel.jl` | done (ramp flags pending) |
 | 15 | Alternative paths | `unpackedb.jl` (oracle gone in chunk 12) | done |
-| 16 | Degenerate paths | `dot.jl`, `outer.jl` | |
+| 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | |
 | 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | |
 | 19 | Benchmarks (optional) | `benchmark/` | |
@@ -257,7 +257,17 @@ step, costing a register: the ComplexF64 kernel spills 12 accumulators per
 step. On Genoa codegen the runtime-stride K loop is also unrolled 8×, spilling
 GPRs. Fix: dense B loads via per-column pointers with one shared K index, and
 no unrolling of the unpacked-B K loop (ea97e6d; −20% on C64 12×512×512 locally;
-Slurm A/B pending).
+Slurm A/B 7184013–5 confirmed: C64 small M 0.51 on Icelake, F64 small M /
+64³ / 24³ 0.73 / 0.83 / 0.84 on Genoa, Rome neutral.
+With the fix, flags-cleared costs 7–35% at 24³ and 5–10% at 64³. Round 2
+(A/B 7184157–9, `ec3d30a` vs experiment `3b2e48e` on branch
+`exp/runtime-axis-types`): closed-form descriptors with runtime axis types
+match the static flags within noise (±4%, from the identical flags-cleared
+column) except F64 partial-ramp 1.07 and ccsd(t) 1.05 on Icelake.
+Decision: `NestPath` shrinks to `{UNPACKED_B, SPLIT}`; axis types are a
+runtime `axis_of` choice; per-group ramp detection runs at runtime once per
+call, keeping the closed-form descriptors; the 512-entry table goes. Then
+reconsider callable paths. Applied after chunk 16.
 
 ### D18. Unpacked B (chunk 15, applied: 337dc4a)
 
@@ -267,7 +277,7 @@ one tile loop in `nest.jl` takes its B sliver from either, by the path's
 (`reads_b_by_element`) defined beside each kernel. `unpackedb.jl` goes. The
 `M <= 256` cutoff stays until measured (see possible improvements).
 
-### D19. Degenerate paths (chunk 16, decided)
+### D19. Degenerate paths (chunk 16, applied: 030d4d0)
 
 `DotPath{MATB}` dispatched statically, with a `dot_operands(plan, Val(MATB))`
 picking matrix/vector sides; the workspace is sized per path (dot: its vector
@@ -278,6 +288,11 @@ VectorInterface's `Zero()`/`One()` (direct dependency): one `axpby` defined by
 dispatch for the vector/scalar stores, `axpby_at!`, the outer path and the
 panel load; β stays a runtime number through the nest and `static_beta`
 converts it only at the existing branch points (no 3× specialisation).
+As applied: helpers take a β case (applying `static_beta` inside them cost
+0.4 s of complex TTFX); the panel load keeps `iszero(beta)`; two named
+complex 1×2 kernels at M = 1 now take the dot path (agree to rounding). Dot
+plans allocate 8.5 KB instead of 150 KB; specialisation counts and TTFX
+unchanged.
 
 ### Complex blocking benchmark (after chunk 11)
 
@@ -294,10 +309,8 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Ramp flags (D17): investigate why clearing them is faster on the
-   unpacked-B small-M cases, then round 2 with a variant keeping closed-form
-   ramps at runtime but no static axis-type flags.
-2. Chunk 16: degenerate paths (`dot.jl`, `outer.jl`).
+1. Ramp flags (D17): shrink `NestPath` as decided (agent running).
+2. Chunk 17: TensorOperations backend (`integrations/tensoroperations.jl`).
 3. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
@@ -344,8 +357,6 @@ blocking.jl (uncommitted until the full suite passes).
   why they are structs, not functions. Measure whether the six `NestPath` ramp
   flags pay off (regular vs scattered layouts, specialisation count); if they
   go, consider callable paths instead of `execute_path!` (chunk 14).
-- `_execute_dot!` takes `matB` as a runtime `Bool` although `DotPath{MATB}`
-  makes it static (chunk 16).
 - `plan_request` is spelled out twice in `planned` (swapped and not).
 - `workspace.jl`/`barrier.jl` live in `execution/` but are included in the
   planning section (chunk 12).
