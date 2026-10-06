@@ -37,7 +37,7 @@ QuasiStridedBackend(; accumulator = nothing) = QuasiStridedBackend{accumulator}(
 #     pA = ((3,1,4),(2,5)), pB = ((3,1),(2,4)), pAB = ((4,2),(5,1,3))
 #     -> indA = (2,-1,1,3,-2), indB = (-2,4,-1,5), indC = (4,2,5,1,3).
 # No validation: `TO.argcheck_tensorcontract` runs first.
-function _qs_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
+function contraction_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
     NoA, Nk = TO.numout(pA), TO.numin(pA)
     qA = TupleTools.invperm(linearize(pA))
     qB = TupleTools.invperm(linearize(pB))
@@ -46,53 +46,27 @@ function _qs_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
     return indA, indB, linearize(pAB)
 end
 
-@noinline _qs_throw(msg::AbstractString) = throw(ArgumentError(msg))
-
-@noinline function _qs_check_eligible(C, A, B)
-    f = TO.tensorcontract!
-    all(isstrided, (A, B, C)) || _qs_throw(
-        "QuasiStridedBackend requires strided arrays for $f, got " *
-            join(map(typeof, (C, A, B)), ", ")
+@noinline function check_strided(C, A, B)
+    all(isstrided, (A, B, C)) || throw(
+        ArgumentError(
+            "QuasiStridedBackend requires strided arrays for $(TO.tensorcontract!), got " *
+                join(map(typeof, (C, A, B)), ", ")
+        )
     )
     return nothing
 end
 
-@inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β, accumulator)
+# The aliasing check runs on the views in `planned`: Base has no `dataids` for
+# a `PermutedDimsArray`, but a `StridedView` forwards to its parent.
+@inline function prepare_contraction(C, A, pA, B, pB, pAB, α, β, accumulator)
     T = compute_type(eltype(A), eltype(B), eltype(C), accumulator)
-    _qs_check_eligible(C, A, B)
+    check_strided(C, A, B)
     TO.argcheck_tensorcontract(C, A, pA, B, pB, pAB)
     TO.dimcheck_tensorcontract(C, A, pA, B, pB, pAB)
-
-    Cv, Av, Bv = StridedView(C), StridedView(A), StridedView(B)
-    # On the wrapped views: Base has no `dataids` for `PermutedDimsArray`, but a
-    # `StridedView` forwards to its parent.
-    (Base.mightalias(Cv, Av) || Base.mightalias(Cv, Bv)) && _qs_throw(
-        "output tensor must not be aliased with an input tensor in $(TO.tensorcontract!)"
-    )
-    isconj(Cv, false) && _qs_throw(
-        "output tensor of $(TO.tensorcontract!) must not be a conjugated view: " *
-            "QuasiStrided writes through to the parent array and does not apply " *
-            "`StridedView.op` on store, so a conjugated `C` would be silently wrong"
-    )
-
-    # Dropping `Zero()`/`One()` is safe: the kernels branch on `iszero(alpha/beta)`.
-    indA, indB, indC = _qs_labels(pA, pB, pAB)
-    return Cv, Av, Bv, indA, indB, indC, convert(T, α), convert(T, β)
-end
-
-# The continuation handed to `planned`: `execute!` and `release!` on the
-# concretely typed plan. A struct, not a closure, so the fields are concretely
-# typed.
-struct Execute{T, AL}
-    alpha::T
-    beta::T
-    allocator::AL
-end
-
-function (e::Execute)(plan::ContractPlan)
-    execute!(plan, e.alpha, e.beta)
-    release!(plan, e.allocator)
-    return nothing
+    # `Zero()`/`One()` become numbers: `static_beta` recovers the β cases
+    # at the branch points.
+    indA, indB, indC = contraction_labels(pA, pB, pAB)
+    return StridedView(C), StridedView(A), StridedView(B), indA, indB, indC, convert(T, α), convert(T, β)
 end
 
 # `planned` builds, runs and releases the plan behind the kernel dispatch
@@ -106,12 +80,9 @@ function TO.tensorcontract!(
         α::Number, β::Number,
         backend::QuasiStridedBackend{AC}, allocator = TO.DefaultAllocator()
     ) where {AC}
-    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β, AC)
+    Cv, Av, Bv, indA, indB, indC, α′, β′ = prepare_contraction(C, A, pA, B, pB, pAB, α, β, AC)
     checkpoint = TO.allocator_checkpoint!(allocator)
-    planned(
-        Execute(α′, β′, allocator), Cv, Av, indA, Bv, indB, indC,
-        nothing, conjA, conjB, nothing, nothing, nothing, allocator, AC, PathModes()
-    )
+    planned(Cv, Av, indA, Bv, indB, indC, α′, β′; conjA, conjB, allocator, accumulator = AC)
     TO.allocator_reset!(allocator, checkpoint)
     return C
 end

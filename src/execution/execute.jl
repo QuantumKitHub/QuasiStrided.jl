@@ -89,7 +89,7 @@ function contract!(
         indC::NTuple{NC, Int};
         accumulator::Union{Nothing, Type{Float32}, Type{Float64}} = nothing
     ) where {NA, NB, NC}
-    plan = plan_contract(C, A, indA, B, indB, indC; accumulator)
-    execute!(plan, alpha, beta)
+    T = compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    planned(C, A, indA, B, indB, indC, convert(T, alpha), convert(T, beta); accumulator)
     return C
 end

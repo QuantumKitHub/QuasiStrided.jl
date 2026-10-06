@@ -157,6 +157,14 @@ end
         Set((typeof(identity), typeof(conj), typeof(transpose), typeof(adjoint)))
 end
 
+@testset "plan_contract and contract! reject an output aliased with an input" begin
+    M = randn(8, 4)
+    Cv, Av, Bv = StridedView(M)[1:4, :], StridedView(M)[5:8, :], StridedView(randn(4, 4))
+    @test_throws ArgumentError plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3))
+    @test_throws ArgumentError plan_contract(Cv, Bv, (1, 2), Av, (2, 3), (1, 3))
+    @test_throws ArgumentError contract!(Cv, 1.0, Av, (1, 2), Bv, (2, 3), 0.0, (1, 3))
+end
+
 
 # Label order within M/N and the M/N orientation swap.
 const _lo_order = QuasiStrided.order_free_labels
@@ -180,7 +188,7 @@ const _LO_CASES = (
 )
 function _lo_labels(IA, IB)
     pA, pB, pAB = TO.contract_indices(IA, IB, _LO_IC)
-    return QuasiStrided._qs_labels(pA, pB, pAB), (pA, pB, pAB)
+    return QuasiStrided.contraction_labels(pA, pB, pAB), (pA, pB, pAB)
 end
 
 # Engine-free reference: alpha * sum_K conj?(A) conj?(B) + beta * C, one loop

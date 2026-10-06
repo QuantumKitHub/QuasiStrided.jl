@@ -77,7 +77,7 @@ Plan `C[indC] = A[indA] * B[indB]` (every label in exactly two operands):
 resolve the labels into M/N/K `AxisGroup`s, validate axis lengths and eltypes,
 choose the kernel and blocking, and preallocate every buffer
 [`execute!`](@ref) needs. Throws `ArgumentError`/`DimensionMismatch` on
-invalid input.
+invalid input; `C` must not share memory with `A` or `B`.
 
   * Each operand's eltype is one of `Float32`, `Float64`, `ComplexF32`,
     `ComplexF64`; a complex `A` or `B` needs a complex `C`. The compute type
@@ -127,18 +127,19 @@ function plan_contract(
         path_modes::PathModes = PathModes()
     ) where {NA, NB, NC}
     return planned(
-        identity, C, A, indA, B, indB, indC,
+        C, A, indA, B, indB, indC, nothing, nothing;
         kernel, conjA, conjB, m_block, k_block, n_block, allocator, accumulator, path_modes
     )
 end
 
 # Everything planning needs that is concretely typed before the kernel is
 # known (`run` is the chosen M composite's unit-stride run in C). `T` is the
-# phantom compute type.
+# phantom compute type; `alpha`/`beta` are `nothing` to build the plan only.
 struct PlanRequest{
-        T, F, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC, AL,
+        T, S <: Union{T, Nothing}, GM <: AxisGroup, GN <: AxisGroup, GK <: AxisGroup, SA, SB, SC, AL,
     }
-    f::F
+    alpha::S
+    beta::S
     mgroup::GM
     ngroup::GN
     kgroup::GK
@@ -157,12 +158,12 @@ struct PlanRequest{
 end
 
 @inline function plan_request(
-        ::Type{T}, f::F, mgroup::GM, ngroup::GN, kgroup::GK,
+        ::Type{T}, alpha::S, beta::S, mgroup::GM, ngroup::GN, kgroup::GK,
         Astorage::SA, Abase::Int, Bstorage::SB, Bbase::Int, Cstorage::SC, Cbase::Int,
         run::Int, m_block, k_block, n_block, allocator::AL, modes::PathModes
-    ) where {T, F, GM, GN, GK, SA, SB, SC, AL}
-    return PlanRequest{T, F, GM, GN, GK, SA, SB, SC, AL}(
-        f, mgroup, ngroup, kgroup, Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
+    ) where {T, S, GM, GN, GK, SA, SB, SC, AL}
+    return PlanRequest{T, S, GM, GN, GK, SA, SB, SC, AL}(
+        alpha, beta, mgroup, ngroup, kgroup, Astorage, Abase, Bstorage, Bbase, Cstorage, Cbase,
         run, m_block, k_block, n_block, allocator, modes
     )
 end
@@ -190,16 +191,18 @@ op_conjugates(::typeof(adjoint)) = true
 isconj(v::StridedView{T}, flag::Bool) where {T} =
     (T <: Complex) && (flag ⊻ op_conjugates(v.op))
 
-# `plan_contract`'s body, positional, with a continuation `f` applied to the
-# plan behind the kernel barrier, where its type is concrete (the
-# TensorOperations adapter passes an executor).
+# `plan_contract`'s body. With `alpha`/`beta` (of the compute type) the plan
+# is executed and released behind the kernel barrier, where its type is
+# concrete, and `nothing` is returned; with `nothing` the plan is returned.
 function planned(
-        f::F, C::StridedView, A::StridedView, indA::NTuple{NA, Int},
+        C::StridedView, A::StridedView, indA::NTuple{NA, Int},
         B::StridedView, indB::NTuple{NB, Int}, indC::NTuple{NC, Int},
-        kernel, conjA::Bool, conjB::Bool,
-        m_block::Union{Int, Nothing}, k_block::Union{Int, Nothing}, n_block::Union{Int, Nothing},
-        allocator, accumulator::AC, modes::PathModes
-    ) where {F, NA, NB, NC, AC}
+        alpha::S, beta::S;
+        kernel = nothing, conjA::Bool = false, conjB::Bool = false,
+        m_block::Union{Int, Nothing} = nothing, k_block::Union{Int, Nothing} = nothing,
+        n_block::Union{Int, Nothing} = nothing, allocator = TO.DefaultAllocator(),
+        accumulator::AC = nothing, path_modes::PathModes = PathModes()
+    ) where {NA, NB, NC, S, AC}
     T = compute_type(eltype(A), eltype(B), eltype(C), accumulator)
     K = default_kernel_type(T, eltype(A), eltype(B))
     check_kernel_domain(kernel, eltype(A), eltype(B))
@@ -212,6 +215,8 @@ function planned(
                 "writing a conjugated output is not supported"
         )
     )
+    (Base.mightalias(C, A) || Base.mightalias(C, B)) &&
+        throw(ArgumentError("plan_contract: C must not share memory with A or B"))
     atransform = isconj(A, conjA) ? conj : identity
     btransform = isconj(B, conjB) ? conj : identity
 
@@ -242,16 +247,16 @@ function planned(
         # together; the sum is unchanged.
         kgroup_swapped = AxisGroup(korder, (indB, B), (indA, A))  # maps: (B, A)
         req_swapped = plan_request(
-            T, f, ngroup, mgroup, kgroup_swapped,
+            T, alpha, beta, ngroup, mgroup, kgroup_swapped,
             parent(B), offset(B), parent(A), offset(A), parent(C), offset(C),
-            run_n, m_block, k_block, n_block, allocator, modes
+            run_n, m_block, k_block, n_block, allocator, path_modes
         )
         return plan_with_kernel(kernel, K, btransform, atransform, req_swapped)
     end
     req = plan_request(
-        T, f, mgroup, ngroup, kgroup,
+        T, alpha, beta, mgroup, ngroup, kgroup,
         parent(A), offset(A), parent(B), offset(B), parent(C), offset(C),
-        run_m, m_block, k_block, n_block, allocator, modes
+        run_m, m_block, k_block, n_block, allocator, path_modes
     )
     return plan_with_kernel(kernel, K, atransform, btransform, req)
 end
@@ -455,7 +460,7 @@ build_plan(::Val{Kern}, path, atransform::TA, btransform::TB, slot::Base.RefValu
     build_plan(Kern(), path, atransform, btransform, slot)
 
 # The plan on a concrete kernel, path and transform pair (a named kernel's
-# transform Unions die here). `req.f` runs in here, on the concrete plan type.
+# transform Unions die here).
 function build_plan(
         kernel::Microkernel, path::P, atransform::TA, btransform::TB, slot::Base.RefValue{R}
     ) where {P, TA, TB, R}
@@ -468,7 +473,14 @@ function build_plan(
         req.Astorage, req.Abase, req.Bstorage, req.Bbase, req.Cstorage, req.Cbase,
         atransform, btransform, ws, mpack, npack
     )
-    return req.f(plan)
+    return execute_request(plan, req.alpha, req.beta, req.allocator)
+end
+
+execute_request(plan::ContractPlan, ::Nothing, ::Nothing, allocator) = plan
+function execute_request(plan::ContractPlan{T}, alpha::T, beta::T, allocator) where {T}
+    execute!(plan, alpha, beta)
+    release!(plan, allocator)
+    return nothing
 end
 
 release!(plan::ContractPlan, allocator) = release!(plan.workspace, allocator)
