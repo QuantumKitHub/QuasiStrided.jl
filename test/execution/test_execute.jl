@@ -250,7 +250,7 @@ function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
     (n_block, ns) = split(p.ngroup, 2, p.blocking.n_block, d.n_block)
     q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, m_block, n_block)
     @assert q.mgroup == p.mgroup && q.ngroup == p.ngroup
-    path = QuasiStrided.nest_path(false, is_split(ms), is_split(ns))
+    path = QuasiStrided.nest_path(false, q.mgroup, q.ngroup, q.kgroup, is_split(ms), is_split(ns))
     return ContractPlan(q; path, mpack = ms, npack = ns)
 end
 
@@ -262,8 +262,8 @@ end
     @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
     host = splits(QuasiStrided.split_capacity(target_profile(), true))
     @test is_split(p.mpack) == host
-    host && @test _path_of(p) isa NestPath{false, (true, false)}
-    @test _path_of(plan_of(4)) isa NestPath{<:Any, (false, false)}
+    host && @test _path_of(p) isa NestPath{false, <:Any, (true, false)}
+    @test _path_of(plan_of(4)) isa NestPath{<:Any, <:Any, (false, false)}
 end
 
 @testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
@@ -277,7 +277,7 @@ end
         iszero(beta) && fill!(Cv, NaN)
         Cref = _lo_reference(iszero(beta) ? zero(Array(Cv)) : Array(Cv), Av, iA, Bv, iB, iC; conjB, alpha = 1.3, beta)
         plan = _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; conjB, m_block, kernel)
-        @test _path_of(plan) isa NestPath{false, (true, ind === _SP_BOTH)}
+        @test _path_of(plan) isa NestPath{false, <:Any, (true, ind === _SP_BOTH)}
         execute!(plan, 1.3, beta)
         @test Array(Cv) ≈ Cref rtol = 100 * eps(real(T))
     end

@@ -4,7 +4,7 @@
 #   sbatch [--reservation=rocky8] [--constraint=icelake|genoa|rome] [--time=..] \
 #       benchmark/submit_ab.sh <rev_a> <rev_b> <script.jl> [script args...]
 #
-# e.g. `sbatch --constraint=genoa benchmark/submit_ab.sh main HEAD bench_degenerate.jl`.
+# e.g. `sbatch --constraint=genoa benchmark/submit_ab.sh main HEAD bench_ramp_flags.jl`.
 # Each revision runs from its own temporary worktree with its own copy of the
 # script, alternately a, b, a, b, ... for $QS_AB_ROUNDS rounds (default 2), so
 # slow drift on the node hits both alike. Outputs go to
