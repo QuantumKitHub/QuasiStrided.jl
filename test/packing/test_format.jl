@@ -1,3 +1,5 @@
+include("../helpers.jl")
+
 using QuasiStrided: RealFormat, PlanarFormat, OneEFormat,
     InterleavedFormat, realtype, sliver_width
 

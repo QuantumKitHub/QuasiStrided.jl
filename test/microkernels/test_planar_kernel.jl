@@ -1,3 +1,5 @@
+include("helpers.jl")
+
 using QuasiStrided: PlanarKernel, lanewidth,
     KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 

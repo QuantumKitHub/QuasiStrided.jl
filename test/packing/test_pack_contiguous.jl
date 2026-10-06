@@ -1,7 +1,9 @@
-# The vectorized complex packing fast path (`pack_complex_contiguous!`),
-# checked bitwise against test_pack_real.jl's reference layouts. Gate
+# The contiguous packing fast paths: the real one, and the vectorized complex
+# one (`pack_complex_contiguous!`) checked bitwise against the reference layouts. Gate
 # expectations derive from the live profile, so test/forced_isa_runner.jl
 # checks the same outputs with the fast path off.
+
+include("helpers.jl")
 
 using QuasiStrided: target_profile, unknown_target, TargetProfile, CacheLevel,
     kernel_shapes, PlanarKernel, OneMKernel, FMAddSubKernel, SliverSpec, complex_contiguous_eligible,
@@ -96,4 +98,35 @@ end
         @test !complex_fastpath_isa_eligible(synthetic(key))
     end
     @test FASTPATH_ON == (target_profile().isa === :avx512)
+end
+
+@testset "pack! contiguous fast path: fires exactly when eligible ($T, L=$L, side $i)" for
+    T in (Float64, Float32), (L, i) in ((4, 1), (16, 1), (6, 2))
+
+    kernel = Descriptor(Val(L), Val(L), T)
+    vals = T.(collect(1.0:2000.0))
+    mixed = (T === Float64 ? Float32 : Float64).(collect(1.0:2000.0) ./ 3)
+    storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals), mixed) : (vals, mixed)
+    koffs = [7, 900, 300, 1500]
+    contig = collect(0:(L - 1))
+    spec = sliver_spec(kernel, i)
+    for storage in storages
+        steps = Any[AffineAxis(0, L, 5), AffineAxis(1800, -L, 6), view(koffs, 1:4)]
+        lanes = Any[
+            (AffineAxis(0, 1, L), true), (AffineAxis(5, 1, L), true),
+            (AffineAxis(0, 2, L), false), (AffineAxis(L + 3, -1, L), false),
+            (AffineAxis(0, 1, L - 1), false), (view(contig, 1:L), false),
+        ]
+        for (lane, eligible) in lanes, step in steps, f in (identity, conj, x -> -x)
+            src, g = pack_fixture(storage, 11, lane, step)
+            k_block_length = length(step)
+            @test real_contiguous_eligible(src, spec, f, length(lane)) ==
+                (eligible && (f === identity || f === conj))
+            got, canaries = pack_into(:panel, T, L * k_block_length, src, spec, f)
+            @test got == ref_pack(RealFormat(), T, L, k_block_length, length(lane), g, f)
+            @test canaries
+        end
+    end
+    @test copies_unchanged(conj, T)
+    @test !copies_unchanged(conj, complex(T))   # conj is not the identity on complex
 end

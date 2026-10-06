@@ -1,3 +1,5 @@
+include("helpers.jl")
+
 using QuasiStrided: FMAddSubKernel, PlanarKernel, OneMKernel,
     InterleavedFormat, lanewidth, kernel_shapes, packed_panel,
     kernel_from_shape, default_kernel_type, accumulator_planes, target_profile, PackedPanel

@@ -1,65 +1,6 @@
-# pack! for real kernels against direct storage indexing. The reference
-# layouts and fixtures here are shared with the two complex packing files
-# included after this one.
+# pack! for real kernels against direct storage indexing.
 
-using QuasiStrided: RealFormat, PlanarFormat, OneEFormat, InterleavedFormat, PackedPanel,
-    packed_panel, packed_length, copies_unchanged, real_contiguous_eligible
-
-# Packed layouts written from the format definitions, not from the offset
-# helpers. `g(t, p)` is the source element at lane `t`, K step `p`; lanes
-# `>= valid` are padding and stay literal `+0.0`.
-_ref_emit!(o, ::RealFormat, vr, p, t, z) = (o[vr * p + t + 1] = z)
-function _ref_emit!(o, ::PlanarFormat, vr, p, t, z)
-    o[2vr * p + t + 1] = real(z)
-    return o[2vr * p + vr + t + 1] = imag(z)
-end
-function _ref_emit!(o, ::InterleavedFormat, vr, p, t, z)
-    o[2vr * p + 2t + 1] = real(z)
-    return o[2vr * p + 2t + 2] = imag(z)
-end
-function _ref_emit!(o, ::OneEFormat, vr, p, t, z)   # [[re, -im], [im, re]]
-    b = 4vr * p
-    o[b + 2t + 1], o[b + 2t + 2] = real(z), imag(z)
-    return o[b + 2vr + 2t + 1], o[b + 2vr + 2t + 2] = -imag(z), real(z)
-end
-_ref_rpe(::RealFormat) = 1
-_ref_rpe(::Union{PlanarFormat, InterleavedFormat}) = 2
-_ref_rpe(::OneEFormat) = 4
-function ref_pack(fmt, ::Type{T}, vr, k_block_length, valid, g, f) where {T}
-    out = zeros(real(T), _ref_rpe(fmt) * vr * k_block_length)
-    for p in 0:(k_block_length - 1), t in 0:(valid - 1)
-        _ref_emit!(out, fmt, vr, p, t, convert(T, f(g(t, p))))
-    end
-    return out
-end
-
-resized(ax::AffineAxis, n) = AffineAxis(ax.base, ax.stride, n)
-resized(ax::SubArray, n) = view(parent(ax), 1:n)
-
-# A sliver source with lanes along `lane` and K steps along `step` (B's tile
-# transposed), and its direct-indexing reader.
-function pack_fixture(storage, base, lane, step)
-    return Tile(storage, base, lane, step), (t, p) -> storage[base + lane[t + 1] + step[p + 1] + 1]
-end
-
-# Packs `src` into a destination of kind `dst` (canaried unless a bare Vector)
-# and returns the packed prefix and whether the canaries survived.
-function pack_into(dst, R, len, src, spec, f)
-    buf = fill(R(-777), len + 12)
-    if dst === :vector
-        v = buf[1:len]
-        @test pack!(v, src, spec, f) === v
-        return v, true
-    end
-    GC.@preserve buf begin
-        d = packed_panel(buf, 5, len)
-        @test pack!(d, src, spec, f) === d
-    end
-    return buf[5:(4 + len)], all(==(R(-777)), buf[1:4]) && all(==(R(-777)), buf[(5 + len):end])
-end
-
-const SCATTER_LANES = [5, 30, 1, 17, 9, 44, 2, 23, 11, 38, 7, 60, 14, 51, 3, 29]
-const SCATTER_STEPS = [7, 900, 300, 1500, 60, 1210, 420]
+include("helpers.jl")
 
 @testset "pack! ($T): every stride kind and tail width vs direct indexing" for T in (Float64, Float32)
     MR, NR, k_block_length = 8, 6, 5
@@ -97,37 +38,6 @@ end
     got_b, _ = pack_into(:panel, Float64, 30, transpose(tile_b), sliver_spec(kernel, 2), identity)
     got_a, _ = pack_into(:panel, Float64, 30, transpose(tile_b), sliver_spec(kernel, 1), identity)
     @test got_b == got_a
-end
-
-@testset "pack! contiguous fast path: fires exactly when eligible ($T, L=$L, side $i)" for
-    T in (Float64, Float32), (L, i) in ((4, 1), (16, 1), (6, 2))
-
-    kernel = Descriptor(Val(L), Val(L), T)
-    vals = T.(collect(1.0:2000.0))
-    mixed = (T === Float64 ? Float32 : Float64).(collect(1.0:2000.0) ./ 3)
-    storages = @static isdefined(Base, :Memory) ? (vals, copyto!(Memory{T}(undef, 2000), vals), mixed) : (vals, mixed)
-    koffs = [7, 900, 300, 1500]
-    contig = collect(0:(L - 1))
-    spec = sliver_spec(kernel, i)
-    for storage in storages
-        steps = Any[AffineAxis(0, L, 5), AffineAxis(1800, -L, 6), view(koffs, 1:4)]
-        lanes = Any[
-            (AffineAxis(0, 1, L), true), (AffineAxis(5, 1, L), true),
-            (AffineAxis(0, 2, L), false), (AffineAxis(L + 3, -1, L), false),
-            (AffineAxis(0, 1, L - 1), false), (view(contig, 1:L), false),
-        ]
-        for (lane, eligible) in lanes, step in steps, f in (identity, conj, x -> -x)
-            src, g = pack_fixture(storage, 11, lane, step)
-            k_block_length = length(step)
-            @test real_contiguous_eligible(src, spec, f, length(lane)) ==
-                (eligible && (f === identity || f === conj))
-            got, canaries = pack_into(:panel, T, L * k_block_length, src, spec, f)
-            @test got == ref_pack(RealFormat(), T, L, k_block_length, length(lane), g, f)
-            @test canaries
-        end
-    end
-    @test copies_unchanged(conj, T)
-    @test !copies_unchanged(conj, complex(T))   # conj is not the identity on complex
 end
 
 @testset "pack!: k_block_length == 0 reads and writes nothing" begin

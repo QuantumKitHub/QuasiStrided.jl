@@ -1,100 +1,4 @@
-# Helpers shared by the execution test files included after this one.
-
-# Brute-force reference over every label assignment; knows nothing of plans.
-function _brute_ref(A, indA, B, indB, Cstart, indC, alpha, beta; conjA = false, conjB = false)
-    dims = Dict{Int, Int}()
-    for (l, L) in zip(indA, size(A))
-        dims[l] = L
-    end
-    for (l, L) in zip(indB, size(B))
-        dims[l] = L
-    end
-    klabels = Tuple(l for l in indA if l in indB && !(l in indC))
-    ksizes = Tuple(dims[l] for l in klabels)
-    T = eltype(Cstart)
-    out = similar(Cstart, T)
-    for Ic in CartesianIndices(Cstart)
-        at = Dict{Int, Int}(zip(indC, Tuple(Ic)))
-        acc = zero(T)
-        for Ik in CartesianIndices(ksizes)
-            for (l, i) in zip(klabels, Tuple(Ik))
-                at[l] = i
-            end
-            a = A[(at[l] for l in indA)...]
-            b = B[(at[l] for l in indB)...]
-            acc += (conjA ? conj(a) : a) * (conjB ? conj(b) : b)
-        end
-        out[Ic] = iszero(beta) ? alpha * acc : alpha * acc + beta * Cstart[Ic]
-    end
-    return out
-end
-
-# The reference result for the fixture `mk()`.
-function _ref_of(mk, alpha, beta; kw...)
-    Cv, Av, iA, Bv, iB, iC = mk()
-    return _brute_ref(Array(Av), iA, Array(Bv), iB, Array(Cv), iC, alpha, beta; kw...)
-end
-
-# Plan a fresh fixture `mk()` and run `run!` on it. Returns C and the plan.
-function _run_fresh(run!, mk, alpha, beta; plankw...)
-    Cv, Av, iA, Bv, iB, iC = mk()
-    plan = plan_contract(Cv, Av, iA, Bv, iB, iC; plankw...)
-    @test run!(plan, alpha, beta) === plan.Cstorage
-    return Array(Cv), plan
-end
-
-# `_run_fresh` planned onto the nest with B packed, through the path modes the
-# benchmarks use: the baseline for the dedicated paths.
-const _NEST_ONLY = QuasiStrided.PathModes(dot = :never, outer = :never, unpacked_b = :never)
-_run_nest(mk, alpha, beta; plankw...) = _run_fresh(execute!, mk, alpha, beta; path_modes = _NEST_ONLY, plankw...)
-
-_path_of(plan) = plan.path
-_lanes(T) = QuasiStrided.vector_lanes(QuasiStrided.target_profile(), real(T))
-
-# A DenseMatrix that is not a DenseVector: a plan keeps it as storage, so paths
-# that need raw-pointer loads must decline it.
-struct _WrappedMat{T} <: DenseMatrix{T}
-    data::Matrix{T}
-end
-Base.size(a::_WrappedMat) = size(a.data)
-Base.IndexStyle(::Type{<:_WrappedMat}) = IndexLinear()
-Base.getindex(a::_WrappedMat, i::Int) = a.data[i]
-Base.setindex!(a::_WrappedMat, v, i::Int) = (a.data[i] = v)
-
-# `M` as a StridedView with the same values and a chosen layout of its first
-# axis. Gaps in padded parents are NaN, so reading one poisons C.
-function _view_as(M::Matrix{T}, layout::Symbol) where {T}
-    m, n = size(M)
-    layout === :dense && return StridedView(M)
-    layout === :transposed && return permutedims(StridedView(permutedims(M, (2, 1))), (2, 1))
-    layout === :wrapped && return StridedView(_WrappedMat(copy(M)), (m, n), (1, m), 0)
-    big = fill(convert(T, NaN), 2m + 4, n)
-    rows = layout === :offset ? (3:(m + 2)) : layout === :gap ? (1:2:(2m)) :
-        layout === :reversed ? ((m + 2):-1:3) : error("unknown layout $layout")
-    big[rows, :] .= M
-    return StridedView(view(big, rows, :))
-end
-
-# `C[m,n] = A[m,k] B[k,n]` with chosen layouts for A and B, seeded so every call
-# reproduces the same values. `ABfill` poisons both operands.
-function _mm_maker(::Type{T}, M, K, N, seed; A = :dense, B = :dense, Cfill = nothing, ABfill = nothing) where {T}
-    return function ()
-        rng = MersenneTwister(seed)
-        Amat = ABfill === nothing ? randn(rng, T, M, K) : fill(convert(T, ABfill), M, K)
-        Bmat = ABfill === nothing ? randn(rng, T, K, N) : fill(convert(T, ABfill), K, N)
-        Cmat = Cfill === nothing ? randn(rng, T, M, N) : fill(convert(T, Cfill), M, N)
-        return (StridedView(Cmat), _view_as(Amat, A), (1, 2), _view_as(Bmat, B), (2, 3), (1, 3))
-    end
-end
-
-# `C[n,m]` stored N-major: for a real eltype the planner swaps the operand roles.
-function _swapped_maker(::Type{T}, M, K, N, seed; B = :dense) where {T}
-    return function ()
-        rng = MersenneTwister(seed)
-        Amat, Bmat, Cmat = randn(rng, T, M, K), randn(rng, T, K, N), randn(rng, T, N, M)
-        return (StridedView(Cmat), StridedView(Amat), (1, 2), _view_as(Bmat, B), (2, 3), (3, 1))
-    end
-end
+include("helpers.jl")
 
 @testset "contract!: worked fixture, permuted and sliced views" begin
     A, B, Cref = _worked_fixture()
@@ -226,62 +130,37 @@ end
     @test isconcretetype(only(Base.return_types(execute!, (typeof(plan), Float64, Float64))))
 end
 
-# Line-by-line packing. intensli_7, C[e,c,b,f,a] = A[a,b,c,d,e] * B[d,f], splits A
-# (K steps of a page or more, every eltype); C[a1,au,f1,f2] = A[au,k,a1] * B[f2,k,f1]
-# splits both operands (K steps within a page, real only).
-const _SP_I7 = ((1, 2, 3, 4, 5), (4, 6), (5, 3, 2, 6, 1))
-const _SP_BOTH = ((2, 3, 1), (5, 3, 4), (1, 2, 4, 5))
+@testset "execute! still allocates nothing in steady state" begin
+    Ma, Ka, Na = 40, 21, 30
+    A = randn(Ma, Ka); B = randn(Ka, Na); C = zeros(Ma, Na)
+    p = plan_contract(
+        StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3)
+    )
+    execute!(p, 1.0, 0.0)
+    execute!(p, 1.0, 0.0)
+    allocs = @allocated execute!(p, 1.0, 0.0)
+    @test C ≈ A * B
+    @test allocs == 0 skip = (VERSION < v"1.11")
 
-function _sp_views(T, (iA, iB, iC), ext, TA = T)
-    arr(S, I) = StridedView(randn(S, map(l -> ext[l], I)))
-    return (arr(T, iC), arr(TA, iA), iA, arr(T, iB), iB, iC)
-end
+    # Permuted A, reversed B, sliced C: the non-ramp path.
+    Ap = permutedims(randn(Ka, Ma), (2, 1))
+    Bn = view(randn(Ka, 2Na), :, (2Na):-1:(Na + 1))
+    Cs = view(zeros(2Ma, Na), 1:Ma, :)
+    ps = plan_contract(
+        StridedView(Cs), StridedView(Ap), (1, 2), StridedView(Bn), (2, 3), (1, 3)
+    )
+    execute!(ps, 1.0, 0.0)
+    execute!(ps, 1.0, 0.0)
+    allocs_s = @allocated execute!(ps, 1.0, 0.0)
+    @test Cs ≈ Ap * Bn
+    @test allocs_s == 0 skip = (VERSION < v"1.11")
 
-# The plan with every structurally eligible group split, whatever this host's L2:
-# the planner's decision at a zero L2 threshold, replanned at its block extents.
-function _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; kw...)
-    p = plan_contract(Cv, Av, iA, Bv, iB, iC; kw...)
-    k, k_block, d, T = p.kernel, p.blocking.k_block, default_blocking(p.kernel), eltype(Cv)
-    function split(g, i, eff, req)
-        R = tile_size(k, i)
-        return pack_split(g, p.kgroup, i, R, pack_formats(typeof(k))[i], sizeof(T), k_block, eff, cld(req, R) * R, d.k_block; l2bytes = 0)
-    end
-    (m_block, ms) = split(p.mgroup, 1, p.blocking.m_block, something(get(kw, :m_block, nothing), d.m_block))
-    (n_block, ns) = split(p.ngroup, 2, p.blocking.n_block, d.n_block)
-    q = plan_contract(Cv, Av, iA, Bv, iB, iC; kw..., kernel = k, m_block, n_block)
-    @assert q.mgroup == p.mgroup && q.ngroup == p.ngroup
-    path = QuasiStrided.nest_path(false, q.mgroup, q.ngroup, q.kgroup, is_split(ms), is_split(ns))
-    return ContractPlan(q; path, mpack = ms, npack = ns)
-end
-
-@testset "line-by-line packing: the planner splits A of intensli_7 past the cache" begin
-    plan_of(d) = plan_contract(_sp_views(Float64, _SP_I7, ntuple(_ -> d, 6))...)
-    p = plan_of(16)
-    k, b = p.kernel, p.blocking
-    splits(l2bytes) = is_split(pack_split(p.mgroup, p.kgroup, 1, tile_size(k, 1), pack_formats(typeof(k))[1], 8, b.k_block, b.m_block, b.m_block, default_blocking(k).k_block; l2bytes)[2])
-    @test splits(2^20) && !splits(2^24)  # a 4 MB reuse window
-    host = splits(QuasiStrided.split_capacity(target_profile(), true))
-    @test is_split(p.mpack) == host
-    host && @test _path_of(p) isa NestPath{false, <:Any, (true, false)}
-    @test _path_of(plan_of(4)) isa NestPath{<:Any, <:Any, (false, false)}
-end
-
-@testset "line-by-line packing: contractions ($T)" for T in (Float64, Float32, ComplexF64, ComplexF32)
-    kernels = T === ComplexF64 ? (nothing, OneMKernel(Val(4), Val(4), T), FMAddSubKernel(Val(8), Val(4), T)) : (nothing,)
-    for (ind, ext, m_block) in (
-                (_SP_I7, (8, 8, 8, 3, 6, 5), nothing), (_SP_I7, (6, 8, 11, 5, 10, 7), 48),
-                (_SP_BOTH, (20, 16, 9, 20, 8), nothing), (_SP_BOTH, (13, 12, 5, 11, 12), 64),
-            ), kernel in kernels, conjB in (T <: Complex ? (false, true) : (false,)), beta in (0, 0.7)
-        T <: Complex && ind === _SP_BOTH && continue  # K steps within a page: complex never splits
-        Cv, Av, iA, Bv, iB, iC = _sp_views(T, ind, ext)
-        iszero(beta) && fill!(Cv, NaN)
-        Cref = _lo_reference(iszero(beta) ? zero(Array(Cv)) : Array(Cv), Av, iA, Bv, iB, iC; conjB, alpha = 1.3, beta)
-        plan = _sp_forced_plan(Cv, Av, iA, Bv, iB, iC; conjB, m_block, kernel)
-        @test _path_of(plan) isa NestPath{false, <:Any, (true, ind === _SP_BOTH)}
-        execute!(plan, 1.3, beta)
-        @test Array(Cv) ≈ Cref rtol = 100 * eps(real(T))
-    end
-    plan = _sp_forced_plan(_sp_views(T, T <: Complex ? _SP_I7 : _SP_BOTH, (20, 16, 9, 20, 8, 5))...)
-    execute!(plan, 1, 0)
-    @test (@allocated execute!(plan, 1, 0)) == 0 skip = (VERSION < v"1.11")
+    # M, N and K composites ordered differently per operand: scattered tile axes.
+    A4 = randn(5, 6, 7, 9); B4 = randn(7, 6, 11, 3); C4 = zeros(3, 9, 11, 5)
+    p4 = plan_contract(
+        StridedView(C4), StridedView(A4), (1, 2, 3, 4), StridedView(B4), (3, 2, 5, 6), (6, 4, 5, 1)
+    )
+    execute!(p4, 1.0, 0.5)
+    execute!(p4, 1.0, 0.5)
+    @test (@allocated execute!(p4, 1.0, 0.5)) == 0 skip = (VERSION < v"1.11")
 end

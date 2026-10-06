@@ -11,6 +11,8 @@
 # The fast path ships for AVX-512 only; every expectation derives from the live
 # profile, so `test/forced_isa_runner.jl` checks the other ISAs too.
 
+include("helpers.jl")
+
 using QuasiStrided: PlanarKernel, FMAddSubKernel, OneMKernel, KERNEL_SHAPES_C64_ONEM, KERNEL_SHAPES_C64_FMADDSUB, KERNEL_SHAPES_C32_FMADDSUB, TargetProfile, CacheLevel,
     target_profile, unknown_target, KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 

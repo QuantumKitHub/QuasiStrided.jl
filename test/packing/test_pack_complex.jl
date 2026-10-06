@@ -1,18 +1,9 @@
-# Complex packing against test_pack_real.jl's reference layouts. `transform`
+# Complex packing against the reference layouts. `transform`
 # must apply to the complex element before it is split (per real half, `conj`
 # would be a silent no-op). Packing is exact, so comparisons are bitwise
 # `isequal`, which also separates `+0.0` from `-0.0`.
 
-# Exactly representable in Float32, with signed and unsigned zeros sprinkled in:
-# `conj` and 1e's `-im` are sign flips.
-function complex_value(::Type{T}, i) where {T}
-    R = real(T)
-    i % 17 == 0 && return T(R(0), R(0))
-    i % 19 == 0 && return T(R(3), R(0))
-    i % 23 == 0 && return T(R(0), R(-5))
-    return T(R(10i + 1), R(-(10i + 2)))
-end
-complex_storage(::Type{T}, n) where {T} = [complex_value(T, i) for i in 1:n]
+include("helpers.jl")
 
 const COMPLEX_FORMATS = (
     (PlanarFormat(), PlanarFormat()), (OneEFormat(), PlanarFormat()),

@@ -1,5 +1,7 @@
 # Tile axes and Tile addressing, against hand-computed addresses.
 
+include("../helpers.jl")
+
 using QuasiStrided: checked_span_bounds, descriptor_offset_range, is_unit_stride
 
 @testset "AffineAxis: offsets, validation" begin
@@ -46,4 +48,85 @@ end
     @test checked_span_bounds(0, (0, 9), (0, 10), 20) === nothing
     @test_throws BoundsError checked_span_bounds(0, (0, 9), (0, 11), 20)
     @test checked_span_bounds(-100, (0, -1), (0, 5), 20) === nothing
+end
+
+@testset "checked_span_bounds is equivalent to the per-tile check" begin
+    # For a region split into slivers, checking the union range once accepts
+    # exactly what checking each sliver accepts.
+    Random.seed!(99)
+    for trial in 1:150
+        nrow = rand(1:9)
+        ncol = rand(1:5)
+        rowoffs = [rand(-20:20) for _ in 1:nrow]
+        coloffs = [rand(-20:20) for _ in 1:ncol]
+        base = rand(-5:30)
+        len = rand(1:60)
+        reg = rand(1:4)                      # sliver height
+        nsliv = cld(nrow, reg)
+
+        cols = view(coloffs, 1:ncol)
+        persliver = true
+        for s in 0:(nsliv - 1)
+            first = s * reg
+            cnt = min(reg, nrow - first)
+            rows = view(rowoffs, (first + 1):(first + cnt))
+            ok = try
+                checked_tile_storage_bounds(base, rows, cols, len)
+                true
+            catch e
+                e isa BoundsError || rethrow()
+                false
+            end
+            persliver &= ok
+        end
+
+        blockrange = (minimum(rowoffs), maximum(rowoffs))
+        colrange = (minimum(coloffs), maximum(coloffs))
+        blockok = try
+            QuasiStrided.checked_span_bounds(base, blockrange, colrange, len)
+            true
+        catch e
+            e isa BoundsError || rethrow()
+            false
+        end
+        @test blockok == persliver
+    end
+
+    @test QuasiStrided.checked_span_bounds(0, (0, -1), (0, 0), 1) === nothing
+    @test QuasiStrided.checked_span_bounds(0, (0, 0), (0, -1), 1) === nothing
+    @test_throws BoundsError QuasiStrided.checked_span_bounds(0, (0, 0), (0, 0), 0)
+end
+
+@testset "descriptor_offset_range agrees with extrema" begin
+    Random.seed!(7)
+    for trial in 1:100
+        n = rand(1:8)
+        buf = [rand(-30:30) for _ in 1:n]
+        rand() < 0.4 && (buf = [3 + 5 * (t - 1) for t in 1:n])   # force a regular run
+        d = describe_block(buf, 0, n)
+        GC.@preserve buf @test QuasiStrided.descriptor_offset_range(d, buf, 0) == extrema(QuasiStrided.axis_of(d, buf, 0))
+    end
+    @test QuasiStrided.descriptor_offset_range(BlockDescriptor(0, 0, 0, true), Int[], 0) == (0, -1)
+end
+
+# `@inbounds` reaches the storage check only through an inlined call.
+pcf_inbounds_pack!(args...) = @inbounds pack!(args...)
+pcf_inbounds_execute_tile!(args...) = @inbounds execute_tile!(args...)
+
+@testset "@inbounds skips only the storage bounds check" begin
+    kernel = SIMDKernel(Val(8), Val(6), Float64)
+    src = Tile(collect(1.0:64.0), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 4))
+    a = sliver_spec(kernel, 1)
+    @test_throws DimensionMismatch pcf_inbounds_pack!(zeros(3), src, a, identity)
+    @test_throws ArgumentError pcf_inbounds_pack!(zeros(Float32, 64), src, a, identity)
+    toowide = Tile(collect(1.0:200.0), 0, AffineAxis(0, 1, 9), AffineAxis(0, 16, 4))
+    @test_throws ArgumentError pcf_inbounds_pack!(zeros(200), toowide, a, identity)
+
+    dest = Tile(zeros(8 * 6), 0, AffineAxis(0, 1, 8), AffineAxis(0, 8, 6))
+    @test_throws DimensionMismatch pcf_inbounds_execute_tile!(
+        kernel, dest, zeros(3), zeros(6 * 4), 4, 1.0, 0.0
+    )
+    @test_throws ArgumentError pcf_inbounds_execute_tile!(
+        kernel, dest, zeros(8 * 4), zeros(6 * 4), -1, 1.0, 0.0
+    )
 end

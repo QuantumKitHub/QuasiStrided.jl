@@ -1,63 +1,40 @@
-using Test
-using Random
+# Every test/**/test_*.jl file runs in its own module, on a pool of worker
+# processes. Arguments select files by name prefix, e.g.
+#
+#   Pkg.test("QuasiStrided"; test_args = ["execution/test_dot", "packing"])
+#
+# and `--list`, `--jobs=N`, `--verbose` are the runner's own. `Pkg.test` runs
+# with `--check-bounds=yes`, kept deliberately: it also runs the per-tile bounds
+# checks that `@inbounds` skips. `Pkg.test(; julia_args = ["--check-bounds=auto"])`
+# is the fast local run.
+
+using ParallelTestRunner
 using QuasiStrided
-# Internal names the test files use unqualified.
-using QuasiStrided: AxisGroup, axis_length, fill_offsets!, BlockDescriptor,
-    describe_block, block_descriptors!, Descriptor, tile_size,
-    scalartype, packed_a_offset, packed_b_offset, packed_a_length, packed_b_length,
-    AffineAxis, Tile, checked_tile_storage_bounds, pack!, sliver_spec,
-    zero_accumulator, add_tile, store_tile!, execute_tile!, lanewidth, contract!,
-    Blocking, default_blocking, ScalarKernel, SIMDKernel, TargetProfile, CacheLevel,
-    target_profile, cache_topology, unknown_target, detect_isa, detect_target,
-    derived_shape, fallback_shape, shape_override, kernel_from_shape,
-    fallback_blocking, kernel_shapes, parse_size, count_cpu_list, NR_DEFAULT,
-    rule_applies, isa_nregisters, sliver_width, realtype,
-    PlanarKernel, OneMKernel, FMAddSubKernel, accumulator_planes, pack_formats,
-    reals_per_element, modelled_blocking, kernel_blocking,
-    planar_pressure, pack_split, is_split, NestPath
-# plan_contract, execute! and ContractPlan are bound in helpers.jl instead.
 
-# All files share one scope, so helper names must be unique across files.
-@testset "QuasiStrided.jl" begin
-    include("helpers.jl")
+testsuite = find_tests(@__DIR__)
+filter!(p -> startswith(basename(first(p)), "test_"), testsuite)
 
-    include("hardware/test_target.jl")
-
-    include("layout/test_axis_group.jl")
-    include("layout/test_stridedviews_axisgroup.jl")
-    include("layout/test_tiles.jl")
-
-    include("packing/test_kernel_descriptor.jl")
-    # Defines `ref_pack`/`pack_fixture`, which the two complex packing files reuse.
-    include("packing/test_pack_real.jl")
-    include("packing/test_pack_complex.jl")
-    include("packing/test_pack_complex_contiguous.jl")
-
-    # Defines the `mk_*` kernel-contract helpers the other microkernel files use.
-    include("microkernels/test_scalar_kernel.jl")
-    include("microkernels/test_simd_kernel.jl")
-    include("microkernels/test_planar_kernel.jl")
-    include("microkernels/test_planar_store_fastpath.jl")
-    include("microkernels/test_onem_kernel.jl")
-    include("microkernels/test_fmaddsub_kernel.jl")
-    include("microkernels/test_mixed_kernel.jl")
-
-    include("planning/test_kernel_selection.jl")
-    include("planning/test_plan_contract.jl")
-    include("planning/test_per_call_overhead.jl")
-
-    include("execution/test_manual_pipeline.jl")
-    include("execution/test_execute.jl")
-    include("execution/test_workspace.jl")
-    include("execution/test_scalar_vs_simd.jl")
-    include("execution/test_macro_blocking.jl")
-    # These use test_execute.jl's shared helpers and brute-force reference.
-    include("execution/test_unpackedb.jl")
-    include("execution/test_dot.jl")
-    include("execution/test_outer.jl")
-    include("execution/test_mixed.jl")
-
-    # Last: its `using TensorOperations` makes `scalartype` ambiguous for later files.
-    include("integrations/test_tensoroperations.jl")
-    include("quality/test_aqua.jl")
+# Set by forced_isa_runner.jl: every worker runs on that target.
+fake_target = :()
+if haskey(ENV, "QS_FAKE_ISA")
+    fake_target = quote
+        using QuasiStrided: TARGET, TargetProfile, CacheLevel
+        TARGET[] = TargetProfile(
+            Symbol(ENV["QS_FAKE_ISA"]), "forced-isa-runner",
+            let l1d = parse(Int, get(ENV, "QS_FAKE_L1D", "0"))
+                CacheLevel(l1d, 0, l1d > 0 ? 1 : 0)
+            end,
+            CacheLevel(parse(Int, get(ENV, "QS_FAKE_L2", "0")), 0, parse(Int, get(ENV, "QS_FAKE_L2_SHARING", "0"))),
+            CacheLevel()
+        )
+    end
+    eval(fake_target)
+    let p = QuasiStrided.target_profile()
+        println(
+            "forced target: isa=", p.isa, " vector_bytes=", p.vector_bytes, " nregisters=", p.nregisters,
+            " l1d=", p.l1d.bytes, " l2=", p.l2.bytes, "/", p.l2.sharing
+        )
+    end
 end
+
+runtests(QuasiStrided, ARGS; testsuite, init_worker_code = fake_target)

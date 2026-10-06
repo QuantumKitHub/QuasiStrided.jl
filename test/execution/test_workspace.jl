@@ -1,27 +1,6 @@
-# ContractWorkspace, the `allocator` keyword, and the SIMDKernel default.
+# ContractWorkspace and the `allocator` keyword.
 
-@testset "plan_contract: SIMDKernel is the engine-wide default kernel" begin
-    for T in (Float64, Float32)
-        Random.seed!(5150)
-        Amat, Bmat = randn(T, 9, 10), randn(T, 10, 8)
-        Cmat = zeros(T, 9, 8)
-        plan = _mm_plan(Cmat, Amat, Bmat)
-
-        # The shape is hardware- and extent-dependent: pin the resolution.
-        @test plan.kernel isa QuasiStrided.SIMDKernel
-        @test QuasiStrided.scalartype(plan.kernel) === T
-        @test plan.kernel === auto_kernel(T, size(Amat, 1))
-        execute!(plan, one(T), zero(T))
-        @test Cmat ≈ Amat * Bmat
-
-        Cmat2 = zeros(T, 9, 8)
-        contract!(
-            StridedView(Cmat2), one(T), StridedView(Amat), (1, 2),
-            StridedView(Bmat), (2, 3), zero(T), (1, 3)
-        )
-        @test Cmat2 == Cmat
-    end
-end
+include("helpers.jl")
 
 @testset "ContractWorkspace: plan reuse refills every buffer before reading it" begin
     kernel = ScalarKernel(Val(4), Val(3), Float64)

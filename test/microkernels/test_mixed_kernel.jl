@@ -1,3 +1,5 @@
+include("helpers.jl")
+
 using QuasiStrided: ComplexRealKernel, RealComplexKernel, packed_panel
 
 mk_optypes(k::ComplexRealKernel) = (scalartype(k), real(scalartype(k)))

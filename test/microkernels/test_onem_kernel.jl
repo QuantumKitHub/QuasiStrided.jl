@@ -1,3 +1,5 @@
+include("helpers.jl")
+
 using QuasiStrided: OneMKernel, PlanarKernel, lanewidth, kernel_shapes,
     kernel_from_shape, default_kernel_type
 

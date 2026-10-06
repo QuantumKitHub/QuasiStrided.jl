@@ -1,5 +1,7 @@
 # Hardware detection: it never throws, and every failure path resolves to the fallbacks.
 
+include("../helpers.jl")
+
 using StridedViews: StridedView
 
 @testset "target detection" begin

@@ -3,7 +3,7 @@
 # (same arithmetic, same values, different address), and the packed-B buffer
 # must stay untouched.
 
-_ub_takes(plan) = _path_of(plan) isa QuasiStrided.NestPath{true}
+include("helpers.jl")
 
 # Poison the packed-B buffer, then run.
 function _ub_run!(plan, alpha, beta)

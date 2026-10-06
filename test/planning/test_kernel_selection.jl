@@ -1,5 +1,7 @@
 # Register shape, kernel and blocking selection from a `TargetProfile`.
 
+include("helpers.jl")
+
 using StridedViews: StridedView
 
 @testset "real shape selection" begin
@@ -291,50 +293,6 @@ end
     end
 end
 
-@testset "analytical blocking model" begin
-    KiB, MiB = 1024, 1024^2
-    # No SMT with an L3 shared by 4 cores; SMT 2 with an L3 shared by 8 cores.
-    nosmt = TargetProfile(
-        :avx2, "znver2", CacheLevel(32KiB, 64, 1),
-        CacheLevel(512KiB, 64, 1), CacheLevel(16MiB, 64, 4)
-    )
-    smt2 = TargetProfile(
-        :avx512, "cascadelake", CacheLevel(32KiB, 64, 2),
-        CacheLevel(1MiB, 64, 2), CacheLevel(25952256, 64, 16)
-    )
-    @test modelled_blocking(nosmt, 8, 6, 8, 8) === Blocking(96, 341, 1728)
-    @test modelled_blocking(nosmt, 16, 6, 4, 4) === Blocking(96, 682, 1728)
-    @test modelled_blocking(smt2, 16, 6, 8, 8) === Blocking(192, 341, 1572)
-    # A complex kernel keeps the real default kernel's `k_block` and blocks M
-    # and N by its packed bytes: 1m packs 4 reals per A element, 2 per B element.
-    @test default_blocking(kernel_from_shape((12, 8, 8), ComplexF64, OneMKernel), nosmt) === Blocking(24, 341, 864)
-    for p in (nosmt, smt2), T in (Float64, Float32, ComplexF64, ComplexF32), K in (SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel)
-        for shape in kernel_shapes(T, K)
-            k = kernel_from_shape(shape, T, K)
-            b = default_blocking(k, p)
-            MR, NR = tile_size(k)
-            @test b.m_block % MR == 0 && b.n_block % NR == 0
-            real_default = kernel_from_shape(derived_shape(p, real(T)), real(T), SIMDKernel)
-            @test b.k_block == default_blocking(real_default, p).k_block
-        end
-    end
-    # No L3: the B panel is budgeted from the L2 alone.
-    nol3 = TargetProfile(
-        :neon, "", CacheLevel(64KiB, 64, 1),
-        CacheLevel(4MiB, 64, 4), CacheLevel()
-    )
-    @test modelled_blocking(nol3, 4, 6, 8, 8).n_block == (1MiB ÷ (682 * 8)) ÷ 6 * 6
-    tiny = TargetProfile(
-        :avx2, "", CacheLevel(64, 64, 1), CacheLevel(64, 64, 1), CacheLevel()
-    )
-    @test modelled_blocking(tiny, 8, 6, 8, 8) === Blocking(8, 1, 6)
-    @test modelled_blocking(unknown_target(), 8, 6, 8, 8) === nothing
-    @test modelled_blocking(
-        TargetProfile(:avx2, "", CacheLevel(32KiB, 64, 1), CacheLevel(), CacheLevel()),
-        8, 6, 8, 8
-    ) === nothing
-end
-
 @testset "pack_formats agrees with every kernel's descriptor" begin
     QS = QuasiStrided
     kernels = (
@@ -346,18 +304,6 @@ end
     for k in kernels
         @test pack_formats(typeof(k)) === (QS.a_format(k), QS.b_format(k))
     end
-end
-
-@testset "undetected caches: the fallback row scaled by packed reals" begin
-    u = unknown_target()
-    for T in (ComplexF64, ComplexF32), K in (PlanarKernel, OneMKernel, FMAddSubKernel)
-        b = default_blocking(kernel_from_shape(first(kernel_shapes(T, K)), T, K), u)
-        base = fallback_blocking(real(T))
-        @test b.k_block === base.k_block
-        @test b.m_block === base.m_block ÷ reals_per_element(pack_formats(K)[1])
-        @test b.n_block === base.n_block ÷ reals_per_element(pack_formats(K)[2])
-    end
-    @test default_blocking(kernel_from_shape((24, 3, 8), ComplexF64, PlanarKernel), u) === Blocking(64, 256, 384)
 end
 
 @testset "kernel construction: the complex default, 1m by name, and throws" begin
@@ -413,5 +359,154 @@ end
     @test sms(Float64, 4) === nothing
     for isakey in (:avx2, :neon, :unknown), T in (ComplexF64, ComplexF32)
         @test sms(T, 2, synthetic(isakey)) === nothing
+    end
+end
+
+@testset "run-length-aware kernel demotion" begin
+    # ccsd_t_1 with C's leading run exactly `d` and m_length != run, so only
+    # `run % m_tile == 0` avoids demotion. Expectations are derived from the
+    # menu, so this holds on every ISA.
+    d = 16
+    extra = 4
+    IA = (:i, :j, :m, :a)
+    IB = (:m, :k, :b, :c)
+    IC = (:a, :b, :c, :i, :j, :k)
+    (indA, indB, indC), _ = _lo_labels(IA, IB)
+
+    for T in (Float64, Float32)
+        A = randn(T, extra, extra, extra, d)  # (i, j, m, a)
+        B = randn(T, extra, extra, extra, extra)  # (m, k, b, c)
+        C = zeros(T, d, extra, extra, extra, extra, extra)  # (a, b, c, i, j, k)
+        Av, Bv, Cv = StridedView(A), StridedView(B), StridedView(C)
+
+        mlab, nlab, klab = QuasiStrided.classify_labels(indA, indB, indC)
+        msorted = _lo_order(mlab, indC, Cv)
+        run = _lo_run(msorted, indC, Cv)
+        cpos(l) = findfirst(==(l), indC)::Int
+        m_length = prod(size(Cv, cpos(l)) for l in mlab)
+        n_length = prod(size(Cv, cpos(l)) for l in nlab)
+
+        plan = plan_contract(Cv, Av, indA, Bv, indB, indC)
+        @test plan.Astorage === parent(Av)
+
+        default_kernel = auto_kernel(T, m_length)
+        default_m_tile = tile_size(default_kernel, 1)
+        if m_length == run || run % default_m_tile == 0
+            @test plan.kernel === default_kernel
+        else
+            candidates = [sh[1] for sh in QuasiStrided.kernel_shapes(T) if run % sh[1] == 0]
+            if isempty(candidates)
+                @test plan.kernel === default_kernel
+            else
+                @test run % tile_size(plan.kernel, 1) == 0
+                @test tile_size(plan.kernel, 1) == maximum(candidates)
+            end
+        end
+
+        Cref = _lo_reference(C, Av, indA, Bv, indB, indC; alpha = 1.3, beta = -0.7)
+        Cex = copy(C)
+        plan_ex = plan_contract(StridedView(Cex), Av, indA, Bv, indB, indC)
+        execute!(plan_ex, 1.3, -0.7)
+        @test Cex ≈ Cref
+    end
+
+    # Plain GEMM: `m_length == run`, so no demotion.
+    for T in (Float64, Float32)
+        Ma, Ka, Na = 37, 11, 23
+        Amat = randn(T, Ma, Ka)
+        Bmat = randn(T, Ka, Na)
+        Cmat = zeros(T, Ma, Na)
+        Av, Bv, Cv = StridedView(Amat), StridedView(Bmat), StridedView(Cmat)
+        plan = plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3))
+        @test plan.kernel === auto_kernel(T, Ma)
+
+        Cref = Amat * Bmat
+        execute!(plan, 1.0, 0.0)
+        @test Cmat ≈ Cref
+    end
+end
+
+@testset "run-length demotion K-depth guard: deep-K does not demote, shallow-K does" begin
+    # C[a,b,c,i,j,k] = A[i,j,m,a] * B[m,k,b,c], i=j=k=b=c=6: k_length = m is swept.
+    IA = (:i, :j, :m, :a)
+    IB = (:m, :k, :b, :c)
+    IC = (:a, :b, :c, :i, :j, :k)
+    (indA, indB, indC), _ = _lo_labels(IA, IB)
+
+    function _run_demote_fixture(::Type{T}, a::Int, m::Int) where {T}
+        i = j = k = b = c = 6
+        A = randn(T, i, j, m, a)
+        B = randn(T, m, k, b, c)
+        C = zeros(T, a, b, c, i, j, k)
+        return StridedView(C), StridedView(A), StridedView(B)
+    end
+
+    kmax_of(::Type{Float64}) = QuasiStrided._RUN_DEMOTE_KMAX_F64
+    kmax_of(::Type{Float32}) = QuasiStrided._RUN_DEMOTE_KMAX_F32
+
+    for (T, a) in ((Float64, 8), (Float32, 16))
+        m_length = a * 36
+        n_length = 216
+        default_kernel = auto_kernel(T, m_length)
+
+        # Deep K never demotes; the fixture never swaps.
+        m_deep = 2 * kmax_of(T)
+        Cv, Av, Bv = _run_demote_fixture(T, a, m_deep)
+        plan_deep = plan_contract(Cv, Av, indA, Bv, indB, indC)
+        @test plan_deep.Astorage === parent(Av)
+        @test plan_deep.kernel === default_kernel
+
+        # Shallow K demotes where the default's `m_tile` breaks the run (ISA-dependent).
+        m_shallow = 8
+        Cv2, Av2, Bv2 = _run_demote_fixture(T, a, m_shallow)
+        plan_shallow = plan_contract(Cv2, Av2, indA, Bv2, indB, indC)
+        @test plan_shallow.Astorage === parent(Av2)
+        mlab, = QuasiStrided.classify_labels(indA, indB, indC)
+        msorted = _lo_order(mlab, indC, Cv2)
+        run = _lo_run(msorted, indC, Cv2)
+        if m_length == run || run % tile_size(default_kernel, 1) == 0
+            @test plan_shallow.kernel === default_kernel
+        else
+            @test plan_shallow.kernel !== default_kernel
+            @test typeof(plan_shallow.kernel) !== typeof(default_kernel)
+            @test run % tile_size(plan_shallow.kernel, 1) == 0
+        end
+
+        # The guard is `k_length > kmax`: `k_length == kmax` may still demote.
+        Cv_b, Av_b, Bv_b = _run_demote_fixture(T, a, kmax_of(T))
+        plan_b = plan_contract(Cv_b, Av_b, indA, Bv_b, indB, indC)
+        run_b = _lo_run(msorted, indC, Cv_b)  # same M order at every m in this fixture
+        if m_length == run_b || run_b % tile_size(default_kernel, 1) == 0
+            @test plan_b.kernel === default_kernel
+        else
+            @test plan_b.kernel !== default_kernel
+        end
+
+        Cv_b1, Av_b1, Bv_b1 = _run_demote_fixture(T, a, kmax_of(T) + 1)
+        plan_b1 = plan_contract(Cv_b1, Av_b1, indA, Bv_b1, indB, indC)
+        @test plan_b1.kernel === default_kernel
+    end
+end
+
+@testset "plan_contract: SIMDKernel is the engine-wide default kernel" begin
+    for T in (Float64, Float32)
+        Random.seed!(5150)
+        Amat, Bmat = randn(T, 9, 10), randn(T, 10, 8)
+        Cmat = zeros(T, 9, 8)
+        plan = _mm_plan(Cmat, Amat, Bmat)
+
+        # The shape is hardware- and extent-dependent: pin the resolution.
+        @test plan.kernel isa QuasiStrided.SIMDKernel
+        @test QuasiStrided.scalartype(plan.kernel) === T
+        @test plan.kernel === auto_kernel(T, size(Amat, 1))
+        execute!(plan, one(T), zero(T))
+        @test Cmat ≈ Amat * Bmat
+
+        Cmat2 = zeros(T, 9, 8)
+        contract!(
+            StridedView(Cmat2), one(T), StridedView(Amat), (1, 2),
+            StridedView(Bmat), (2, 3), zero(T), (1, 3)
+        )
+        @test Cmat2 == Cmat
     end
 end

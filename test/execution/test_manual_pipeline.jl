@@ -2,6 +2,8 @@
 # axes -> pack! -> ScalarKernel execute_tile!, with beta applied on
 # the first K panel only.
 
+include("../helpers.jl")
+
 @testset "manual pipeline: AxisGroup -> tiles -> packing -> ScalarKernel" begin
     A, B, Cref = _worked_fixture()
     M = AxisGroup((3, 2), ((1, 15), (1, 12)))  # A, C

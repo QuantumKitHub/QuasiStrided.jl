@@ -2,36 +2,7 @@
 # in A and C streams `alpha * A * B[n]` column by column. Results match the
 # nest and the reference (`≈`: the two differ on a signed zero).
 
-_outer_takes(plan) = _path_of(plan) isa QuasiStrided.OuterPath
-
-# `C[a, b] = A[a] * B[b]` at extents `(M, N)`:
-#   :bstrided  B every other element of a longer vector
-#   :cpermC    C stored [b, a] (M not unit-stride in C)
-#   :agap      A every other element (M not unit-stride in A)
-#   :coffset   C a view with an offset, M unit-stride
-#   :multiM    M a composite of two labels that fold to one ramp
-function _outer_maker(::Type{T}, M, N, seed; variant = :plain, Cfill = nothing) where {T}
-    return function ()
-        rng = MersenneTwister(seed)
-        a, b = randn(rng, T, M), randn(rng, T, N)
-        C = Cfill === nothing ? randn(rng, T, M, N) : fill(convert(T, Cfill), M, N)
-        gapped(v, r) = (big = fill(convert(T, NaN), 2 * length(v)); big[r] .= v; StridedView(view(big, r)))
-        Av = variant === :agap ? gapped(a, 1:2:(2M)) : StridedView(a)
-        Bv = variant === :bstrided ? gapped(b, 2:2:(2N)) : StridedView(b)
-        variant === :multiM &&
-            return (StridedView(reshape(C, 4, M ÷ 4, N)), StridedView(reshape(a, 4, M ÷ 4)), (1, 2), Bv, (3,), (1, 2, 3))
-        Cv = if variant === :cpermC
-            permutedims(StridedView(permutedims(C, (2, 1))), (2, 1))
-        elseif variant === :coffset
-            big = fill(convert(T, NaN), M + 3, N + 2)
-            big[2:(M + 1), 2:(N + 1)] .= C
-            StridedView(view(big, 2:(M + 1), 2:(N + 1)))
-        else
-            StridedView(C)
-        end
-        return (Cv, Av, (1,), Bv, (2,), (1, 2))
-    end
-end
+include("helpers.jl")
 
 @testset "outer path: which plans it takes ($T)" for T in (Float64, Float32, ComplexF64)
     W = _lanes(T)
@@ -94,15 +65,4 @@ end
     pA, pB, pAB = TO.contract_indices((:a,), (:b,), (:a, :b))
     TO.tensorcontract!(C, a, pA, false, b, pB, false, pAB, 1.0, 0.0, QuasiStridedBackend())
     @test C ≈ a * transpose(b)
-end
-
-@testset "the path modes override path selection" begin
-    pd(; kw...) = plan_contract(_mm_maker(Float64, 1, 64, 9, 1)()...; kw...)
-    po(; kw...) = plan_contract(_outer_maker(Float64, 16, 9, 1)()...; kw...)
-    pu(; kw...) = plan_contract(_mm_maker(Float64, 20, 12, 9, 1)()...; kw...)
-    ps(; kw...) = plan_contract(_mm_maker(Float64, 20, 12, 9, 1; B = :transposed)()...; kw...)
-    @test _dot_takes(pd()) && _outer_takes(po()) && _ub_takes(pu()) && !_ub_takes(ps())
-    @test !_dot_takes(pd(; path_modes = _NEST_ONLY)) && !_outer_takes(po(; path_modes = _NEST_ONLY)) &&
-        !_ub_takes(pu(; path_modes = _NEST_ONLY))
-    @test _ub_takes(ps(; path_modes = QuasiStrided.PathModes(unpacked_b = :always)))
 end

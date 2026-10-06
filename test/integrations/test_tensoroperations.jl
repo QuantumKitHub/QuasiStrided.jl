@@ -1,5 +1,7 @@
 # `QuasiStridedBackend` against TensorOperations' own backends and explicit references.
 
+include("../helpers.jl")
+
 using TensorOperations
 using TensorOperations: StridedNative
 using StridedViews: StridedView

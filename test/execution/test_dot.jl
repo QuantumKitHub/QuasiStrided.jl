@@ -2,7 +2,7 @@
 # matrix operand runs a K-vectorized gemv. Results match the nest and the
 # reference to a tolerance (the K summation order differs).
 
-_dot_takes(plan) = _path_of(plan) isa QuasiStrided.DotPath
+include("helpers.jl")
 
 const _DOT_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
 
