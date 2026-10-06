@@ -251,6 +251,13 @@ tree with chunk-15 edits in progress, ratios are within-process): off/on
 off is *faster* in three cases: C64 12×512×512 on Icelake (0.52), F64
 12×512×512 (0.75) and 64³ (0.91) on Genoa, all unpacked-B. Next: explain
 that anomaly, then a round with a runtime-closed-form-ramp variant.
+Cause found: in the unpacked-B tile loop with both C flags static, LLVM's SLP
+vectoriser vectorises the per-column B addresses and recomputes them per K
+step, costing a register: the ComplexF64 kernel spills 12 accumulators per
+step. On Genoa codegen the runtime-stride K loop is also unrolled 8×, spilling
+GPRs. Fix: dense B loads via per-column pointers with one shared K index, and
+no unrolling of the unpacked-B K loop (ea97e6d; −20% on C64 12×512×512 locally;
+Slurm A/B pending).
 
 ### D18. Unpacked B (chunk 15, applied: 337dc4a)
 
@@ -259,6 +266,18 @@ one tile loop in `nest.jl` takes its B sliver from either, by the path's
 `UNPACKED_B`; the rule moves to `plan.jl`; eligibility is a kernel trait
 (`reads_b_by_element`) defined beside each kernel. `unpackedb.jl` goes. The
 `M <= 256` cutoff stays until measured (see possible improvements).
+
+### D19. Degenerate paths (chunk 16, decided)
+
+`DotPath{MATB}` dispatched statically, with a `dot_operands(plan, Val(MATB))`
+picking matrix/vector sides; the workspace is sized per path (dot: its vector
+buffer, no panels; outer: no panels), deleting `dot_fits`; applicability
+rules move to `plan.jl`; `_is_conj` → `op_conjugates`, `_buffer_range` →
+`extrema(view(...))`, one `vector_lanes(profile, R)`. The β cases become
+VectorInterface's `Zero()`/`One()` (direct dependency): one `axpby` defined by
+dispatch for the vector/scalar stores, `axpby_at!`, the outer path and the
+panel load; β stays a runtime number through the nest and `static_beta`
+converts it only at the existing branch points (no 3× specialisation).
 
 ### Complex blocking benchmark (after chunk 11)
 
@@ -310,6 +329,10 @@ blocking.jl (uncommitted until the full suite passes).
 - Unpacked-B cutoff `M <= 256` is a constant; a cutoff from the reuse a
   packed B sliver would get (about `m_length / MR` M slivers) may be more
   principled. Benchmark before changing.
+
+- The outer-product path is real only; a complex one would remove the
+  asymmetry. Benchmark complex K = 1 contractions (nest vs a complex outer
+  path) before deciding.
 
 ## Open items (to revisit in their chunk)
 
