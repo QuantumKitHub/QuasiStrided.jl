@@ -29,7 +29,7 @@ TTFX when codegen is touched).
 | 14 | Five-loop nest | `execution/macrokernel.jl` (now `nest.jl`), `execute.jl`, `c_panel.jl` | done (ramp flags pending) |
 | 15 | Alternative paths | `unpackedb.jl` (oracle gone in chunk 12) | done |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
-| 17 | TensorOperations backend | `integrations/tensoroperations.jl` | |
+| 17 | TensorOperations backend | `integrations/tensoroperations.jl` | in progress |
 | 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | |
 | 19 | Benchmarks (optional) | `benchmark/` | |
 
@@ -268,6 +268,12 @@ Decision: `NestPath` shrinks to `{UNPACKED_B, SPLIT}`; axis types are a
 runtime `axis_of` choice; per-group ramp detection runs at runtime once per
 call, keeping the closed-form descriptors; the 512-entry table goes. Then
 reconsider callable paths. Applied after chunk 16.
+Applied as b77152b and reverted (dde6d28): with the ramp decision at runtime,
+dense plans also compile the scatter branches of the micro-tile, store and
+pack code (execute_tile! 43 → 160, store_tile! 32 → 116 specialisations),
+TTFX +40–90%, suite 22 → 32 min, no runtime gain. Final: the six static
+flags stay (they pay for themselves in compile time), so paths stay structs.
+Precompilation would not change this: it covers only the workload's types.
 
 ### D18. Unpacked B (chunk 15, applied: 337dc4a)
 
@@ -294,6 +300,17 @@ complex 1×2 kernels at M = 1 now take the dot path (agree to rounding). Dot
 plans allocate 8.5 KB instead of 150 KB; specialisation counts and TTFX
 unchanged.
 
+### D20. TensorOperations backend (chunk 17, decided)
+
+No continuation: α/β become ordinary arguments of `planned` and fields of the
+request (`nothing` = build the plan only); after the barrier `build_plan`
+returns the plan, or executes and releases it. `Execute` and `f` go;
+`contract!` and `tensorcontract!` pass α/β (one dynamic crossing each).
+Conjugated-output check only in `planned`; the aliasing check moves into
+`planned` so `plan_contract`/`contract!` get it too. Label translation stays
+ours (TO's `contract_labels` builds `Vector{Char}`s, allocating and
+non-inferable); `tensoradd!`/`tensortrace!` stay forwarded to StridedNative.
+
 ### Complex blocking benchmark (after chunk 11)
 
 Same-node A/B, `bench_complex_blocking.jl`, jobs 7160147–9: the kernel's own
@@ -309,9 +326,8 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Ramp flags (D17): shrink `NestPath` as decided (agent running).
-2. Chunk 17: TensorOperations backend (`integrations/tensoroperations.jl`).
-3. Workflow: present each chunk (purpose, reading order, design decisions,
+1. Chunk 17 being applied (D20); then chunk 18 (test infrastructure).
+2. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
    TTFX, equivalence script where behaviour must not change); perf claims
