@@ -26,7 +26,7 @@ TTFX when codegen is touched).
 | 11 | Blocking | `blocking.jl`, line packing (now `packing/line_packing.jl`) | done |
 | 12 | Workspace | `execution/workspace.jl`, `barrier.jl` | done |
 | 13 | The plan | `planning/plan.jl` (+ `test_plan_contract.jl`, `test_per_call_overhead.jl`) | done |
-| 14 | Five-loop nest | `execution/macrokernel.jl`, `execute.jl` | |
+| 14 | Five-loop nest | `execution/macrokernel.jl` (now `nest.jl`), `execute.jl`, `c_panel.jl` | done (ramp flags pending) |
 | 15 | Alternative paths | `oracle.jl`, `unpackedb.jl` | |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | |
@@ -225,6 +225,27 @@ explicit reuse mechanism rather than a cache. The tile-wise oracle is gone
 are bundled per group (`ws.m`, `ws.n`, `ws.k`), not per operand: a group's
 two maps are filled together and share a lifetime. Plans are single-task.
 
+### D17. Five-loop nest (chunk 14, applied: 5c08bdf; ramp-flag benchmark pending)
+
+Behaviour-preserving first: `EmptyPath`/`ScalePath` for empty M/N and K = 0
+(decided at plan time; `execute!` keeps only the `alpha == 0` check); the
+nest reads its parameters from the plan; one `pack_block!` per operand
+(per-sliver or by lines); ramp decisions from the path's static flags; the C
+panel path loops over N blocks itself (copy in, nest on the panel, copy
+out), so the nest has no `target`/hooks; `execute.jl` split into
+`execute.jl`, `nest.jl` (absorbs `macrokernel.jl`) and `c_panel.jl`.
+Then, measured separately (Slurm A/B): drop the six `NestPath` ramp flags in
+favour of the runtime `axis_of` choice; if they don't pay off, `NestPath`
+shrinks to `{UNPACKED_B, SPLIT}` and the 512-entry table goes, and callable
+paths get reconsidered.
+As applied: `nest!(plan, alphaT, betaT, path, n_range)`; `pack_block!` lives in
+`nest.jl` (needs the plan and group buffers); N's ramp under unpacked B stays
+a runtime test of B's map. 408 equivalence cases bitwise identical; the extra
+nests of degenerate plans are gone. Ramp-flag A/B: `benchmark/bench_ramp_flags.jl`
+(flags cleared also disables the closed-form ramp descriptors, so it bounds
+the cost of dropping them). Workstation, indicative: large cases equal, 24³
+and 64³ 20–50% slower without flags.
+
 ### Complex blocking benchmark (after chunk 11)
 
 Same-node A/B, `bench_complex_blocking.jl`, jobs 7160147–9: the kernel's own
@@ -240,9 +261,10 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Chunk 14: five-loop nest (`execution/macrokernel.jl`, `execute.jl`),
-   including the open items marked chunk 14 below.
-2. Workflow: present each chunk (purpose, reading order, design decisions,
+1. Ramp-flag benchmark: user submits `bench_ramp_flags.jl` on Icelake/Genoa/
+   Rome; decide on the `NestPath` flags (D17) from it.
+2. Chunk 15: alternative paths (`unpackedb.jl`; the oracle is already gone).
+3. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
    TTFX, equivalence script where behaviour must not change); perf claims
@@ -272,16 +294,14 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Open items (to revisit in their chunk)
 
-- One `pack_block!(panel, block, spec, transform, order)` for per-sliver and
-  by-lines packing, so the nest makes one call per block (chunk 14).
 
 - Internal constants still use `_UPPER` names; drop the underscores in one pass
   at the end (D2).
 
-- `execute.jl` mixes public API, the C-panel path and the nest (chunk 14).
-- Plans with empty extents or K = 0 now compile their path although the
-  short-circuit always fires first; `select_path` could return a trivial
-  path for them (chunk 14).
+- Path types carry compile-time parameters (lane width, nest flags), which is
+  why they are structs, not functions. Measure whether the six `NestPath` ramp
+  flags pay off (regular vs scattered layouts, specialisation count); if they
+  go, consider callable paths instead of `execute_path!` (chunk 14).
 - `_execute_dot!` takes `matB` as a runtime `Bool` although `DotPath{MATB}`
   makes it static (chunk 16).
 - `plan_request` is spelled out twice in `planned` (swapped and not).
