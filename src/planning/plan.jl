@@ -403,7 +403,7 @@ function select_path(::Type{K}, req::PlanRequest{T}, resolved) where {K, T}
     k_length == 1 && modes.outer !== :never && outer_applicable(T, req.Astorage, req.Cstorage, mgroup, m_length, W) &&
         return lane_path(OuterPath, W)
     unpacked_b = reads_b_by_element(K) && unpacked_b_rule(modes.unpacked_b, mgroup, kgroup)
-    return nest_path(unpacked_b, mgroup, ngroup, kgroup, is_split(mpack), is_split(npack), panel)
+    return nest_path(unpacked_b, is_split(mpack), is_split(npack), panel)
 end
 
 # The dot path (dot.jl): a degenerate free extent, a matrix operand with

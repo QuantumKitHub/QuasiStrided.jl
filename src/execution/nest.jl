@@ -5,9 +5,9 @@
 # caller preserves `plan.workspace`: packed panels and scatter axes borrow
 # pointers into it.
 function nest!(
-        plan::ContractPlan{T}, alphaT::T, betaT::T, path::NestPath{UNPACKED_B, AFF, SPLIT},
+        plan::ContractPlan{T}, alphaT::T, betaT::T, path::NestPath{UNPACKED_B, SPLIT},
         n_range::UnitRange{Int}
-    ) where {T, UNPACKED_B, AFF, SPLIT}
+    ) where {T, UNPACKED_B, SPLIT}
     kernel = plan.kernel
     ws = plan.workspace
     m_tile, n_tile = tile_size(kernel)
@@ -20,15 +20,11 @@ function nest!(
     ngroup = split_b ? split_group(plan.ngroup, plan.npack) : plan.ngroup
 
     # Ramp composites get closed-form block descriptors, no offset buffers; the
-    # block pack reads the offsets. A group is a ramp when both its maps are,
-    # which the path's flags record, except N's B map under unpacked B.
-    aff_mA, aff_mC, aff_nB, aff_nC, aff_kA, aff_kB = AFF
-    m_ramp = aff_mA && aff_mC
-    n_ramp = (UNPACKED_B ? is_ramp_map(ngroup, 1) : aff_nB) && aff_nC
-    k_ramp = aff_kA && aff_kB
-    m_step = m_ramp ? affine_ramp(mgroup)[2] : (0, 0)
-    n_step = n_ramp ? affine_ramp(ngroup)[2] : (0, 0)
-    k_step = k_ramp ? affine_ramp(plan.kgroup)[2] : (0, 0)
+    # block pack reads the offsets. A split group is enumerated in another
+    # order, so it is not a ramp.
+    m_ramp, m_step = split_a ? (false, (0, 0)) : affine_ramp(mgroup)
+    n_ramp, n_step = split_b ? (false, (0, 0)) : affine_ramp(ngroup)
+    k_ramp, k_step = affine_ramp(plan.kgroup)
 
     lenA = length(plan.Astorage)
     lenB = length(plan.Bstorage)
@@ -71,8 +67,8 @@ function nest!(
                 )
             end
 
-            colsA_k = axis_of(dK_A, ws.k[1], 0, Val(aff_kA))
-            rowsB_k = axis_of(dK_B, ws.k[2], 0, Val(aff_kB))
+            colsA_k = axis_of(dK_A, ws.k[1], 0)
+            rowsB_k = axis_of(dK_B, ws.k[2], 0)
 
             # Hoisted bounds checks (B here, A and C per M block): each
             # rectangle is exactly the union of the per-sliver/per-tile
@@ -106,7 +102,7 @@ function nest!(
                 # --- loops over N tiles and M tiles ---
                 micro_tiles!(
                     plan, path, UNPACKED_B ? rowsB_k : nothing, m_tiles, n_tiles, k_block_length,
-                    alphaT, beta_eff, Val(aff_mC), Val(aff_nC)
+                    alphaT, beta_eff
                 )
 
                 m_block_start += m_block_length
@@ -125,9 +121,9 @@ end
 # when the path splits it, else sliver by sliver. Inside the caller's bounds
 # checks.
 @inline function pack_block!(
-        plan::ContractPlan, ::NestPath{UNPACKED_B, AFF, SPLIT}, side::Val{I}, kaxis::KA,
+        plan::ContractPlan, ::NestPath{UNPACKED_B, SPLIT}, side::Val{I}, kaxis::KA,
         block_length::Int, k_block_length::Int, tiles::Int
-    ) where {UNPACKED_B, AFF, SPLIT, I, KA <: AbstractVector{Int}}
+    ) where {UNPACKED_B, SPLIT, I, KA <: AbstractVector{Int}}
     kernel = plan.kernel
     spec = sliver_spec(kernel, I)
     width = sliver_width(kernel, I)
@@ -142,7 +138,7 @@ end
         for tile_index in 0:(tiles - 1)
             tile_start = tile_index * tile
             panel = sliver_panel(buffer, width, k_block_length, tile_index)
-            lanes = axis_of(g.descriptors[1][tile_index + 1], g.offsets[1], tile_start, Val(AFF[2I - 1]))
+            lanes = axis_of(g.descriptors[1][tile_index + 1], g.offsets[1], tile_start)
             @inbounds pack_sliver!(panel, storage, base, lanes, kaxis, spec, transform)
         end
     end
@@ -163,8 +159,8 @@ end
 # `nothing`, so that the packed-B loop does not specialise on it.
 @noinline function micro_tiles!(
         plan::ContractPlan, path::NestPath, rowsB_k::KB, m_tiles::Int, n_tiles::Int, k_block_length::Int,
-        alphaT, beta_eff, aff_mC::Val{MC}, aff_nC::Val{NC}
-    ) where {KB, MC, NC}
+        alphaT, beta_eff
+    ) where {KB}
     kernel = plan.kernel
     ws = plan.workspace
     m_tile, n_tile = tile_size(kernel)
@@ -175,11 +171,11 @@ end
     for n_tile_index in 0:(n_tiles - 1)
         n_tile_start = n_tile_index * n_tile
         bsliver = b_sliver(plan, path, rowsB_k, k_block_length, n_tile_index, n_tile_start)
-        colsC = axis_of(ws.n.descriptors[2][n_tile_index + 1], ws.n.offsets[2], n_tile_start, aff_nC)
+        colsC = axis_of(ws.n.descriptors[2][n_tile_index + 1], ws.n.offsets[2], n_tile_start)
         for m_tile_index in 0:(m_tiles - 1)
             m_tile_start = m_tile_index * m_tile
             apanel = sliver_panel(ws.packed_a, a_sliver_width, k_block_length, m_tile_index)
-            rowsC = axis_of(ws.m.descriptors[2][m_tile_index + 1], ws.m.offsets[2], m_tile_start, aff_mC)
+            rowsC = axis_of(ws.m.descriptors[2][m_tile_index + 1], ws.m.offsets[2], m_tile_start)
             # Inside the caller's C check.
             @inbounds execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
@@ -208,17 +204,6 @@ end
 # own parameter, so it builds a concretely typed `Tile`.
 @inline axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int) =
     d.regular ? AffineAxis(d.base, d.stride, d.count) : ScatterAxis(pointer(buffer, first + 1), d.count)
-
-# The same with the axis type fixed by the path: `Val(true)` for a ramp map,
-# whose descriptors are always regular (checked).
-@inline axis_of(d::BlockDescriptor, buffer::Vector{Int}, first::Int, ::Val{false}) =
-    axis_of(d, buffer, first)
-@inline function axis_of(d::BlockDescriptor, ::Vector{Int}, ::Int, ::Val{true})
-    d.regular || throw_irregular_ramp_descriptor()
-    return AffineAxis(d.base, d.stride, d.count)
-end
-@noinline throw_irregular_ramp_descriptor() =
-    throw(AssertionError("an affine-ramp map produced an irregular block descriptor"))
 
 # B passes its axes swapped (its `transpose`). GUARDRAIL: `transform` needs its
 # own bound type parameter, or it costs a dynamic dispatch per call.

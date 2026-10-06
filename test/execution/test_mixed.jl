@@ -29,7 +29,7 @@ const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
         (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided.NestPath, SIMDKernel),
         (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided.NestPath, _RC),
         (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided.NestPath, _CR),
-        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, NestPath{false, <:Any, (true, false)}, _RC),
+        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, NestPath{false, (true, false)}, _RC),
         (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided.NestPath, _PROMOTED),
         (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided.NestPath, _PROMOTED),
         (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided.NestPath, _CR),
