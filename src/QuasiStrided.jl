@@ -32,6 +32,8 @@ include("microkernels/kernels.jl")
 include("microkernels/vecops.jl")
 include("microkernels/steps.jl")
 include("microkernels/stores.jl")
+# B read in place: a B source beside `PackedPanel`, after the kernel interface it extends.
+include("packing/unpacked_b.jl")
 
 # --- Planning: labels, kernel and blocking choice, the plan ---
 include("planning/labels.jl")
@@ -45,7 +47,6 @@ include("execution/paths.jl")
 include("execution/nest.jl")
 include("execution/execute.jl")
 include("execution/c_panel.jl")
-include("execution/unpackedb.jl")
 include("execution/dot.jl")
 include("execution/outer.jl")
 

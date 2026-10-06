@@ -11,10 +11,6 @@ function nest!(
     kernel = plan.kernel
     ws = plan.workspace
     m_tile, n_tile = tile_size(kernel)
-    # GUARDRAIL: reals per sliver per K step address the packed panels;
-    # `m_tile`/`n_tile` count register-tile rows. They differ for complex
-    # kernels.
-    a_sliver_width, b_sliver_width = sliver_width(kernel)
     (; m_block, k_block, n_block) = plan.blocking
     m_length = axis_length(plan.mgroup)
     k_length = axis_length(plan.kgroup)
@@ -108,18 +104,10 @@ function nest!(
                 pack_block!(plan, path, Val(1), colsA_k, m_block_length, k_block_length, m_tiles)
 
                 # --- loops over N tiles and M tiles ---
-                if UNPACKED_B
-                    _micro_tiles_unpacked_b!(
-                        kernel, plan, ws, rowsB_k, m_tiles, n_tiles,
-                        m_tile, n_tile, a_sliver_width, k_block_length, alphaT, beta_eff, Val(aff_mC), Val(aff_nC)
-                    )
-                else
-                    micro_tiles_packed_b!(
-                        kernel, plan, ws, m_tiles, n_tiles,
-                        m_tile, n_tile, a_sliver_width, b_sliver_width, k_block_length, alphaT, beta_eff,
-                        Val(aff_mC), Val(aff_nC)
-                    )
-                end
+                micro_tiles!(
+                    plan, path, UNPACKED_B ? rowsB_k : nothing, m_tiles, n_tiles, k_block_length,
+                    alphaT, beta_eff, Val(aff_mC), Val(aff_nC)
+                )
 
                 m_block_start += m_block_length
             end
@@ -170,15 +158,23 @@ end
 
 # The tile loops over one (N, K, M) block. `@noinline`: one call per block, and
 # the inlined microkernel is most of a nest's size; compile cost grows faster
-# than linearly with function size.
-@noinline function micro_tiles_packed_b!(
-        kernel::K, plan::ContractPlan, ws, m_tiles::Int, n_tiles::Int,
-        m_tile::Int, n_tile::Int, a_sliver_width::Int, b_sliver_width::Int, k_block_length::Int, alphaT, beta_eff,
-        aff_mC::Val{MC}, aff_nC::Val{NC}
-    ) where {K, MC, NC}
+# than linearly with function size. `rowsB_k`: B's K axis when B is read in
+# place (a barrier over its type, so each view is concretely typed), else
+# `nothing`, so that the packed-B loop does not specialise on it.
+@noinline function micro_tiles!(
+        plan::ContractPlan, path::NestPath, rowsB_k::KB, m_tiles::Int, n_tiles::Int, k_block_length::Int,
+        alphaT, beta_eff, aff_mC::Val{MC}, aff_nC::Val{NC}
+    ) where {KB, MC, NC}
+    kernel = plan.kernel
+    ws = plan.workspace
+    m_tile, n_tile = tile_size(kernel)
+    # GUARDRAIL: reals per sliver per K step address the packed panels;
+    # `m_tile`/`n_tile` count register-tile rows. They differ for complex
+    # kernels.
+    a_sliver_width = sliver_width(kernel, 1)
     for n_tile_index in 0:(n_tiles - 1)
         n_tile_start = n_tile_index * n_tile
-        bpanel = sliver_panel(ws.packed_b, b_sliver_width, k_block_length, n_tile_index)
+        bsliver = b_sliver(plan, path, rowsB_k, k_block_length, n_tile_index, n_tile_start)
         colsC = axis_of(ws.n.descriptors[2][n_tile_index + 1], ws.n.offsets[2], n_tile_start, aff_nC)
         for m_tile_index in 0:(m_tiles - 1)
             m_tile_start = m_tile_index * m_tile
@@ -187,11 +183,24 @@ end
             # Inside the caller's C check.
             @inbounds execute_micro_tile!(
                 kernel, plan.Cstorage, plan.Cbase, rowsC, colsC,
-                apanel, bpanel, k_block_length, alphaT, beta_eff
+                apanel, bsliver, k_block_length, alphaT, beta_eff
             )
         end
     end
     return nothing
+end
+
+# The B sliver of N tile `n_tile_index`: its packed panel, or B in place.
+@inline b_sliver(plan::ContractPlan, ::NestPath{false}, ::Nothing, k_block_length::Int, n_tile_index::Int, ::Int) =
+    sliver_panel(plan.workspace.packed_b, sliver_width(plan.kernel, 2), k_block_length, n_tile_index)
+@inline function b_sliver(
+        plan::ContractPlan, ::NestPath{true}, rowsB_k::KB, ::Int, n_tile_index::Int, n_tile_start::Int
+    ) where {KB <: AbstractVector{Int}}
+    n = plan.workspace.n
+    return unpacked_b_view(
+        plan.kernel, plan.Bstorage, plan.Bbase, n.descriptors[1][n_tile_index + 1], n.offsets[1],
+        n_tile_start, rowsB_k, plan.btransform
+    )
 end
 
 # The axis `d` describes. GUARDRAIL: a `Union{AffineAxis, ScatterAxis}` of

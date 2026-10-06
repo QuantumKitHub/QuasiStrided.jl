@@ -184,6 +184,18 @@ pack_formats(::Type{<:FMAddSubKernel}) = (InterleavedFormat(), PlanarFormat())
 pack_formats(::Type{<:ComplexRealKernel}) = (InterleavedFormat(), RealFormat())
 pack_formats(::Type{<:RealComplexKernel}) = (RealFormat(), InterleavedFormat())
 
+"""
+    reads_b_by_element(K::Type{<:Microkernel}) -> Bool
+
+Whether the K step of every kernel of type `K` reads B only through
+`b_scalar`/`b_complex`, so that any B source implementing those (such as
+`UnpackedBView`, B read in place) can stand in for its packed B panel.
+False otherwise: `ScalarKernel` loads from the panel directly, and 1m and
+`RealComplexKernel` run a real kernel over the packed panel's reals.
+"""
+reads_b_by_element(::Type{<:Microkernel}) = false
+reads_b_by_element(::Type{<:Union{SIMDKernel, PlanarKernel, FMAddSubKernel, ComplexRealKernel}}) = true
+
 # Accumulator planes held live: planar keeps separate re/im planes.
 accumulator_planes(::Type{<:Microkernel}) = 1
 accumulator_planes(::Type{<:PlanarKernel}) = 2

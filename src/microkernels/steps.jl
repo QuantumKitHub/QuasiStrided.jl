@@ -54,7 +54,7 @@ end
 end
 
 # B column `j` at K step `p`, as a real or as `(re, im)`; `UnpackedBView`
-# (src/execution/unpackedb.jl) overrides both to read B in place, resolved at
+# (src/packing/unpacked_b.jl) overrides both to read B in place, resolved at
 # compile time.
 @inline b_scalar(packed_b::PB, kernel, j::Int, p::Int) where {PB} =
     panel_load(packed_b, packed_b_offset(kernel, j, p))

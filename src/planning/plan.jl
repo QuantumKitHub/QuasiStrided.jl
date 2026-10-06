@@ -403,9 +403,26 @@ function select_path(::Type{K}, m_tile::Int, n_tile::Int, req::PlanRequest{T}, r
     end
     k_length == 1 && modes.outer !== :never && _outer_applicable(T, req.Astorage, req.Cstorage, mgroup, m_length) &&
         return lane_path(OuterPath, _dot_lanewidth(T))
-    unpacked_b = _unpacked_b_kernel_eligible(K) && _unpacked_b_rule(modes.unpacked_b, mgroup, kgroup)
+    unpacked_b = reads_b_by_element(K) && unpacked_b_rule(modes.unpacked_b, mgroup, kgroup)
     return nest_path(unpacked_b, mgroup, ngroup, kgroup, is_split(mpack), is_split(npack), panel)
 end
+
+# Whether B is read in place (given a kernel that reads B by element): small
+# M, and every B column contiguous along K. Packing pays off only through
+# reuse across M slivers, while `n_tile` contiguous columns read in place cost
+# the kernel nothing. A large K stride in B (each step its own cache line, and
+# for a power of two only a few L1 sets) is what packing exists for. `mode`:
+# `:always`/`:never` override the rule (`PathModes`).
+@inline function unpacked_b_rule(mode::Symbol, mgroup::AxisGroup, kgroup::AxisGroup)
+    mode === :always && return true
+    mode === :never && return false
+    axis_length(mgroup) <= _UNPACKED_B_MMAX || return false
+    (k_ramp, k_step) = affine_ramp(kgroup)
+    return k_ramp && abs(k_step[2]) == 1
+end
+
+# Beyond this M the packed B's reuse wins.
+const _UNPACKED_B_MMAX = 256
 
 # Type parameters on the transforms force specialisation on them: the
 # compiler does not specialise on a `Function` argument it only passes on.

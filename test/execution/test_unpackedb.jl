@@ -1,5 +1,5 @@
 # The unpacked-B path: `execute!` reads B in place through an `UnpackedBView`
-# where `_unpacked_b_rule` says so. The result must be bitwise the packed nest's
+# where `unpacked_b_rule` says so. The result must be bitwise the packed nest's
 # (same arithmetic, same values, different address), and the packed-B buffer
 # must stay untouched.
 
