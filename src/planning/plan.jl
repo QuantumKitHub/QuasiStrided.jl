@@ -328,7 +328,7 @@ end
         kernel, ::Type{K}, m_tile::Int, n_tile::Int, atransform, btransform, req::PlanRequest
     ) where {K}
     resolved = resolve_blocking(K, m_tile, n_tile, req)
-    path = select_path(K, m_tile, n_tile, req, resolved)
+    path = select_path(K, req, resolved)
     return Base.inferencebarrier(build_plan)(
         kernel, path, atransform, btransform, Base.RefValue((req, resolved))
     )
@@ -387,24 +387,49 @@ end
 # The path `execute!` runs for a nonzero `alpha`: none for an empty C, scaling C
 # for an empty K, else the dot path, the outer-product path or the nest (B
 # packed or read in place).
-function select_path(::Type{K}, m_tile::Int, n_tile::Int, req::PlanRequest{T}, resolved) where {K, T}
+function select_path(::Type{K}, req::PlanRequest{T}, resolved) where {K, T}
     (; mgroup, ngroup, kgroup, modes) = req
-    (; blocking, mpack, npack, panel) = resolved
+    (; mpack, npack, panel) = resolved
     m_length = axis_length(mgroup)
     n_length = axis_length(ngroup)
     k_length = axis_length(kgroup)
     (m_length == 0 || n_length == 0) && return EmptyPath()
     k_length == 0 && return ScalePath()
-    if (m_length == 1 || n_length == 1) && !panel && modes.dot !== :never &&
-            _dot_applicable(T, req.Astorage, req.Bstorage, kgroup, m_length, n_length, k_length) &&
-            dot_fits(T, workspace_sizes(K, m_tile, n_tile, blocking).packed_a, blocking.k_block)
-        W = _dot_lanewidth(T)
+    W = vector_lanes(target_profile(), real(T))
+    if !panel && modes.dot !== :never &&
+            dot_applicable(T, req.Astorage, req.Bstorage, kgroup, m_length, n_length, k_length, W)
         return m_length == 1 ? lane_path(DotPath{true}, W) : lane_path(DotPath{false}, W)
     end
-    k_length == 1 && modes.outer !== :never && _outer_applicable(T, req.Astorage, req.Cstorage, mgroup, m_length) &&
-        return lane_path(OuterPath, _dot_lanewidth(T))
+    k_length == 1 && modes.outer !== :never && outer_applicable(T, req.Astorage, req.Cstorage, mgroup, m_length, W) &&
+        return lane_path(OuterPath, W)
     unpacked_b = reads_b_by_element(K) && unpacked_b_rule(modes.unpacked_b, mgroup, kgroup)
     return nest_path(unpacked_b, mgroup, ngroup, kgroup, is_split(mpack), is_split(npack), panel)
+end
+
+# The dot path (dot.jl): a degenerate free extent, a matrix operand with
+# unit-ramp K in dense storage (raw-pointer loads), and at least one vector
+# (`W` lanes) of K.
+function dot_applicable(::Type{T}, Astorage, Bstorage, kgroup::AxisGroup, m_length::Int, n_length::Int, k_length::Int, W::Int) where {T}
+    (m_length == 1 || n_length == 1) || return false
+    k_length >= W || return false
+    if m_length == 1
+        Bstorage isa DenseVector{T} || return false
+        map_ramp_step(kgroup, 2) == 1 || return false
+    else
+        Astorage isa DenseVector{T} || return false
+        map_ramp_step(kgroup, 1) == 1 || return false
+    end
+    return true
+end
+
+# The outer-product path (outer.jl): real `T`, dense A and C with M a unit
+# ramp in both, at least one vector of M. N and B may have any layout.
+function outer_applicable(::Type{T}, Astorage, Cstorage, mgroup::AxisGroup, m_length::Int, W::Int) where {T}
+    T <: Real || return false
+    (Astorage isa DenseVector{T} && Cstorage isa DenseVector{T}) || return false
+    m_length >= W || return false
+    map_ramp_step(mgroup, 1) == 1 || return false
+    return map_ramp_step(mgroup, 2) == 1
 end
 
 # Whether B is read in place (given a kernel that reads B by element): small
@@ -437,7 +462,7 @@ function build_plan(
     T = scalartype(kernel)
     req, (; blocking, mpack, npack, panel) = slot[]
     panel_length = panel ? axis_length(req.mgroup) * min(blocking.n_block, axis_length(req.ngroup)) : 0
-    ws = ContractWorkspace(T, kernel, blocking; allocator = req.allocator, panel = panel_length)
+    ws = ContractWorkspace(T, kernel, blocking; allocator = req.allocator, panel = panel_length, path)
     plan = ContractPlan(
         kernel, path, req.mgroup, req.ngroup, req.kgroup, blocking,
         req.Astorage, req.Abase, req.Bstorage, req.Bbase, req.Cstorage, req.Cbase,

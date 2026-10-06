@@ -193,6 +193,14 @@ init_target!() = (TARGET[] = detect_target(); nothing)
 # The core's private L2 share, or 1 MB when undetected.
 l2_core_bytes(profile::TargetProfile) = profile.l2_share > 0 ? profile.l2_share : 1 << 20
 
+# Default `SIMD.Vec` lane count: one 256-bit register.
+default_lanewidth(::Type{Float64}) = 4
+default_lanewidth(::Type{Float32}) = 8
+
+# Lanes of `R` in one hardware vector register.
+vector_lanes(profile::TargetProfile, ::Type{R}) where {R} =
+    profile.vector_bytes > 0 ? profile.vector_bytes ÷ sizeof(R) : default_lanewidth(R)
+
 line_bytes(profile::TargetProfile) = profile.l1d.line > 0 ? profile.l1d.line : 64
 
 # A K step at least a page apart: a chain of demand misses no prefetcher

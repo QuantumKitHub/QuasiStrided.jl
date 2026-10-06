@@ -23,15 +23,6 @@ execute_path!(plan::ContractPlan, alphaT, betaT, ::EmptyPath) = nothing
 
 execute_path!(plan::ContractPlan, alphaT, betaT, ::ScalePath) = scale_all_of_C!(plan, betaT)
 
-execute_path!(plan::ContractPlan, alphaT, betaT, ::DotPath{MATB, W}) where {MATB, W} =
-    (_execute_dot!(plan, alphaT, betaT, MATB, Val(W)); nothing)
-
-execute_path!(plan::ContractPlan, alphaT, betaT, ::OuterPath{W}) where {W} = (
-    _execute_outer!(
-        plan, alphaT, betaT, axis_length(plan.mgroup), axis_length(plan.ngroup), Val(W)
-    ); nothing
-)
-
 function execute_path!(plan::ContractPlan{T}, alphaT::T, betaT::T, path::NestPath) where {T}
     ws = plan.workspace
     GC.@preserve ws nest!(plan, alphaT, betaT, path, 0:(axis_length(plan.ngroup) - 1))

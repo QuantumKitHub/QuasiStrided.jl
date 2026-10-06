@@ -44,7 +44,7 @@ function _dot_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
 end
 
 @testset "dot path: which plans it takes ($T)" for T in _DOT_TYPES
-    W = QuasiStrided._dot_lanewidth(T)
+    W = _lanes(T)
     for variant in (:plain, :permvec, :permC, :offsetB)
         @test _dot_takes(plan_contract(_dot_gemv_maker(T, 4, 1; variant)()...))
     end
@@ -64,14 +64,14 @@ end
     ab = ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
     for d in (2, 6), variant in (:plain, :permvec, :permC, :offsetB), (alpha, beta) in ab
         mk = _dot_gemv_maker(T, d, 10 * d; variant)
-        if d * d >= QuasiStrided._dot_lanewidth(T)
+        if d * d >= _lanes(T)
             _dot_check(mk, alpha, beta)
         else
             @test !_dot_takes(plan_contract(mk()...))
         end
     end
     # N = 1: K tails, several K blocks (`k_block = 64`) and output blocks (`m_block = 7`).
-    W = QuasiStrided._dot_lanewidth(T)
+    W = _lanes(T)
     for (d, K) in ((3, W), (5, 3W - 1), (2, 1000)), (alpha, beta) in ab
         _dot_check(_dot_n1_maker(T, d, K, 3K + d), alpha, beta; k_block = 64, m_block = 7)
     end

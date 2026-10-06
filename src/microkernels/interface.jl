@@ -76,10 +76,6 @@ function check_acc(f::Symbol, R, T, NA::Int, want::Int)
     return nothing
 end
 
-# Default `SIMD.Vec` lane count: one 256-bit register.
-default_lanewidth(::Type{Float64}) = 4
-default_lanewidth(::Type{Float32}) = 8
-
 # `beta == 0` writes zeros without reading `C`; `beta == 1` is a no-op.
 function scale_tile!(destination::Tile, beta::T) where {T}
     m, n = size(destination)
@@ -98,16 +94,32 @@ function scale_tile!(destination::Tile, beta::T) where {T}
     return destination
 end
 
-# `C = alpha*r + beta*C` at one element. Ternaries, so `beta == 0` never reads C.
-@inline axpby_tile!(dest, i::Int, j::Int, alpha, r, beta::T) where {T} = @inbounds dest[i, j] =
-    iszero(beta) ? alpha * r :
-    isone(beta) ? muladd(alpha, r, convert(T, dest[i, j])) :
-    muladd(alpha, r, beta * convert(T, dest[i, j]))
+# `beta`'s case for a store: `Zero()`, `One()` or `beta` itself. Called only
+# where a store branches on it, so the nest does not specialise on the case.
+@inline static_beta(beta) = iszero(beta) ? Zero() : isone(beta) ? One() : beta
 
-@inline axpby_at!(storage, idx::Int, alpha, r, beta::T) where {T} = @inbounds storage[idx] =
-    iszero(beta) ? alpha * r :
-    isone(beta) ? muladd(alpha, r, convert(T, storage[idx])) :
-    muladd(alpha, r, beta * convert(T, storage[idx]))
+# `alpha * r + beta * old` for a case from `static_beta`; `Zero()` ignores `old`.
+@inline axpby(alpha, r, old, ::Zero) = alpha * r
+@inline axpby(alpha, r, old, ::One) = muladd(alpha, r, old)
+@inline axpby(alpha, r, old, beta) = muladd(alpha, r, beta * old)
+
+# C's old value for `axpby`, as a `T` (a scalar or a `Vec` through a pointer);
+# `Zero()` never reads it.
+@inline old_c(::Type, storage, idx::Int, ::Zero) = nothing
+@inline old_c(::Type{T}, storage, idx::Int, beta) where {T} = @inbounds convert(T, storage[idx])
+@inline old_c(::Type, dest::Tile, i::Int, j::Int, ::Zero) = nothing
+@inline old_c(::Type{T}, dest::Tile, i::Int, j::Int, beta) where {T} = @inbounds convert(T, dest[i, j])
+@inline old_c(::Type, p::Ptr, ::Zero) = nothing
+@inline old_c(::Type{T}, p::Ptr, beta) where {T} = load_c(T, p)
+
+@inline load_c(::Type{Vec{W, T}}, p::Ptr{T}) where {W, T} = vload(Vec{W, T}, p)
+@inline load_c(::Type{T}, p::Ptr{T}) where {T} = unsafe_load(p)
+
+# `C = alpha*r + beta*C` at one element, for a `beta` case.
+@inline axpby_tile!(dest, i::Int, j::Int, alpha::T, r, beta) where {T} =
+    @inbounds dest[i, j] = axpby(alpha, r, old_c(T, dest, i, j, beta), beta)
+@inline axpby_at!(storage, idx::Int, alpha::T, r, beta) where {T} =
+    @inbounds storage[idx] = axpby(alpha, r, old_c(T, storage, idx, beta), beta)
 
 # The `(m, n)` to store over, or `(0, 0)` when already done (empty destination,
 # or `alpha == 0` handled by `scale_tile!`).

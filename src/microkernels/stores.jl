@@ -14,8 +14,8 @@ inline_store(::LanePairLayout) = false
 # Generator-time pieces of the stores. `acc_bindings` names the accumulator
 # vector(s) of row block `v` (zero-based) of column `j`, `lane_value` is the
 # element at row `lane` of the block, `block_store` stores a full block whose
-# first row is at zero-based storage index `first`, for `beta` case `B`
-# (`:zero`, `:one` or `:general`).
+# first row is at zero-based storage index `first`, for the type `B` of the
+# `beta` case (`Zero`, `One` or the element type) bound to `beta_case`.
 split_index(::Type{<:PlanarKernel}, MV::Int, NR::Int, v::Int, j::Int) =
     (acc_index(MV, v, j), MV * NR + acc_index(MV, v, j))
 split_index(::Type{<:RealComplexKernel}, MV::Int, NR::Int, v::Int, j::Int) =
@@ -35,18 +35,21 @@ lane_value(::RealLayout) = :(vec[lane])
 lane_value(::SplitLayout) = :(Complex(revec[lane], imvec[lane]))
 lane_value(::LanePairLayout) = :(Complex(vec[2 * lane - 1], vec[2 * lane]))
 
-function block_store(::RealLayout, first, W::Int, R::Type, RC::Type, B::Symbol)
-    old = :(convert(Vec{$W, $R}, vload(Vec{$W, $RC}, storage, at)))
-    new = B === :zero ? :(alpha * vec) : B === :one ? :(muladd(alpha, vec, $old)) : :(muladd(alpha, vec, beta * $old))
+function block_store(::RealLayout, first, W::Int, R::Type, RC::Type, B::Type)
+    old = c_operand(B, :(convert(Vec{$W, $R}, vload(Vec{$W, $RC}, storage, at))))
     return quote
         at = $first + 1
-        vstore(convert(Vec{$W, $RC}, $new), storage, at)
+        vstore(convert(Vec{$W, $RC}, axpby(alpha, vec, $old, beta_case)), storage, at)
     end
 end
-block_store(::SplitLayout, first, W::Int, R::Type, RC::Type, B::Symbol) =
-    :(split_store_block!(sp, 2 * $first, revec, imvec, ar, ai, br, bi, Val($W), Val($(QuoteNode(B)))))
-block_store(::LanePairLayout, first, W::Int, R::Type, RC::Type, B::Symbol) =
-    :(lanepair_store_block!(sp, 2 * $first, vec, ar, ai, br, bi, Val($(QuoteNode(B)))))
+block_store(::SplitLayout, first, W::Int, R::Type, RC::Type, B::Type) =
+    :(split_store_block!(sp, 2 * $first, revec, imvec, ar, ai, br, bi, Val($W), beta_case))
+block_store(::LanePairLayout, first, W::Int, R::Type, RC::Type, B::Type) =
+    :(lanepair_store_block!(sp, 2 * $first, vec, ar, ai, br, bi, beta_case))
+
+# The old C operand of `axpby`, never loaded for `beta == 0`.
+c_operand(::Type{Zero}, old) = nothing
+c_operand(::Type, old) = old
 
 # The real lane type of the vector store's storage `S`. The complex layouts
 # reinterpret the storage as reals, only sound on dense rank-1 complex storage.
@@ -83,7 +86,7 @@ end
     is_unit_stride(tile.rows) && dense_lanes(tile.storage, T) &&
     complex_fastpath_isa_eligible()
 
-# One full `W`-row block for `beta` case `B`; `at` is the zero-based index of
+# One full `W`-row block for a `beta` case; `at` is the zero-based index of
 # its first real.
 # The arithmetic transcribes Base's `Complex` expression trees (the ones
 # `axpby_tile!` reaches), so full blocks match them bitwise: `*` is unfused,
@@ -94,27 +97,29 @@ end
 @inline function split_store_block!(
         sp::Ptr{RC}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
         ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
-        ::Val{W}, ::Val{B}
-    ) where {RC, R, W, B}
-    if B === :zero
-        newre = ar * rev - ai * imv
-        newim = ar * imv + ai * rev
-    else
-        old = convert(Vec{2 * W, R}, vload(Vec{2 * W, RC}, sp + sizeof(RC) * at))
-        orv = deinterleave_re(old, Val(W))
-        oiv = deinterleave_im(old, Val(W))
-        if B === :one
-            xr, xi = orv, oiv
-        else
-            xr = br * orv - bi * oiv
-            xi = br * oiv + bi * orv
-        end
-        newre = muladd(ar, rev, -muladd(ai, imv, -xr))
-        newim = muladd(ar, imv, muladd(ai, rev, xi))
-    end
+        ::Val{W}, ::Zero
+    ) where {RC, R, W}
+    newre = ar * rev - ai * imv
+    newim = ar * imv + ai * rev
     vstore(convert(Vec{2 * W, RC}, interleave_planes(newre, newim, Val(W))), sp + sizeof(RC) * at)
     return nothing
 end
+@inline function split_store_block!(
+        sp::Ptr{RC}, at::Int, rev::Vec{W, R}, imv::Vec{W, R},
+        ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
+        ::Val{W}, beta
+    ) where {RC, R, W}
+    old = convert(Vec{2 * W, R}, vload(Vec{2 * W, RC}, sp + sizeof(RC) * at))
+    xr, xi = split_scaled(deinterleave_re(old, Val(W)), deinterleave_im(old, Val(W)), br, bi, beta)
+    newre = muladd(ar, rev, -muladd(ai, imv, -xr))
+    newim = muladd(ar, imv, muladd(ai, rev, xi))
+    vstore(convert(Vec{2 * W, RC}, interleave_planes(newre, newim, Val(W))), sp + sizeof(RC) * at)
+    return nothing
+end
+
+# `beta * C` in planes.
+@inline split_scaled(orv, oiv, br, bi, ::One) = (orv, oiv)
+@inline split_scaled(orv, oiv, br, bi, beta) = (br * orv - bi * oiv, br * oiv + bi * orv)
 
 # One full `W÷2`-row block, already in `Complex`'s memory order, so no
 # interleave shuffle. Base's `Complex` expression trees in lanes, as planar's
@@ -124,20 +129,23 @@ end
 #     otherwise:  as beta == 1 with C := addsub(br*C, bi*swap(C))
 @inline function lanepair_store_block!(
         sp::Ptr{RC}, at::Int, r::Vec{W, R},
-        ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R},
-        ::Val{B}
-    ) where {RC, R, W, B}
-    s = swap_pairs(r)
-    if B === :zero
-        new = addsub(ar * r, ai * s)
-    else
-        old = convert(Vec{W, R}, vload(Vec{W, RC}, sp + sizeof(RC) * at))
-        x = B === :one ? old : addsub(br * old, bi * swap_pairs(old))
-        new = fmaddsub(ar, r, fmaddsub(ai, s, x))
-    end
+        ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R}, ::Zero
+    ) where {RC, R, W}
+    vstore(convert(Vec{W, RC}, addsub(ar * r, ai * swap_pairs(r))), sp + sizeof(RC) * at)
+    return nothing
+end
+@inline function lanepair_store_block!(
+        sp::Ptr{RC}, at::Int, r::Vec{W, R},
+        ar::Vec{W, R}, ai::Vec{W, R}, br::Vec{W, R}, bi::Vec{W, R}, beta
+    ) where {RC, R, W}
+    old = convert(Vec{W, R}, vload(Vec{W, RC}, sp + sizeof(RC) * at))
+    new = fmaddsub(ar, r, fmaddsub(ai, swap_pairs(r), lanepair_scaled(old, br, bi, beta)))
     vstore(convert(Vec{W, RC}, new), sp + sizeof(RC) * at)
     return nothing
 end
+
+@inline lanepair_scaled(old, br, bi, ::One) = old
+@inline lanepair_scaled(old, br, bi, beta) = addsub(br * old, bi * swap_pairs(old))
 
 @generated function store_tile!(
         destination::Tile, acc::NTuple{NA, Vec{W, R}},
@@ -177,7 +185,7 @@ end
                     for lane in 1:$rows
                         i = $(v * rows) + lane
                         i <= m || break
-                        axpby_tile!(destination, i, $j, alpha, $(lane_value(layout)), beta)
+                        axpby_tile!(destination, i, $j, alpha, $(lane_value(layout)), static_beta(beta))
                     end
                 end
             end
@@ -220,7 +228,7 @@ end
                             for lane in 1:$rows
                                 i = $(v * rows) + lane
                                 i <= m || break
-                                axpby_at!(storage, colbase + i, alpha, $(lane_value(layout)), beta)
+                                axpby_at!(storage, colbase + i, alpha, $(lane_value(layout)), beta_case)
                             end
                         end
                     end
@@ -238,12 +246,13 @@ end
         return out
     end
     by_beta = quote
-        if iszero(beta)
-            $(blocks(:zero)...)
-        elseif isone(beta)
-            $(blocks(:one)...)
+        beta_case = static_beta(beta)
+        if beta_case isa Zero
+            $(blocks(Zero)...)
+        elseif beta_case isa One
+            $(blocks(One)...)
         else
-            $(blocks(:general)...)
+            $(blocks(T)...)
         end
     end
     return quote
@@ -262,18 +271,8 @@ function store_tile!(
     ) where {MR, N, T}
     m, n = store_prologue!(destination, alpha, beta)
     (m == 0 || n == 0) && return destination
-    if iszero(beta)
-        @inbounds for j in 1:n, i in 1:m
-            destination[i, j] = alpha * acc[i + MR * (j - 1)]
-        end
-    elseif isone(beta)
-        @inbounds for j in 1:n, i in 1:m
-            destination[i, j] = muladd(alpha, acc[i + MR * (j - 1)], convert(T, destination[i, j]))
-        end
-    else
-        @inbounds for j in 1:n, i in 1:m
-            destination[i, j] = muladd(alpha, acc[i + MR * (j - 1)], beta * convert(T, destination[i, j]))
-        end
+    @inbounds for j in 1:n, i in 1:m
+        axpby_tile!(destination, i, j, alpha, acc[i + MR * (j - 1)], static_beta(beta))
     end
     return destination
 end

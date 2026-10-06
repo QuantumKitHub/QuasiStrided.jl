@@ -190,9 +190,7 @@ fitted_shape(::TargetProfile, ::Type{T}, ::Type{K}) where {T, K <: Union{OneMKer
     first(kernel_shapes(T, K))
 
 function fitted_shape(profile::TargetProfile, ::Type{T}, ::Type{K}) where {T, K <: PlanarKernel}
-    R = real(T)
-    vb = profile.vector_bytes
-    lanes = vb > 0 ? vb ÷ sizeof(R) : default_lanewidth(R)
+    lanes = vector_lanes(profile, real(T))
     budget = profile.nregisters > 0 ? profile.nregisters : 16
     best = nothing
     for shape in kernel_shapes(T, K)
@@ -273,7 +271,7 @@ end
 # `m_length` least, ties by the larger tile.
 function small_m_shape(profile::TargetProfile, ::Type{T}, m_length::Int) where {T}
     profile.isa === :avx512 || return nothing
-    lanes = profile.vector_bytes ÷ sizeof(real(T))
+    lanes = vector_lanes(profile, real(T))
     best = nothing
     for shape in kernel_shapes(T, FMAddSubKernel)
         MR, NR, W = shape

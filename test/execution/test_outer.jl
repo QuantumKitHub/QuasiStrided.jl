@@ -34,7 +34,7 @@ function _outer_maker(::Type{T}, M, N, seed; variant = :plain, Cfill = nothing) 
 end
 
 @testset "outer path: which plans it takes ($T)" for T in (Float64, Float32, ComplexF64)
-    W = QuasiStrided._dot_lanewidth(T)
+    W = _lanes(T)
     for variant in (:plain, :bstrided, :coffset, :multiM)
         p = plan_contract(_outer_maker(T, 16, 9, 1; variant)()...)
         @test _outer_takes(p) == (T <: Real)
@@ -50,7 +50,7 @@ end
 end
 
 @testset "outer path: matches the nest and the reference ($T)" for T in (Float64, Float32)
-    W = QuasiStrided._dot_lanewidth(T)
+    W = _lanes(T)
     for (idx, (M, N)) in enumerate(((W, 1), (2W + 1, 13), (63, 63))), variant in (:plain, :bstrided, :coffset),
             (alpha, beta) in ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
         mk = _outer_maker(T, M, N, 10 + idx; variant)
@@ -74,7 +74,7 @@ end
 end
 
 @testset "outer path: bounds, allocations, the backend ($T)" for T in (Float64, Float32)
-    W = QuasiStrided._dot_lanewidth(T)
+    W = _lanes(T)
     M, N = 2W, 5
     # One element short on each operand: rejected before any write.
     for (sa, sb, sc) in ((M - 1, N, M * N), (M, N - 1, M * N), (M, N, M * N - 1))

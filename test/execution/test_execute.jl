@@ -49,6 +49,7 @@ const _NEST_ONLY = QuasiStrided.PathModes(dot = :never, outer = :never, unpacked
 _run_nest(mk, alpha, beta; plankw...) = _run_fresh(execute!, mk, alpha, beta; path_modes = _NEST_ONLY, plankw...)
 
 _path_of(plan) = plan.path
+_lanes(T) = QuasiStrided.vector_lanes(QuasiStrided.target_profile(), real(T))
 
 # A DenseMatrix that is not a DenseVector: a plan keeps it as storage, so paths
 # that need raw-pointer loads must decline it.

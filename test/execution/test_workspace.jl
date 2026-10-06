@@ -115,3 +115,14 @@ end
     @test_throws ArgumentError QuasiStrided.ContractWorkspace(Float64, k32, b)
     @test_throws ArgumentError QuasiStrided.ContractWorkspace(ComplexF32, k64, b)
 end
+
+@testset "ContractWorkspace: the dot and outer-product paths get no packed panels" begin
+    dot = plan_contract(StridedView(zeros(ComplexF64, 1, 9)), StridedView(randn(ComplexF64, 1, 64)), (1, 2), StridedView(randn(ComplexF64, 64, 9)), (2, 3), (1, 3))
+    outer = plan_contract(StridedView(zeros(64, 40)), StridedView(randn(64)), (1,), StridedView(randn(40)), (2,), (1, 2))
+    @test dot.path isa QuasiStrided.DotPath && outer.path isa QuasiStrided.OuterPath
+    for plan in (dot, outer)
+        @test isempty(plan.workspace.packed_a) && isempty(plan.workspace.packed_b)
+    end
+    @test length(dot.workspace.dot_vector) == 2 * dot.blocking.k_block
+    @test isempty(outer.workspace.dot_vector)
+end

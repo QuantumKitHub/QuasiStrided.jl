@@ -3,6 +3,7 @@ module QuasiStrided
 using StridedViews: StridedView, offset
 import TupleTools
 using Base.Checked: checked_abs, checked_add, checked_mul
+using VectorInterface: Zero, One
 
 # TensorOperations names are always qualified: a bare `using` collides on `scalartype`.
 import TensorOperations as TO
@@ -39,11 +40,11 @@ include("microkernels/stores.jl")
 include("planning/labels.jl")
 include("planning/kernel_selection.jl")
 include("planning/blocking.jl")
+include("execution/paths.jl")
 include("execution/workspace.jl")
 include("planning/plan.jl")
 
 # --- Execution: the five-loop nest and the specialised paths ---
-include("execution/paths.jl")
 include("execution/nest.jl")
 include("execution/execute.jl")
 include("execution/c_panel.jl")
