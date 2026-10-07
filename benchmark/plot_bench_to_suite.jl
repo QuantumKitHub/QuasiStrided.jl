@@ -1,203 +1,209 @@
-# Plots bench_to_suite.jl's CSV, per (dtype, category, group) -- group =
-# upstream's source/topic tag, split by sweep dim above MAX_PER_FIG cases: a
-# GFLOP/s panel, a log-scaled QuasiStrided/StridedBLAS time ratio (< 1 =
-# QuasiStrided faster), and a per-case throughput violin plot. Float64 and
-# ComplexF64 only.
+# Overview plots of bench_to_suite.jl's CSV, one panel per dtype:
+#
+#   throughput  GFLOP/s against arithmetic intensity, colour = total work,
+#               filled = QuasiStrided, open = StridedBLAS, a faint segment
+#               joining the two backends of a case.
+#   relative    QuasiStrided/StridedBLAS time against total work (< 1 =
+#               QuasiStrided faster), colour = arithmetic intensity, marker =
+#               category; the geomean, the faster count and the most extreme
+#               cases at both ends are annotated.
 #
 #   julia --project=benchmark benchmark/plot_bench_to_suite.jl [csv_path]
+#       [--dtypes ComplexF64] [--categories network] [--tags source=tccg,topic=mps]
 #
 # Without `csv_path`, uses the newest benchmark/results/*/bench_to_suite.csv.
-# Writes PNGs next to the CSV.
-#
-# The CSV keeps only median/min/std per case, so the violins are drawn from a
-# normal(median, std) reflected at the observed min: their location and spread
-# are real, their tail shape is illustrative.
+# `--tags` selects on the case params: a case is kept when it carries at least
+# one of the named keys and matches one of the values given for each key it
+# carries, so `source=tccg,topic=mps` keeps the TCCG and the MPS cases. Writes
+# bench_to_suite_{throughput,relative}[_<filters>].png next to the CSV.
 
 using CairoMakie
 using Printf
-using Random
 
-const PLOTTED_DTYPES = ("Float64", "ComplexF64")
-const MAX_PER_FIG = 60
+include(joinpath(@__DIR__, "harness.jl"))
+
+const NLABELLED = 3
 
 function latest_csv()
     root = joinpath(@__DIR__, "results")
-    candidates = String[]
-    for d in readdir(root; join = true)
-        p = joinpath(d, "bench_to_suite.csv")
-        isfile(p) && push!(candidates, p)
-    end
+    candidates = filter(isfile, [joinpath(d, "bench_to_suite.csv") for d in readdir(root; join = true)])
     isempty(candidates) && error("no benchmark/results/*/bench_to_suite.csv found")
     return candidates[argmax(mtime.(candidates))]
 end
 
-const CSV_PATH = isempty(ARGS) ? latest_csv() : ARGS[1]
-const OUTDIR = dirname(CSV_PATH)
-
-struct Row
-    backend::String
-    dtype::String
-    category::String
-    case_id::String
-    dim::Int
-    params::Dict{String, String}
-    reps::Int
-    t::Float64
-    gflops::Float64
-    gbytes::Float64
-    min_gflops::Float64
-    std_gflops::Float64
-    group::String
-    blas::Bool
-    intensity::Float64
-    expr::String
+# The positional CSV path is the first argument that is neither an option nor an option's value.
+const CSV_PATH = let i = findfirst(i -> !startswith(ARGS[i], "--") && (i == 1 || !startswith(ARGS[i - 1], "--")), eachindex(ARGS))
+    i === nothing ? latest_csv() : ARGS[i]
+end
+splitlist(s) = s === nothing ? nothing : String.(strip.(split(s, ',')))
+const DTYPES_FILTER = splitlist(argval("dtypes"))
+const CATEGORIES_FILTER = splitlist(argval("categories"))
+const TAGS_FILTER = let t = splitlist(argval("tags"))
+    t === nothing ? nothing : [Pair(String.(split(kv, '='; limit = 2))...) for kv in t]
 end
 
-# "k1=v1;k2=v2;..." as written by bench_to_suite.jl; values stay strings.
-function parse_params(s::AbstractString)
-    d = Dict{String, String}()
-    isempty(s) && return d
-    for kv in split(s, ';')
-        k, v = split(kv, '=')
-        d[k] = v
-    end
-    return d
-end
+# "k1=v1;k2=v2;..." as written by bench_to_suite.jl.
+parse_params(s) = isempty(s) ? Dict{String, String}() : Dict(Pair(String.(split(kv, '='; limit = 2))...) for kv in split(s, ';'))
 
 function read_rows(path)
     lines = readlines(path)
-    occursin(",expr", lines[1]) || error("$path is not a bench_to_suite.jl CSV (no expr column)")
-    rows = Row[]
-    for line in lines[2:end]
+    header = split(lines[1], ',')
+    "expr" in header || error("$path is not a bench_to_suite.jl CSV (no expr column)")
+    col = Dict(h => i for (i, h) in enumerate(header))
+    return map(lines[2:end]) do line
         f = split(line, ',')
-        push!(
-            rows, Row(
-                f[1], f[2], f[3], f[4], parse(Int, f[5]), parse_params(f[6]), parse(Int, f[7]),
-                parse(Float64, f[8]), parse(Float64, f[9]), parse(Float64, f[10]),
-                parse(Float64, f[11]), parse(Float64, f[12]),
-                f[13], f[15] == "true", parse(Float64, f[16]), f[17]
+        t = parse(Float64, f[col["median_seconds"]])
+        gf = parse(Float64, f[col["gflops"]])
+        (
+            backend = f[col["backend"]], dtype = f[col["dtype"]], category = f[col["category"]],
+            id = f[col["case_id"]], params = parse_params(f[col["params"]]), t = t, gflops = gf,
+            flops = gf * t * 1.0e9, intensity = parse(Float64, f[col["intensity"]]),
+        )
+    end
+end
+
+function tags_match(params)
+    TAGS_FILTER === nothing && return true
+    keys_present = filter(k -> haskey(params, k), unique(first.(TAGS_FILTER)))
+    return !isempty(keys_present) &&
+        all(k -> any(kv -> kv == (k => params[k]), TAGS_FILTER), keys_present)
+end
+
+keep(r) = (DTYPES_FILTER === nothing || r.dtype in DTYPES_FILTER) &&
+    (CATEGORIES_FILTER === nothing || r.category in CATEGORIES_FILTER) && tags_match(r.params)
+
+const ROWS = filter(keep, read_rows(CSV_PATH))
+isempty(ROWS) && error("no rows left after filtering $CSV_PATH")
+
+const SUFFIX = join(
+    vcat(
+        something(DTYPES_FILTER, String[]), something(CATEGORIES_FILTER, String[]),
+        TAGS_FILTER === nothing ? String[] : ["$(k)-$(v)" for (k, v) in TAGS_FILTER],
+    ), "_"
+)
+outpath(name) = joinpath(dirname(CSV_PATH), "bench_to_suite_$(name)$(isempty(SUFFIX) ? "" : "_" * SUFFIX).png")
+
+# One entry per (dtype, category, case) timed by both backends.
+const PAIRS = let byid = Dict{Tuple{String, String, String}, Dict{String, Any}}()
+    for r in ROWS
+        get!(byid, (r.dtype, r.category, r.id), Dict{String, Any}())[r.backend] = r
+    end
+    [
+        (dtype = k[1], category = k[2], id = k[3], qs = v["QuasiStrided"], blas = v["StridedBLAS"])
+            for (k, v) in byid if haskey(v, "QuasiStrided") && haskey(v, "StridedBLAS")
+    ]
+end
+const DTYPE_ORDER = ["Float32", "Float64", "ComplexF32", "ComplexF64"]
+const PANEL_DTYPES = sort(unique(r.dtype for r in ROWS); by = d -> something(findfirst(==(d), DTYPE_ORDER), 99))
+
+# Viridis/cividis without their palest end, which vanishes against white.
+truncated(name) = cgrad(Makie.to_colormap(name)[1:220])
+const GREY = RGBf(0.45, 0.45, 0.45)
+const LOG_TICKS = [m * 10.0^e for e in -3:4 for m in (1, 2, 5)]
+# Ratios within a decade of each other get the steps in between.
+ratio_ticks(lo, hi) = hi / lo < 10 ? sort(vcat(LOG_TICKS, [0.6, 0.7, 0.8, 0.9, 1.1, 1.25, 1.5, 3])) : LOG_TICKS
+plainticks(vs) = [@sprintf("%g", v) for v in vs]
+const TITLE = "$(basename(dirname(CSV_PATH)))$(isempty(SUFFIX) ? "" : "  [" * replace(SUFFIX, "_" => ", ") * "]")"
+
+function throughput_figure()
+    fig = Figure(size = (620 * length(PANEL_DTYPES) + 120, 600))
+    Label(fig[0, 1:length(PANEL_DTYPES)], TITLE; fontsize = 13, color = GREY)
+    logwork = log10.(r.flops for r in ROWS)
+    crange = extrema(logwork)
+    cmap = truncated(:viridis)
+    for (j, dtype) in enumerate(PANEL_DTYPES)
+        ax = Axis(
+            fig[1, j]; xscale = log10, yscale = log10, yticks = LOG_TICKS, ytickformat = plainticks, title = dtype,
+            xlabel = "arithmetic intensity (flop/byte)", ylabel = j == 1 ? "throughput (GFLOP/s)" : ""
+        )
+        ps = filter(p -> p.dtype == dtype, PAIRS)
+        segs = [Point2f(p.blas.intensity, p.blas.gflops) => Point2f(p.qs.intensity, p.qs.gflops) for p in ps]
+        linesegments!(ax, segs; color = (:black, 0.12), linewidth = 1)
+        for (backend, filled) in (("StridedBLAS", false), ("QuasiStrided", true))
+            rs = filter(r -> r.dtype == dtype && r.backend == backend, ROWS)
+            c = [log10(r.flops) for r in rs]
+            pts = [Point2f(r.intensity, r.gflops) for r in rs]
+            if filled
+                scatter!(ax, pts; color = c, colormap = cmap, colorrange = crange, markersize = 7, strokewidth = 0.3, strokecolor = :white)
+            else
+                stroke = [get(cmap, (x - crange[1]) / (crange[2] - crange[1])) for x in c]
+                scatter!(ax, pts; color = :transparent, strokecolor = stroke, markersize = 8, strokewidth = 1.1)
+            end
+        end
+    end
+    Colorbar(fig[1, length(PANEL_DTYPES) + 1]; colormap = cmap, limits = crange, label = "total work (log10 flop)")
+    Legend(
+        fig[2, 1:length(PANEL_DTYPES)],
+        [
+            MarkerElement(marker = :circle, color = GREY, markersize = 9),
+            MarkerElement(marker = :circle, color = :transparent, strokecolor = GREY, strokewidth = 1.2, markersize = 9),
+            LineElement(color = (:black, 0.3)),
+        ],
+        ["QuasiStrided", "StridedBLAS", "same case"]; orientation = :horizontal, framevisible = false
+    )
+    return fig
+end
+
+const CATEGORY_MARKERS = Dict("contract" => :circle, "network" => :utriangle)
+
+function relative_figure()
+    fig = Figure(size = (620 * length(PANEL_DTYPES) + 120, 700))
+    Label(fig[0, 1:length(PANEL_DTYPES)], TITLE; fontsize = 13, color = GREY)
+    loginten = log10.(p.blas.intensity for p in PAIRS)
+    crange = extrema(loginten)
+    cmap = truncated(:cividis)
+    for (j, dtype) in enumerate(PANEL_DTYPES)
+        ps = filter(p -> p.dtype == dtype, PAIRS)
+        ratio(p) = p.qs.t / p.blas.t
+        rv = ratio.(ps)
+        ylim = isempty(ps) ? (0.5, 2.0) : extrema(rv) .* (0.7, 1.4)
+        ax = Axis(
+            fig[1, j]; xscale = log10, yscale = log10, yticks = ratio_ticks(ylim...), ytickformat = plainticks,
+            title = isempty(ps) ? dtype : @sprintf("%s: geomean %.2f, QuasiStrided faster in %d of %d", dtype, geomean(rv), count(<(1), rv), length(rv)),
+            xlabel = "total work (flop)", ylabel = j == 1 ? "time QuasiStrided / StridedBLAS\n(< 1: QuasiStrided faster)" : ""
+        )
+        hlines!(ax, [1.0]; color = :black, linewidth = 1, linestyle = :dash)
+        isempty(ps) && continue
+        for (cat, marker) in CATEGORY_MARKERS
+            cs = filter(p -> p.category == cat, ps)
+            isempty(cs) && continue
+            scatter!(
+                ax, [Point2f(p.blas.flops, ratio(p)) for p in cs]; marker, markersize = cat == "network" ? 11 : 7,
+                color = [log10(p.blas.intensity) for p in cs], colormap = cmap, colorrange = crange,
+                strokewidth = cat == "network" ? 0.8 : 0.3, strokecolor = cat == "network" ? :black : :white
             )
-        )
-    end
-    return rows
-end
-
-const ROWS = read_rows(CSV_PATH)
-
-# Plotted on a log axis: ratios span orders of magnitude across cases.
-function ratio_for(rows, case_id, num, den)
-    t_num = only(r.t for r in rows if r.case_id == case_id && r.backend == num)
-    t_den = only(r.t for r in rows if r.case_id == case_id && r.backend == den)
-    return t_num / t_den
-end
-
-# A leading "*" marks upstream's `isblasequivalent` cases.
-case_label(r::Row) = @sprintf("%s%s  %s  dim=%d  %.3g FLOP/B", r.blas ? "*" : "", r.expr, r.case_id, r.dim, r.intensity)
-
-# Modeled samples (see the header), reflected rather than clipped at `min_v` so
-# no mass piles up at the boundary; seeded from the inputs, so replots match.
-function synth_samples(median_v::Float64, min_v::Float64, std_v::Float64; n::Int = 300)
-    std_v <= 0 && return fill(median_v, n)
-    rng = Random.Xoshiro(hash((median_v, min_v, std_v)))
-    raw = median_v .+ std_v .* randn(rng, n)
-    return map(x -> x < min_v ? 2 * min_v - x : x, raw)
-end
-
-# (dtype, category, group) panels; a group larger than MAX_PER_FIG is split
-# into consecutive chunks of its sweep dims.
-function panels(rows)
-    out = Tuple{String, Vector{Row}}[]
-    for dtype in PLOTTED_DTYPES, category in unique(r.category for r in rows),
-            group in unique(r.group for r in rows if r.category == category)
-        sub = filter(r -> r.dtype == dtype && r.category == category && r.group == group, rows)
-        isempty(sub) && continue
-        ncase = length(unique(r.case_id for r in sub))
-        if ncase <= MAX_PER_FIG
-            push!(out, ("$(dtype)_$(category)_$(group)", sub))
-            continue
         end
-        chunk, dims = Int[], sort(unique(r.dim for r in sub))
-        flush_chunk() = (
-            push!(
-                out, (
-                    "$(dtype)_$(category)_$(group)_dim$(first(chunk))-$(last(chunk))",
-                    filter(r -> r.dim in chunk, sub),
+        # The extreme cases are numbered at the point and named in a key below
+        # the panel: their ids are too long to place beside clustered points.
+        order = sortperm(rv)
+        k = min(NLABELLED, length(ps) ÷ 2)
+        ends = (fastest = order[1:k], slowest = reverse(order)[1:k])
+        key = fig[2, j] = GridLayout()
+        for (col, (name, idx)) in enumerate(pairs(ends))
+            for (n, i) in enumerate(idx)
+                tag = col == 1 ? string(n) : string('a' + n - 1)
+                text!(
+                    ax, Point2f(ps[i].blas.flops, rv[i]); text = tag, fontsize = 12, font = :bold,
+                    align = (:center, col == 1 ? :top : :bottom), offset = (0, col == 1 ? -4 : 4)
                 )
-            ); empty!(chunk)
-        )
-        for d in dims
-            nd = length(unique(r.case_id for r in sub if r.dim == d))
-            n = length(unique(r.case_id for r in sub if r.dim in chunk))
-            !isempty(chunk) && n + nd > MAX_PER_FIG && flush_chunk()
-            push!(chunk, d)
+            end
+            lines = [@sprintf("%s  %s  %.2f", col == 1 ? string(n) : string('a' + n - 1), ps[i].id, rv[i]) for (n, i) in enumerate(idx)]
+            Label(key[1, col], "$name:\n" * join(lines, "\n"); fontsize = 11, justification = :left, halign = :left, valign = :top, tellwidth = false)
         end
-        isempty(chunk) || flush_chunk()
+        ylims!(ax, ylim)
     end
-    return out
+    Colorbar(fig[1, length(PANEL_DTYPES) + 1]; colormap = cmap, limits = crange, label = "arithmetic intensity (log10 flop/byte)")
+    cats = filter(c -> any(p -> p.category == c, PAIRS), ["contract", "network"])
+    Legend(
+        fig[3, 1:length(PANEL_DTYPES)],
+        [MarkerElement(marker = CATEGORY_MARKERS[c], color = GREY, markersize = c == "network" ? 11 : 9) for c in cats],
+        cats; orientation = :horizontal, framevisible = false
+    )
+    return fig
 end
 
-for (name, subset) in panels(ROWS)
-    ids = unique(r.case_id for r in subset)
-    length(ids) < 2 && continue
-    dtype = first(subset).dtype
-
-    ratios = [ratio_for(subset, id, "QuasiStrided", "StridedBLAS") for id in ids]
-    order = sortperm(ratios)
-    ids, ratios = ids[order], ratios[order]
-    labels = [case_label(first(r for r in subset if r.case_id == id)) for id in ids]
-    title = replace(name, "_" => " / ")
-
-    fig = Figure(size = (1250, max(400, 26 * length(ids) + 174)))
-    Label(fig[0, 1:2], "* = BLAS-equivalent (upstream isblasequivalent: one gemm after reshapes alone)"; fontsize = 12)
-
-    ax1 = Axis(
-        fig[1, 1]; xscale = log10, yticks = (1:length(ids), labels),
-        xlabel = "GFLOP/s (log scale)", title = "$title -- throughput"
-    )
-    for backend in ("StridedBLAS", "QuasiStrided")
-        ys = [only(r.gflops for r in subset if r.case_id == id && r.backend == backend) for id in ids]
-        scatter!(ax1, ys, 1:length(ids); label = backend, markersize = 10)
-    end
-    axislegend(ax1; position = :rb)
-
-    ax2 = Axis(
-        fig[1, 2]; xscale = log10,
-        xlabel = "QuasiStrided / StridedBLAS time (log scale)",
-        title = "ratio (< 1 = QuasiStrided faster)"
-    )
-    hideydecorations!(ax2)
-    colors = [r <= 1 ? :seagreen : :firebrick for r in ratios]
-    barplot!(ax2, 1:length(ids), ratios; direction = :x, color = colors)
-    vlines!(ax2, [1.0]; color = :black, linestyle = :dash)
-
-    path = joinpath(OUTDIR, "bench_to_suite_$(name).png")
-    save(path, fig)
+for (name, f) in (("throughput", throughput_figure), ("relative", relative_figure))
+    path = outpath(name)
+    save(path, f())
     println("wrote ", path)
-
-    vfig = Figure(size = (1250, max(400, 26 * length(ids) + 174)))
-    Label(vfig[0, 1], "* = BLAS-equivalent (upstream isblasequivalent: one gemm after reshapes alone)"; fontsize = 12)
-    vax = Axis(
-        vfig[1, 1]; yticks = (1:length(ids), labels),
-        xlabel = "GFLOP/s -- modeled from median/min/std (see file header)",
-        title = "$title -- throughput spread"
-    )
-    offset = 0.18
-    for (boff, backend, color) in ((-offset, "StridedBLAS", :dodgerblue), (offset, "QuasiStrided", :orange))
-        ys = Float64[]
-        positions = Float64[]
-        for (i, id) in enumerate(ids)
-            row = only(r for r in subset if r.case_id == id && r.backend == backend)
-            samples = synth_samples(row.gflops, row.min_gflops, row.std_gflops)
-            append!(ys, samples)
-            append!(positions, fill(Float64(i) + boff, length(samples)))
-        end
-        violin!(
-            vax, positions, ys; orientation = :horizontal, side = boff < 0 ? :left : :right,
-            width = 2 * abs(offset) * 1.8, color = color, label = backend
-        )
-    end
-    axislegend(vax; position = :rb)
-    vpath = joinpath(OUTDIR, "bench_to_suite_$(name)_violin.png")
-    save(vpath, vfig)
-    println("wrote ", vpath)
 end
