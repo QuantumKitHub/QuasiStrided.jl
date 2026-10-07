@@ -33,7 +33,7 @@ include("helpers.jl")
         @test axis_length(plan.mgroup) == M
         case === :manual_n_block_16 && @test N > plan.blocking.n_block && !(plan.workspace.c_panel isa Vector)
         case === :packed_b && @test _path_of(plan) isa QuasiStrided.PanelPath{<:QuasiStrided.NestPath{false}}
-        TB <: Complex && @test plan.kernel isa _RC
+        TB <: Complex && @test plan.kernel isa RC
         execute!(plan, 1, beta)
         QuasiStrided.release!(plan.workspace, allocator)
     end

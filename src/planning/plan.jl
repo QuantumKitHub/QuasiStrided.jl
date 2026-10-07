@@ -261,7 +261,7 @@ function planned(
     return plan_with_kernel(kernel, K, atransform, btransform, req)
 end
 
-const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
+const SUPPORTED_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
 
 # A named mixed-domain kernel's `RealFormat` side packs a real operand only.
 @inline check_kernel_domain(kernel, ::Type, ::Type) = nothing
@@ -276,7 +276,7 @@ const _QS_ELTYPES = (Float32, Float64, ComplexF32, ComplexF64)
 
 # Fold to the compute type, or a throw, at compile time.
 @inline function compute_type(::Type{TA}, ::Type{TB}, ::Type{TC}, ::Nothing) where {TA, TB, TC}
-    (TA in _QS_ELTYPES && TB in _QS_ELTYPES && TC in _QS_ELTYPES) ||
+    (TA in SUPPORTED_ELTYPES && TB in SUPPORTED_ELTYPES && TC in SUPPORTED_ELTYPES) ||
         throw_eltypes(TA, TB, TC)
     (TC <: Real && !(TA <: Real && TB <: Real)) && throw_complex_into_real(TA, TB, TC)
     return promote_type(TA, TB, TC)
@@ -361,7 +361,7 @@ function resolve_blocking(::Type{K}, m_tile::Int, n_tile::Int, req::PlanRequest{
     n_block = n_length == 0 ? n_tile : min(n_block_rounded, roundup(n_length, n_tile))
     k_block = k_length == 0 ? 1 : min(requested.k_block, k_length)
     panel = c_panel_needed(T, req.Cstorage, k_length, k_block)
-    mpack = npack = _NO_SPLIT
+    mpack = npack = NO_SPLIT
     # Cache lines hold each operand's storage eltype, and the block walk costs
     # what its packed format's scatter does. B is not split under a panel of C:
     # the panel holds N blocks in C's own N order, which a split N group does
@@ -446,13 +446,13 @@ end
 @inline function unpacked_b_rule(mode::Symbol, mgroup::AxisGroup, kgroup::AxisGroup)
     mode === :always && return true
     mode === :never && return false
-    axis_length(mgroup) <= _UNPACKED_B_MMAX || return false
+    axis_length(mgroup) <= UNPACKED_B_MMAX || return false
     (k_ramp, k_step) = affine_ramp(kgroup)
     return k_ramp && abs(k_step[2]) == 1
 end
 
 # Beyond this M the packed B's reuse wins.
-const _UNPACKED_B_MMAX = 256
+const UNPACKED_B_MMAX = 256
 
 # Type parameters on the transforms force specialisation on them: the
 # compiler does not specialise on a `Function` argument it only passes on.

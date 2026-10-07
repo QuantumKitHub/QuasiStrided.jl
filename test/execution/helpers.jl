@@ -47,8 +47,8 @@ end
 
 # `_run_fresh` planned onto the nest with B packed, through the path modes the
 # benchmarks use: the baseline for the dedicated paths.
-const _NEST_ONLY = QuasiStrided.PathModes(dot = :never, outer = :never, unpacked_b = :never)
-_run_nest(mk, alpha, beta; plankw...) = _run_fresh(execute!, mk, alpha, beta; path_modes = _NEST_ONLY, plankw...)
+const NEST_ONLY = QuasiStrided.PathModes(dot = :never, outer = :never, unpacked_b = :never)
+_run_nest(mk, alpha, beta; plankw...) = _run_fresh(execute!, mk, alpha, beta; path_modes = NEST_ONLY, plankw...)
 
 _lanes(T) = QuasiStrided.vector_lanes(QuasiStrided.target_profile(), real(T))
 
@@ -121,4 +121,4 @@ function _outer_maker(::Type{T}, M, N, seed; variant = :plain, Cfill = nothing) 
     end
 end
 
-const _CR, _RC = QuasiStrided.ComplexRealKernel, QuasiStrided.RealComplexKernel
+const CR, RC = QuasiStrided.ComplexRealKernel, QuasiStrided.RealComplexKernel

@@ -56,9 +56,9 @@ function _worked_fixture()
     return A, B, Cref
 end
 
-const _INDA = (1, 2, 3)
-const _INDB = (2, 4)
-const _INDC = (1, 4, 3)
+const INDA = (1, 2, 3)
+const INDB = (2, 4)
+const INDC = (1, 4, 3)
 
 const VALID_ISAS = (:avx512, :avx2, :neon, :unknown)
 synthetic(isakey) = TargetProfile(isakey, "synthetic", CacheLevel(), CacheLevel(), CacheLevel())
@@ -127,8 +127,8 @@ end
 # Line-by-line packing. intensli_7, C[e,c,b,f,a] = A[a,b,c,d,e] * B[d,f], splits A
 # (K steps of a page or more, every eltype); C[a1,au,f1,f2] = A[au,k,a1] * B[f2,k,f1]
 # splits both operands (K steps within a page, real only).
-const _SP_I7 = ((1, 2, 3, 4, 5), (4, 6), (5, 3, 2, 6, 1))
-const _SP_BOTH = ((2, 3, 1), (5, 3, 4), (1, 2, 4, 5))
+const SP_I7 = ((1, 2, 3, 4, 5), (4, 6), (5, 3, 2, 6, 1))
+const SP_BOTH = ((2, 3, 1), (5, 3, 4), (1, 2, 4, 5))
 
 function _sp_views(T, (iA, iB, iC), ext, TA = T)
     arr(S, I) = StridedView(randn(S, map(l -> ext[l], I)))

@@ -13,14 +13,14 @@ _lo_view(sz::NTuple{N, Int}, st::NTuple{N, Int}) where {N} =
 
 # The four TCCG `ccsd_t_*` shapes, C stored in (a,b,c,i,j,k) order, labelled
 # as the TensorOperations adapter labels them.
-const _LO_IC = (:a, :b, :c, :i, :j, :k)
-const _LO_CASES = (
+const LO_IC = (:a, :b, :c, :i, :j, :k)
+const LO_CASES = (
     ("ccsd_t_1", (:i, :j, :m, :a), (:m, :k, :b, :c)),
     ("ccsd_t_2", (:i, :j, :m, :b), (:m, :k, :a, :c)),
     ("ccsd_t_3", (:i, :j, :m, :c), (:m, :k, :a, :b)),
     ("ccsd_t_4", (:i, :k, :m, :b), (:m, :j, :a, :c)),
 )
 function _lo_labels(IA, IB)
-    pA, pB, pAB = TO.contract_indices(IA, IB, _LO_IC)
+    pA, pB, pAB = TO.contract_indices(IA, IB, LO_IC)
     return QuasiStrided.contraction_labels(pA, pB, pAB), (pA, pB, pAB)
 end

@@ -16,7 +16,7 @@ poison!(C) = fill!(C, convert(eltype(C), NaN))
 
 const all_eltypes = (Float32, Float64, ComplexF32, ComplexF64)
 
-const _MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
+const MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
 
 @testset "tensorcontract! agrees with StridedNative (eltype = $T)" for T in all_eltypes
     Random.seed!(1234567)
@@ -55,7 +55,7 @@ end
 @testset "conjugation: flags x StridedView.op" begin
     Random.seed!(20260914)
     T = ComplexF64
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     M, N = randn(T, (4, 4)), randn(T, (4, 4))
     # `conj(::Matrix)` materialises; `conj(::StridedView)` only sets `op`.
     wrappers = (identity, adjoint, transpose, conj)
@@ -88,7 +88,7 @@ end
 
 @testset "conjugated output view (eltype = $T)" for T in all_eltypes
     Random.seed!(271828)
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     A, B = randn(T, (4, 4)), randn(T, (4, 4))
     conjviews = (
         conj(StridedView(zeros(T, (4, 4)))), adjoint(zeros(T, (4, 4))),
@@ -114,7 +114,7 @@ end
         (randn(T, (3, 4)), randn(T, (4, 3)), ((), (1, 2)), ((2, 1), ()), ((), ()), (), false, false),
         (
             view(randn(T, (6, 8)), 1:2:6, 1:2:8), view(randn(T, (8, 10)), 1:2:8, 1:2:10),
-            _MATMUL_PAB..., (3, 5), false, true,
+            MATMUL_PAB..., (3, 5), false, true,
         ),
     )
     for (A, B, pA, pB, pAB, szC, conjA, conjB) in cases
@@ -140,7 +140,7 @@ end
 end
 
 @testset "hard-reject: ineligible eltypes and non-strided operands" begin
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     # (eltype A, eltype B, eltype C): types outside the four, and complex into real.
     for (TA, TB, TC) in (
             (Float16, Float16, Float16), (Complex{Float16}, Complex{Float16}, Complex{Float16}),
@@ -178,7 +178,7 @@ end
 end
 
 @testset "hard-reject: C aliasing an input (eltype = $T)" for T in (Float64, ComplexF64)
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     A, B = randn(T, (4, 4)), randn(T, (4, 4))
     M = randn(T, (8, 4))
     # Regression: Base's `mightalias` misses a `PermutedDimsArray` of the input.

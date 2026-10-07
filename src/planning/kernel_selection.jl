@@ -301,7 +301,7 @@ end
     if MR == 4 * W && run % MR != 0 && run >= 2 * W && half in kernel_shapes(T, K)
         shape = half
     end
-    kmax = T === Float64 ? _RUN_DEMOTE_KMAX_F64 : _RUN_DEMOTE_KMAX_F32
+    kmax = T === Float64 ? RUN_DEMOTE_KMAX_F64 : RUN_DEMOTE_KMAX_F32
     (k_length > kmax || run % shape[1] == 0) && return shape
     best = nothing
     for s in kernel_shapes(T, K)
@@ -311,5 +311,5 @@ end
 end
 
 # Deepest `k_length` at which the divisor step still wins.
-const _RUN_DEMOTE_KMAX_F64 = 32
-const _RUN_DEMOTE_KMAX_F32 = 64
+const RUN_DEMOTE_KMAX_F64 = 32
+const RUN_DEMOTE_KMAX_F32 = 64

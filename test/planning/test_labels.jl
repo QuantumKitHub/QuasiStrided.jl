@@ -125,7 +125,7 @@ end
 
 @testset "label order: pinning test on the ccsd_t shapes (composite order and swap)" begin
     d = 5
-    for (name, IA, IB) in _LO_CASES
+    for (name, IA, IB) in LO_CASES
         (indA, indB, indC), _ = _lo_labels(IA, IB)
         A = randn(d, d, d, d)
         B = randn(d, d, d, d)
@@ -223,7 +223,7 @@ end
     perm = (3, 5, 1, 6, 4, 2)  # output axis p takes physical axis perm[p]
     for T in (Float64, ComplexF64)
         rtol = 200 * d * eps(real(T))
-        for (name, IA, IB) in _LO_CASES, (conjA, conjB) in ((false, false), (true, true))
+        for (name, IA, IB) in LO_CASES, (conjA, conjB) in ((false, false), (true, true))
             (T <: Real) && conjA && continue  # conj is the identity on the real path
             (indA, indB, indC), (pA, pB, pAB) = _lo_labels(IA, IB)
             A = randn(T, d, d, d, d)
@@ -256,7 +256,7 @@ end
         W = QuasiStrided.default_lanewidth(real(T))
         kernel = QuasiStrided.PlanarKernel(Val(W), Val(8), T, Val(W))
         @test tile_size(kernel, 1) <= 16
-        (indA, indB, indC), _ = _lo_labels(_LO_CASES[3][2], _LO_CASES[3][3])
+        (indA, indB, indC), _ = _lo_labels(LO_CASES[3][2], LO_CASES[3][3])
         A = randn(T, d, d, d, d)
         B = randn(T, d, d, d, d)
         C = randn(T, d, d, d, d, d, d)
@@ -280,7 +280,7 @@ end
 
 @testset "label order: the adapter path reaches the reordered plan" begin
     d = 6
-    for (name, IA, IB) in _LO_CASES
+    for (name, IA, IB) in LO_CASES
         (indA, indB, indC), (pA, pB, pAB) = _lo_labels(IA, IB)
         A, B, C = randn(d, d, d, d), randn(d, d, d, d), randn(d, d, d, d, d, d)
         Cref = _lo_reference(C, StridedView(A), indA, StridedView(B), indB, indC; alpha = 0.9, beta = -0.5)
@@ -290,16 +290,16 @@ end
 end
 
 # Contracted-label order. Labels a=1 b=2 c=3 d=4 e=5 with distinct extents.
-# `_KO_EXT` fits any L2; `_KO_BIG` makes B's lines touched before `d` advances
+# `KO_EXT` fits any L2; `KO_BIG` makes B's lines touched before `d` advances
 # (b*c*e*64 B) exceed THIS host's L2 share, with e >= 40, so the model reorders
 # K wherever the suite runs.
 function _ko_big(l2 = QuasiStrided.l2_core_bytes(target_profile()))
     e = max(40, fld(l2, 40 * 40 * 64) + 1)
     return Dict(1 => 9, 2 => 40, 3 => 40, 4 => 5, 5 => e)
 end
-const _KO_EXT = Dict(1 => 9, 2 => 3, 3 => 4, 4 => 5, 5 => 6)
-const _KO_BIG = _ko_big()
-_ko_array(::Type{T}, ind, ext = _KO_EXT) where {T} = randn(T, Tuple(ext[l] for l in ind)...)
+const KO_EXT = Dict(1 => 9, 2 => 3, 3 => 4, 4 => 5, 5 => 6)
+const KO_BIG = _ko_big()
+_ko_array(::Type{T}, ind, ext = KO_EXT) where {T} = randn(T, Tuple(ext[l] for l in ind)...)
 _ko_stride(v, ind, l) = Base.strides(v)[findfirst(==(l), ind)]
 
 function _ko_order(Av, indA, Bv, indB, Cv, indC; l2bytes)
@@ -315,7 +315,7 @@ end
 @testset "K order: cost model picks among indA / A-sorted / B-sorted" begin
     T = Float64
     Av = StridedView(_ko_array(T, (1, 2, 3, 4)))   # A[a,b,c,d]: a unit-stride, 9 >= a line
-    Cv = StridedView(zeros(T, _KO_EXT[1], _KO_EXT[5]))
+    Cv = StridedView(zeros(T, KO_EXT[1], KO_EXT[5]))
 
     # contract_scrambled, B[d,c,b,e]: B-sorted once the lines in flight exceed L2.
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5)))
@@ -349,7 +349,7 @@ end
 
 @testset "K order: static-length tuple, inferred, allocation-free" begin
     T = Float64
-    ext = _KO_BIG
+    ext = KO_BIG
     Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))
     Cv = StridedView(zeros(T, ext[1], ext[5]))
@@ -369,7 +369,7 @@ end
 
 @testset "K order: plan_contract flips contract_scrambled at an L2-exceeding size" begin
     T = Float64
-    ext = _KO_BIG
+    ext = KO_BIG
     @test ext[2] * ext[3] * ext[5] * 64 > QuasiStrided.l2_core_bytes(target_profile())
     Av = StridedView(_ko_array(T, (1, 2, 3, 4), ext))
     Bs = StridedView(_ko_array(T, (4, 3, 2, 5), ext))   # B[d,c,b,e]
@@ -397,7 +397,7 @@ end
 
 @testset "K order: correctness on scrambled K (alpha/beta, conj, both orientations)" begin
     Random.seed!(0x5C7A_0B1E)
-    ext = _KO_BIG
+    ext = KO_BIG
     for T in (Float64, ComplexF64)
         rtol = 500 * eps(real(T))
         alpha = T <: Complex ? T(1.3, -0.4) : T(1.3)

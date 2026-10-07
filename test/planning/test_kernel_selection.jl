@@ -131,7 +131,7 @@ using StridedViews: StridedView
             @test fit(half, T, m_length, deep, 3 * W) === half
             # Then, at shallow K, the largest menu shape whose `MR` divides the run.
             @test fit(tall, T, m_length, 1, 3 * W) === largest_divisor(T, 3 * W)
-            kmax = T === Float64 ? QuasiStrided._RUN_DEMOTE_KMAX_F64 : QuasiStrided._RUN_DEMOTE_KMAX_F32
+            kmax = T === Float64 ? QuasiStrided.RUN_DEMOTE_KMAX_F64 : QuasiStrided.RUN_DEMOTE_KMAX_F32
             for shape in kernel_shapes(T)
                 S = shape[1]
                 @test fit(shape, T, 1000, 1, 3 * S) === shape
@@ -442,8 +442,8 @@ end
         return StridedView(C), StridedView(A), StridedView(B)
     end
 
-    kmax_of(::Type{Float64}) = QuasiStrided._RUN_DEMOTE_KMAX_F64
-    kmax_of(::Type{Float32}) = QuasiStrided._RUN_DEMOTE_KMAX_F32
+    kmax_of(::Type{Float64}) = QuasiStrided.RUN_DEMOTE_KMAX_F64
+    kmax_of(::Type{Float32}) = QuasiStrided.RUN_DEMOTE_KMAX_F32
 
     for (T, a) in ((Float64, 8), (Float32, 16))
         m_length = a * 36

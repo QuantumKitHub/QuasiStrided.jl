@@ -27,7 +27,7 @@ struct NestPath{UNPACKED_B, AFF, SPLIT} end
     )
     split_b &= !unpacked_b
     return nest_path_from_flags(
-        panel ? _PANEL_PATHS : _NEST_PATHS, unpacked_b,
+        panel ? PANEL_PATHS : NEST_PATHS, unpacked_b,
         !split_a && is_ramp_map(mgroup, 1), !split_a && (panel || is_ramp_map(mgroup, 2)),
         !unpacked_b && !split_b && is_ramp_map(ngroup, 1), !split_b && (panel || is_ramp_map(ngroup, 2)),
         is_ramp_map(kgroup, 1), is_ramp_map(kgroup, 2), split_a, split_b
@@ -47,7 +47,7 @@ struct PanelPath{P <: NestPath} end
     return @inbounds table[index]
 end
 
-const _NEST_PATHS = let
+const NEST_PATHS = let
     table = Vector{Any}(undef, 512)
     for index in 1:512
         bits = ntuple(i -> ((index - 1) >> (i - 1)) & 1 == 1, 9)
@@ -56,7 +56,7 @@ const _NEST_PATHS = let
     table
 end
 
-const _PANEL_PATHS = Any[PanelPath{typeof(p)}() for p in _NEST_PATHS]
+const PANEL_PATHS = Any[PanelPath{typeof(p)}() for p in NEST_PATHS]
 
 # The dot path at lane width `W`; `MATB`: the matrix operand is B
 # (`m_length == 1`).

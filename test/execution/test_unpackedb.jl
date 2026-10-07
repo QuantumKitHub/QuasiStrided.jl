@@ -23,14 +23,14 @@ function _ub_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     return @test C_unp ≈ _ref_of(mk, alpha, beta; conjA, conjB)
 end
 
-const _UB_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
+const UB_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
 
-@testset "unpacked B: which plans read B in place ($T)" for T in _UB_TYPES
+@testset "unpacked B: which plans read B in place ($T)" for T in UB_TYPES
     planof(M; B = :dense, kw...) = plan_contract(_mm_maker(T, M, 12, 9, 1; B)()...; kw...)
     @test _ub_takes(planof(20)) && _ub_takes(planof(20; B = :reversed))
     # K strided in B stays packed, as does an M above the cutoff.
     @test !_ub_takes(planof(20; B = :transposed)) && !_ub_takes(planof(20; B = :gap))
-    MMAX = QuasiStrided._UNPACKED_B_MMAX
+    MMAX = QuasiStrided.UNPACKED_B_MMAX
     @test _ub_takes(planof(MMAX)) && !_ub_takes(planof(MMAX + 1))
     # K = 1 (a rank-0 K group, step 0).
     Kv = (StridedView(zeros(T, 20, 9)), StridedView(randn(T, 20)), (1,), StridedView(randn(T, 9)), (2,), (1, 2))
@@ -46,7 +46,7 @@ const _UB_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
     @test !_ub_takes(planof(20; kernel = k))
 end
 
-@testset "unpacked B: bitwise the packed nest ($T)" for T in _UB_TYPES
+@testset "unpacked B: bitwise the packed nest ($T)" for T in UB_TYPES
     for (idx, (M, K, N)) in enumerate(((2, 3, 1), (17, 9, 13), (33, 64, 5))), B in (:dense, :reversed),
             (alpha, beta) in ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
         _ub_check(_mm_maker(T, M, K, N, 10 + idx; B), alpha, beta)
@@ -91,7 +91,7 @@ end
     @test all(iszero, Cm)
 end
 
-@testset "unpacked B: allocation-free, and through the backend ($T)" for T in _UB_TYPES
+@testset "unpacked B: allocation-free, and through the backend ($T)" for T in UB_TYPES
     Amat, Bmat, Cmat = randn(T, 40, 50), randn(T, 50, 37), zeros(T, 40, 37)
     plan = _mm_plan(Cmat, Amat, Bmat; k_block = 16, n_block = 12)
     @test _ub_takes(plan)

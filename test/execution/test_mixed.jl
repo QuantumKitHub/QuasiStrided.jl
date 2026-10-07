@@ -8,7 +8,7 @@ using LinearAlgebra: norm
 # operand from `scattered_fixture` of its own eltype, `:split` is intensli_7 with
 # M^4 rows.
 function _mixed_fixture(TA, TB, TC, M, K, N, layout, seed)
-    layout === :split && return _sp_views(TC, _SP_I7, (M, M, M, K, M, N), TA)
+    layout === :split && return _sp_views(TC, SP_I7, (M, M, M, K, M, N), TA)
     layout === :scattered &&
         return (scattered_fixture(TC)[1], scattered_fixture(TA)[2:3]..., scattered_fixture(TB)[4:6]...)
     rng = MersenneTwister(seed)
@@ -23,17 +23,17 @@ function _mixed_ref(fx, alpha, beta; kw...)
     return _brute_ref(R.(Array(Av)), iA, R.(Array(Bv)), iB, R.(Array(Cv)), iC, alpha, beta; kw...)
 end
 
-const _PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
+const PROMOTED = Union{QuasiStrided.PlanarKernel, QuasiStrided.FMAddSubKernel}
 
 @testset "mixed eltypes: $TA x $TB -> $TC, accumulator = $acc, $layout" for (TA, TB, TC, acc, layout, MKN, beta, conjA, conjB, path, K) in (
         (Float32, Float64, Float64, nothing, :dense, (23, 37, 19), 0, false, false, QuasiStrided.NestPath, SIMDKernel),
         (Float64, Float32, Float32, nothing, :dense, (32, 40, 12), 1, false, false, QuasiStrided.NestPath, SIMDKernel),
-        (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided.NestPath, _RC),
-        (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided.NestPath, _CR),
-        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, NestPath{false, <:Any, (true, false)}, _RC),
-        (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided.NestPath, _PROMOTED),
-        (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided.NestPath, _PROMOTED),
-        (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided.NestPath, _CR),
+        (Float64, ComplexF64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.3 - 0.7im, false, true, QuasiStrided.NestPath, RC),
+        (ComplexF32, Float64, ComplexF64, nothing, :scattered, (32, 32, 32), 0.5, true, false, QuasiStrided.NestPath, CR),
+        (Float64, ComplexF64, ComplexF64, nothing, :split, (8, 3, 5), 0.5, false, true, NestPath{false, <:Any, (true, false)}, RC),
+        (ComplexF32, ComplexF64, ComplexF64, nothing, :dense, (19, 29, 23), 1, true, true, QuasiStrided.NestPath, PROMOTED),
+        (Float64, Float64, ComplexF64, nothing, :dense, (18, 25, 14), 0.25 + 0.5im, false, false, QuasiStrided.NestPath, PROMOTED),
+        (ComplexF64, Float32, ComplexF64, Float32, :dense, (17, 31, 13), 0, false, false, QuasiStrided.NestPath, CR),
         (Float32, Float64, Float64, nothing, :dense, (1, 70, 29), 0.5, false, false, QuasiStrided.DotPath, SIMDKernel),
         (Float64, Float32, Float64, nothing, :dense, (37, 1, 21), 1, false, false, QuasiStrided.OuterPath, SIMDKernel),
     )
@@ -53,7 +53,7 @@ end
 
 @testset "a named mixed-domain kernel with a complex RealFormat side throws at plan time" begin
     Cv, Av, Bv = (StridedView(zeros(ComplexF64, 8, 8)) for _ in 1:3)
-    for kernel in (_CR(Val(4), Val(6), ComplexF64, Val(4)), _RC(Val(8), Val(3), ComplexF64, Val(4)))
+    for kernel in (CR(Val(4), Val(6), ComplexF64, Val(4)), RC(Val(8), Val(3), ComplexF64, Val(4)))
         @test_throws ArgumentError plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3); kernel)
     end
 end

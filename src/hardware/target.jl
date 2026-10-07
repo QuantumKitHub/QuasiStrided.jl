@@ -41,7 +41,7 @@ struct TargetProfile
             throw(ArgumentError("TargetProfile: unknown ISA $(repr(isa))"))
         return new(
             isa, cpu_name, isa_vector_bytes(isa), isa_nregisters(isa), l1d, l2, l3,
-            core_bytes(l1d, l2), core_bytes(l1d, l3), cpu_name in _DOUBLE_PUMPED_CPUS
+            core_bytes(l1d, l2), core_bytes(l1d, l3), cpu_name in DOUBLE_PUMPED_CPUS
         )
     end
 end
@@ -51,7 +51,7 @@ end
 core_bytes(l1d::CacheLevel, level::CacheLevel) = level.bytes ÷ max(1, level.sharing ÷ max(1, l1d.sharing))
 
 # AMD's AVX-512 cores, which double-pump 512-bit FMAs.
-const _DOUBLE_PUMPED_CPUS = ("znver4", "znver5")
+const DOUBLE_PUMPED_CPUS = ("znver4", "znver5")
 
 unknown_target() = TargetProfile(:unknown, "", CacheLevel(), CacheLevel(), CacheLevel())
 
@@ -205,5 +205,5 @@ line_bytes(profile::TargetProfile) = profile.l1d.line > 0 ? profile.l1d.line : 6
 
 # A K step at least a page apart: a chain of demand misses no prefetcher
 # follows, which the K-order model charges this factor.
-const _K_WALK_FAR_BYTES = 4096
-const _K_WALK_FAR_PENALTY = 3
+const K_WALK_FAR_BYTES = 4096
+const K_WALK_FAR_PENALTY = 3

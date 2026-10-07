@@ -4,7 +4,7 @@
 
 include("helpers.jl")
 
-const _DOT_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
+const DOT_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
 
 # `C[cde] = A[ab] * B[abcde]` (M = 1, matrix B K-fastest) at leg dimension `d`:
 #   :permvec  A stored [b,a]: the vector's K map is not a ramp (the matrix's is)
@@ -41,7 +41,7 @@ function _dot_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     return @test C_dot ≈ _ref_of(mk, alpha, beta; conjA, conjB)
 end
 
-@testset "dot path: which plans it takes ($T)" for T in _DOT_TYPES
+@testset "dot path: which plans it takes ($T)" for T in DOT_TYPES
     W = _lanes(T)
     for variant in (:plain, :permvec, :permC, :offsetB)
         @test _dot_takes(plan_contract(_dot_gemv_maker(T, 4, 1; variant)()...))
@@ -58,7 +58,7 @@ end
     end
 end
 
-@testset "dot path: matches the reference ($T)" for T in _DOT_TYPES
+@testset "dot path: matches the reference ($T)" for T in DOT_TYPES
     ab = ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
     for d in (2, 6), variant in (:plain, :permvec, :permC, :offsetB), (alpha, beta) in ab
         mk = _dot_gemv_maker(T, d, 10 * d; variant)
@@ -108,7 +108,7 @@ end
     end
 end
 
-@testset "dot path: allocation-free, and through the backend ($T)" for T in _DOT_TYPES
+@testset "dot path: allocation-free, and through the backend ($T)" for T in DOT_TYPES
     for (mk, kw) in ((_dot_gemv_maker(T, 6, 4), (;)), (_dot_n1_maker(T, 5, 300, 4), (k_block = 64, m_block = 8)))
         plan = plan_contract(mk()...; kw...)
         @test _dot_takes(plan)

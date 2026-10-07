@@ -166,7 +166,7 @@ end
     pu(; kw...) = plan_contract(_mm_maker(Float64, 20, 12, 9, 1)()...; kw...)
     ps(; kw...) = plan_contract(_mm_maker(Float64, 20, 12, 9, 1; B = :transposed)()...; kw...)
     @test _dot_takes(pd()) && _outer_takes(po()) && _ub_takes(pu()) && !_ub_takes(ps())
-    @test !_dot_takes(pd(; path_modes = _NEST_ONLY)) && !_outer_takes(po(; path_modes = _NEST_ONLY)) &&
-        !_ub_takes(pu(; path_modes = _NEST_ONLY))
+    @test !_dot_takes(pd(; path_modes = NEST_ONLY)) && !_outer_takes(po(; path_modes = NEST_ONLY)) &&
+        !_ub_takes(pu(; path_modes = NEST_ONLY))
     @test _ub_takes(ps(; path_modes = QuasiStrided.PathModes(unpacked_b = :always)))
 end

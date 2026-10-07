@@ -25,13 +25,13 @@ struct PackSplit
     E::Int32
 end
 
-const _NO_SPLIT = PackSplit(0, 0, 0, false, 0, 0)
+const NO_SPLIT = PackSplit(0, 0, 0, false, 0, 0)
 
 is_split(s::PackSplit) = s.L != 0
 
 # The split for the free group `g` of operand `side` (1: A for M, 2: B for N),
 # packed in slivers of `lanes` elements of `format`, whose storage eltype takes
-# `S` bytes, and the block extent it needs, or `(eff, _NO_SPLIT)`. `eff` is the
+# `S` bytes, and the block extent it needs, or `(eff, NO_SPLIT)`. `eff` is the
 # plan's extent, `rounded` the requested one rounded to the tile; a split block
 # may take the budget the blocking reserved for `k_block_requested` when the K
 # extent clamps `k_block`. `l2bytes = nothing`: `split_capacity`, doubled for
@@ -40,18 +40,18 @@ is_split(s::PackSplit) = s.L != 0
         g::AxisGroup{D}, kg::AxisGroup, side::Int, lanes::Int, format::PackFormat, S::Int, k_block::Int,
         eff::Int, rounded::Int, k_block_requested::Int; l2bytes::Union{Int, Nothing} = nothing
     ) where {D}
-    D < 256 || return (eff, _NO_SPLIT)
+    D < 256 || return (eff, NO_SPLIT)
     line = line_bytes(target_profile())
     d1 = 0
     for d in 1:D
         g.lengths[d] > 1 && (d1 = d; break)
     end
-    (d1 > 0 && abs(g.strides[1][d1]) * S >= line) || return (eff, _NO_SPLIT)
+    (d1 > 0 && abs(g.strides[1][d1]) * S >= line) || return (eff, NO_SPLIT)
     dj = 0
     for d in (d1 + 1):D
         g.lengths[d] > 1 && abs(g.strides[1][d]) == 1 && (dj = d; break)
     end
-    dj == 0 && return (eff, _NO_SPLIT)
+    dj == 0 && return (eff, NO_SPLIT)
     return pack_split_window(g, kg, side, d1, dj, lanes, S, !(format isa RealFormat), line, k_block, eff, rounded, k_block_requested, l2bytes)
 end
 
@@ -61,7 +61,7 @@ end
         line::Int, k_block::Int, eff::Int, rounded::Int, k_block_requested::Int, l2bytes::Union{Int, Nothing}
     ) where {DK}
     L = largest_divisor_upto(g.lengths[dj], max(1, line ÷ S))
-    L >= 2 || return (eff, _NO_SPLIT)
+    L >= 2 || return (eff, NO_SPLIT)
 
     ks = 0
     for d in 1:DK
@@ -70,8 +70,8 @@ end
     # K steps within a page make each sliver element's lines a stream the
     # prefetchers follow; a split then only saves refetching those lines, which
     # does not pay for the block walk's costlier complex scatter.
-    kinner = ks * S < _K_WALK_FAR_BYTES
-    kinner && complex && return (eff, _NO_SPLIT)
+    kinner = ks * S < K_WALK_FAR_BYTES
+    kinner && complex && return (eff, NO_SPLIT)
 
     # A line of `dj` is reused `psi` coordinates later; while the lines touched
     # meanwhile fit the cache, the per-sliver walk is already cache-friendly.
@@ -80,9 +80,9 @@ end
         psi *= g.lengths[d]
     end
     klines = ks * S >= line ? k_block : cld(k_block * ks * S, line)
-    aliased = abs(g.strides[1][d1]) * S % _K_WALK_FAR_BYTES == 0
+    aliased = abs(g.strides[1][d1]) * S % K_WALK_FAR_BYTES == 0
     cap = something(l2bytes, split_capacity(target_profile(), aliased) << complex)
-    widemul(psi, max(1, klines) * line) > cap || return (eff, _NO_SPLIT)
+    widemul(psi, max(1, klines) * line) > cap || return (eff, NO_SPLIT)
     return pack_split_dynamic(g.lengths, d1, dj, L, psi, R, eff, rounded, k_block, k_block_requested, kinner)
 end
 
@@ -125,7 +125,7 @@ function pack_split_blocks(
         pre *= len
     end
     (q, Eq, E) = best[3] > 0 ? best : anyc
-    E == 0 && return (eff, _NO_SPLIT)
+    E == 0 && return (eff, NO_SPLIT)
     blk = lcm(R, E * L)
     neweff = min(budget ÷ blk * blk, roundup(prod(lengths), R))
     return (neweff, PackSplit(q, dj, L, kinner, Eq, E))

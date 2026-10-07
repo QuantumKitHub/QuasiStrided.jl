@@ -19,14 +19,14 @@ function _macro_plan(Cmat, Amat, Bmat, kernel, m_block, k_block, n_block; conjA 
     )
 end
 
-const _MACRO_SHAPES = ((Val(4), Val(3)), (Val(8), Val(6)))
+const MACRO_SHAPES = ((Val(4), Val(3)), (Val(8), Val(6)))
 
 # Every constructible (kernel type, shape) for `T`; constructors reject shapes
 # their lane width cannot tile.
 function _macro_kernels(::Type{T}) where {T}
     ctors = T <: Complex ? (QuasiStrided.PlanarKernel, QuasiStrided.OneMKernel) : (ScalarKernel, SIMDKernel)
     ks = Any[]
-    for ctor in ctors, (m, n) in _MACRO_SHAPES
+    for ctor in ctors, (m, n) in MACRO_SHAPES
         k = try
             ctor(m, n, T)
         catch err

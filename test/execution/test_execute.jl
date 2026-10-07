@@ -3,13 +3,13 @@ include("helpers.jl")
 @testset "contract!: worked fixture, permuted and sliced views" begin
     A, B, Cref = _worked_fixture()
     C = zeros(3, 4, 2)
-    contract!(StridedView(C), 1.0, StridedView(A), _INDA, StridedView(B), _INDB, 0.0, _INDC)
+    contract!(StridedView(C), 1.0, StridedView(A), INDA, StridedView(B), INDB, 0.0, INDC)
     @test C ≈ Cref
 
     # Ap[k,b,a] == A[a,k,b], Bp[n,k] == B[k,n].
     C = zeros(3, 4, 2)
     Ap, Bp = permutedims(A, (2, 3, 1)), permutedims(B, (2, 1))
-    contract!(StridedView(C), 1.0, StridedView(Ap), (2, 3, 1), StridedView(Bp), (4, 2), 0.0, _INDC)
+    contract!(StridedView(C), 1.0, StridedView(Ap), (2, 3, 1), StridedView(Bp), (4, 2), 0.0, INDC)
     @test C ≈ Cref
 
     # Nonzero view offsets on A and C.
@@ -17,7 +17,7 @@ include("helpers.jl")
     Cfull = zeros(4, 4, 2)
     Av, Cv = StridedView(view(A4, 2:4, :, :)), StridedView(view(Cfull, 2:4, :, :))
     @test offset(Av) != 0
-    contract!(Cv, 1.0, Av, _INDA, StridedView(B), _INDB, 0.0, _INDC)
+    contract!(Cv, 1.0, Av, INDA, StridedView(B), INDB, 0.0, INDC)
     @test Array(Cv) ≈ [sum(A4[a, k, b] * B[k, n] for k in 1:5) for a in 2:4, n in 1:4, b in 1:2]
     @test all(iszero, Cfull[1, :, :])
 end

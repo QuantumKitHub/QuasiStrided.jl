@@ -124,7 +124,7 @@ end
 #
 #     cost = n * walk * amplification
 #
-#   * `walk` is `_K_WALK_FAR_PENALTY` when the fastest K axis steps more than a
+#   * `walk` is `K_WALK_FAR_PENALTY` when the fastest K axis steps more than a
 #     page (a chain of demand misses no prefetcher follows), else 1.
 #   * `amplification` is how often a cache line is fetched: 1 when the slivers
 #     are whole lines, when the operand's smallest-stride axis `u` is the
@@ -181,7 +181,7 @@ function k_order_cost(
         end
     end
     kfast == 0 && return 0  # all-singleton K: nothing walks
-    walk = @inbounds(st[kfast]) * S > _K_WALK_FAR_BYTES ? _K_WALK_FAR_PENALTY : 1
+    walk = @inbounds(st[kfast]) * S > K_WALK_FAR_BYTES ? K_WALK_FAR_PENALTY : 1
     op.wholeline && return op.n * walk
 
     # The smallest-stride K axis `u` (first in this order among equal strides).
