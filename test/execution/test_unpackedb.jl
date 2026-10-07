@@ -1,9 +1,9 @@
 # The unpacked-B path: `execute!` reads B in place through an `UnpackedBView`
-# where `_unpacked_b_rule` says so. The result must be bitwise the packed nest's
+# where `unpacked_b_rule` says so. The result must be bitwise the packed nest's
 # (same arithmetic, same values, different address), and the packed-B buffer
 # must stay untouched.
 
-_ub_takes(plan) = _path_of(plan) isa QuasiStrided._NestPath{true}
+include("helpers.jl")
 
 # Poison the packed-B buffer, then run.
 function _ub_run!(plan, alpha, beta)
@@ -16,21 +16,21 @@ _ub_untouched(plan) = all(isnan, plan.workspace.packed_b)
 # and the reference.
 function _ub_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     C_unp, plan = _run_fresh(_ub_run!, mk, alpha, beta; conjA, conjB, plankw...)
-    C_packed, _ = _run_fresh(_run_nest!, mk, alpha, beta; conjA, conjB, plankw...)
+    C_packed, _ = _run_nest(mk, alpha, beta; conjA, conjB, plankw...)
     @test _ub_takes(plan)
     @test _ub_untouched(plan)
     @test C_unp == C_packed
     return @test C_unp ≈ _ref_of(mk, alpha, beta; conjA, conjB)
 end
 
-const _UB_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
+const UB_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
 
-@testset "unpacked B: which plans read B in place ($T)" for T in _UB_TYPES
+@testset "unpacked B: which plans read B in place ($T)" for T in UB_TYPES
     planof(M; B = :dense, kw...) = plan_contract(_mm_maker(T, M, 12, 9, 1; B)()...; kw...)
     @test _ub_takes(planof(20)) && _ub_takes(planof(20; B = :reversed))
     # K strided in B stays packed, as does an M above the cutoff.
     @test !_ub_takes(planof(20; B = :transposed)) && !_ub_takes(planof(20; B = :gap))
-    MMAX = QuasiStrided._UNPACKED_B_MMAX
+    MMAX = QuasiStrided.UNPACKED_B_MMAX
     @test _ub_takes(planof(MMAX)) && !_ub_takes(planof(MMAX + 1))
     # K = 1 (a rank-0 K group, step 0).
     Kv = (StridedView(zeros(T, 20, 9)), StridedView(randn(T, 20)), (1,), StridedView(randn(T, 9)), (2,), (1, 2))
@@ -46,18 +46,18 @@ const _UB_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
     @test !_ub_takes(planof(20; kernel = k))
 end
 
-@testset "unpacked B: bitwise the packed nest ($T)" for T in _UB_TYPES
+@testset "unpacked B: bitwise the packed nest ($T)" for T in UB_TYPES
     for (idx, (M, K, N)) in enumerate(((2, 3, 1), (17, 9, 13), (33, 64, 5))), B in (:dense, :reversed),
             (alpha, beta) in ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
         _ub_check(_mm_maker(T, M, K, N, 10 + idx; B), alpha, beta)
     end
-    # Several jc/pc/ic blocks with tails, explicit kernel shapes.
+    # Several N/K/M blocks with tails, explicit kernel shapes.
     k0 = plan_contract(_mm_maker(T, 64, 8, 8, 2)()...).kernel
     W = lanewidth(k0)
     kernels = T <: Real ? (k0, SIMDKernel(Val(8), Val(6), T)) :
         (k0, QuasiStrided.PlanarKernel(Val(W), Val(5), T, Val(W)), QuasiStrided.FMAddSubKernel(Val(W), Val(5), T, Val(W)))
-    for k in kernels, (mc, kc, nc) in ((8, 3, 6), (40, 1, 100))
-        _ub_check(_mm_maker(T, 2 * mr(k) + 1, 13, 2 * nr(k) + 1, 3), 1.5, 0.5; kernel = k, mc, kc, nc)
+    for k in kernels, (m_block, k_block, n_block) in ((8, 3, 6), (40, 1, 100))
+        _ub_check(_mm_maker(T, 2 * tile_size(k, 1) + 1, 13, 2 * tile_size(k, 2) + 1, 3), 1.5, 0.5; kernel = k, m_block, k_block, n_block)
     end
     # beta = 0 never reads a NaN C.
     _ub_check(_mm_maker(T, 10, 6, 7, 3; Cfill = NaN), 2.0, 0.0)
@@ -91,14 +91,14 @@ end
     @test all(iszero, Cm)
 end
 
-@testset "unpacked B: allocation-free, and through the backend ($T)" for T in _UB_TYPES
+@testset "unpacked B: allocation-free, and through the backend ($T)" for T in UB_TYPES
     Amat, Bmat, Cmat = randn(T, 40, 50), randn(T, 50, 37), zeros(T, 40, 37)
-    plan = _mm_plan(Cmat, Amat, Bmat; kc = 16, nc = 12)
+    plan = _mm_plan(Cmat, Amat, Bmat; k_block = 16, n_block = 12)
     @test _ub_takes(plan)
     allocs = _steady_allocs!(execute!, plan, Cmat)
     @test allocs == 0 skip = (VERSION < v"1.11")
     @test Cmat ≈ Amat * Bmat
-    # The backend runs the path predicted before planning (`_path_hint`).
+    # The backend plans and runs in one call.
     fill!(Cmat, 0)
     TO.tensorcontract!(Cmat, Amat, ((1,), (2,)), false, Bmat, ((1,), (2,)), false, ((1, 2), ()), 1.0, 0.0, QuasiStridedBackend())
     @test Cmat ≈ Amat * Bmat

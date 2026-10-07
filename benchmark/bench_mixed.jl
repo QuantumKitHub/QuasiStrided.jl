@@ -5,16 +5,18 @@
 # fraction of real efficiency reached.
 #
 #   julia --project=benchmark benchmark/bench_mixed.jl [--dtypes ComplexF64,ComplexF32]
-#       [--sizes 512,2048] [--reps 5] [--outdir DIR]
+#       [--sizes 512,2048] [--reps 5] [--smoke] [--outdir DIR]
+#
+# `--smoke` defaults the sizes to 64.
 
 include(joinpath(@__DIR__, "harness.jl"))
 
-using QuasiStrided: ComplexRealKernel, RealComplexKernel, PlanarMethod, target_profile,
-    _derived_shape, _kernel_from_shape
+using QuasiStrided: ComplexRealKernel, RealComplexKernel, PlanarKernel, target_profile,
+    derived_shape, kernel_from_shape
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "ComplexF64,ComplexF32"))
-const SIZES = parse_ints(argopt("sizes", "512,2048"))
-const REPS = argopt("reps", 5)
+const SIZES = parse_ints(argopt("sizes", SMOKE ? "64" : "512,2048"))
+const REPS = reps_arg(5)
 const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "bench_mixed.csv")
 
@@ -29,8 +31,8 @@ function run(io)
     rng = MersenneTwister(1)
     for T in RUN_DTYPES, n in SIZES
         R = real(T)
-        MRr, NRr, W = _derived_shape(target_profile(), R)
-        planar = _kernel_from_shape(_derived_shape(target_profile(), T), T, PlanarMethod())
+        MRr, NRr, W = derived_shape(target_profile(), R)
+        planar = kernel_from_shape(derived_shape(target_profile(), T), T, PlanarKernel)
         cases = (
             (
                 "CR", ComplexRealKernel(Val(MRr ÷ 2), Val(NRr), T, Val(W)),
@@ -46,7 +48,7 @@ function run(io)
             tm = time_plan(C, A, B; kernel)
             tp = time_plan(C, A, B; kernel = planar)
             tr = time_plan(zeros(R, Mr, Nr), randn(rng, R, Mr, n), randn(rng, R, n, Nr))
-            tag = "$(mr(kernel))x$(nr(kernel))/W$(lanewidth(kernel))"
+            tag = "$(tile_size(kernel, 1))x$(tile_size(kernel, 2))/W$(lanewidth(kernel))"
             @printf(
                 "%-10s %s %5d  %-10s mixed %8.4f s  promoted %8.4f s  real %8.4f s  promoted/mixed %.2f  real/mixed %.2f\n",
                 T, case, n, tag, tm, tp, tr, tp / tm, tr / tm

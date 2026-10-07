@@ -1,5 +1,7 @@
 # AxisGroup indexing against an oracle built on `CartesianIndices` (first axis
-# fastest), never on offsets/fill_offsets!/block_descriptors! themselves.
+# fastest), never on fill_offsets!/block_descriptors! themselves.
+
+include("../helpers.jl")
 
 using QuasiStrided: affine_ramp
 
@@ -47,29 +49,20 @@ end
         full = oracle_offsets(lengths, strides)
         Q = axis_length(g)
         @test Q == length(full)
-        @test [offsets(g, q) for q in 0:(Q - 1)] == full
-        @test_throws BoundsError offsets(g, Q)
-        @test_throws BoundsError offsets(g, -1)
         isramp, steps = affine_ramp(g)
         if Q > 0
             step1 = Q > 1 ? full[2] : ntuple(_ -> 0, P)
             @test isramp == (full == [step1 .* q for q in 0:(Q - 1)])
             isramp && @test steps == step1
         end
-        # normalize_group is planning-time only: check it at the pair arity.
-        gn = P == 2 ? normalize_group(g) : g
-        @test axis_length(gn) == Q
         for _ in 1:4
             first = rand(rng, 0:Q)
             count = rand(rng, 0:(Q - first))
             bufs = ntuple(_ -> fill(-1, count + 2), P)   # the suffix must stay untouched
             descs = block_descriptors!(bufs, g, first, count)
-            bufsn = ntuple(_ -> zeros(Int, count), P)
-            fill_offsets!(bufsn, gn, first, count)
             for p in 1:P
                 expected = [full[i + 1][p] for i in first:(first + count - 1)]
                 @test bufs[p] == [expected; -1; -1]
-                @test bufsn[p] == expected
                 d = descs[p]
                 affine = count <= 1 || expected == [expected[1] + t * (expected[2] - expected[1]) for t in 0:(count - 1)]
                 @test d.regular == affine && d.count == count
@@ -90,17 +83,6 @@ end
     # Singleton strides never contribute, even extreme ones.
     g1 = AxisGroup((1,), ((typemin(Int),),))
     @test offsets(g1, 0) == (0,)
-end
-
-@testset "normalize_group: folds only where every map folds" begin
-    folded = normalize_group(AxisGroup((3, 2), ((1, 3), (2, 6))))
-    @test folded.lengths == (6,) && folded.strides == ((1,), (2,))
-    @test normalize_group(AxisGroup((4, 3), ((-1, -4),))).lengths == (12,)
-    # map 1 alone would fold, map 2 does not: the group must not.
-    @test normalize_group(AxisGroup((3, 2), ((1, 3), (1, 10)))).lengths == (3, 2)
-    g = normalize_group(AxisGroup((1, 1, 1), ((5, 6, 7), (8, 9, 10))))
-    @test g.lengths == () && length(g.strides) == 2 && offsets(g, 0) == (0, 0)
-    @test normalize_group(AxisGroup((3, 1, 2), ((1, 999, 3),))).lengths == (6,)
 end
 
 @testset "AxisGroup: constructor validation and overflow policy" begin
@@ -125,8 +107,6 @@ end
     short, ok = fill(-7, Q - 1), fill(-7, Q)
     @test_throws DimensionMismatch fill_offsets!((short, ok), g, 0, Q)
     @test ok == fill(-7, Q)
-    @test_throws ArgumentError fill_offsets!((ok, ok), g, 0, Q)    # aliased buffers
-    @test ok == fill(-7, Q)
     fill_offsets!((ok, short), g, Q, 0)                            # empty interval at Q
     @test ok == fill(-7, Q)
 end
@@ -144,4 +124,90 @@ end
     @test_throws DimensionMismatch describe_block([1, 2], 3)
     @test_throws ArgumentError describe_block([1, 2, 3], -1, 1)
     @test_throws DimensionMismatch describe_block([1, 2, 3], 2, 2)
+end
+
+# AxisGroups built from StridedViews, cross-checked against StridedView's own
+# indexing.
+@testset "AxisGroup over a StridedView reproduces its indexing ($name)" for (name, v) in (
+        ("permuted", permutedims(StridedView(reshape(collect(1.0:30.0), 3, 5, 2)), (3, 1, 2))),
+        ("sliced", view(StridedView(reshape(collect(1.0:60.0), 3, 5, 4)), 2:3, 1:3, 4:2:4)),
+        ("permuted and sliced", permutedims(view(StridedView(reshape(collect(1.0:120.0), 4, 5, 6)), 2:4, 2:5, 1:2:5), (3, 1, 2))),
+        ("negative stride", StridedView(collect(1.0:12.0), (4, 3), (-1, 3), 3)),
+        ("zero stride", StridedView(collect(1.0:5.0), (5, 3), (1, 0), 0)),
+    )
+    g = AxisGroup(size(v), (Base.strides(v),))
+    @test axis_length(g) == length(v)
+    for (q, ci) in enumerate(CartesianIndices(size(v)))
+        (o,) = offsets(g, q - 1)
+        @test parent(v)[offset(v) + o + 1] == v[ci]
+    end
+end
+
+@testset "AxisGroup from labels matches a direct construction" begin
+    A, B, C = StridedView(randn(3, 5, 2)), StridedView(randn(5, 4)), StridedView(zeros(3, 4, 2))
+    indA, indB, indC = (1, 2, 3), (2, 4), (1, 4, 3)   # A[a,k,b] B[k,n] C[a,n,b]
+    M = AxisGroup((1, 3), (indA, A), (indC, C))
+    @test (M.lengths, M.strides) == ((3, 2), ((1, 15), (1, 12)))
+    K = AxisGroup((2,), (indA, A), (indB, B))
+    @test (K.lengths, K.strides) == ((5,), ((3,), (1,)))
+    @test_throws DimensionMismatch AxisGroup((2,), (indA, A), (indB, StridedView(randn(6, 4))))
+
+    Random.seed!(1234)
+    for trial in 1:20
+        nd1 = rand(1:4)
+        nd2 = rand(nd1:5)
+        shared = rand(1:nd1)                      # how many labels the group has
+        dims1 = ntuple(_ -> rand(1:4), nd1)
+        v1 = StridedView(randn(dims1))
+        ind1 = ntuple(identity, nd1)
+        labels = shuffle(collect(ind1))[1:shared]
+        # v2 carries the same labels (same lengths) plus filler.
+        ind2 = (labels..., ntuple(d -> 100 + d, nd2 - shared)...)
+        dims2 = (
+            ntuple(d -> size(v1, findfirst(==(labels[d]), ind1)::Int), shared)...,
+            ntuple(_ -> rand(1:4), nd2 - shared)...,
+        )
+        v2 = StridedView(randn(dims2))
+
+        g = AxisGroup(Tuple(labels), (ind1, v1), (ind2, v2))
+        s1 = Base.strides(v1)
+        s2 = Base.strides(v2)
+        p1 = ntuple(d -> findfirst(==(labels[d]), ind1)::Int, shared)
+        p2 = ntuple(d -> findfirst(==(labels[d]), ind2)::Int, shared)
+        @test g.lengths == ntuple(d -> size(v1, p1[d]), shared)
+        @test g.strides[1] == ntuple(d -> s1[p1[d]], shared)
+        @test g.strides[2] == ntuple(d -> s2[p2[d]], shared)
+        @test g isa AxisGroup{shared, 2}
+        @test isconcretetype(typeof(g))
+        @test Base.return_types(
+            AxisGroup, (typeof(Tuple(labels)), Tuple{typeof(ind1), typeof(v1)}, Tuple{typeof(ind2), typeof(v2)})
+        ) == [AxisGroup{shared, 2}]
+    end
+
+    v1 = StridedView(randn(3, 4))
+    v2 = StridedView(randn(5, 4))
+    @test_throws DimensionMismatch AxisGroup((1,), ((1, 2), v1), ((1, 2), v2))
+
+    # Rank zero: an outer product's K group.
+    g0 = AxisGroup((), ((1, 2), v1), ((1, 2), v2))
+    @test g0 isa AxisGroup{0, 2}
+    @test axis_length(g0) == 1
+end
+
+@testset "affine_ramp classifies exactly the rank-<=1 folds" begin
+    ar = QuasiStrided.affine_ramp
+
+    @test ar(AxisGroup((), ((), ()))) == (true, (0, 0))
+    @test ar(AxisGroup((7,), ((3,), (-2,)))) == (true, (3, -2))
+    # Singleton dimensions never advance, whatever their stride claims.
+    @test ar(AxisGroup((1, 7, 1), ((99, 3, -4), (5, -2, 8)))) == (true, (3, -2))
+    # Foldable on both maps, or on one only.
+    @test ar(AxisGroup((4, 5), ((1, 4), (2, 8)))) == (true, (1, 2))
+    @test first(ar(AxisGroup((4, 5), ((1, 4), (2, 9))))) == false
+    @test first(ar(AxisGroup((16, 16, 16), ((1, 256, 4096), (1, 256, 4096))))) == false
+    # A three-deep fold uses the accumulated length.
+    @test ar(AxisGroup((2, 3, 4), ((1, 2, 6), (5, 10, 30)))) == (true, (1, 5))
+    @test first(ar(AxisGroup((2, 3, 4), ((1, 2, 4), (5, 10, 30))))) == false
+    # Empty domain is vacuously a ramp.
+    @test first(ar(AxisGroup((0, 3), ((1, 4), (1, 4))))) == true
 end

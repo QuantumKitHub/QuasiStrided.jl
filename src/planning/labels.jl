@@ -3,15 +3,15 @@
 # `NTuple` whose length follows from the label tuples' lengths alone, so
 # planning allocates nothing and every `AxisGroup` is concretely typed.
 
-@inline _label_in(lbl::Int, t::NTuple{N, Int}) where {N} = any(==(lbl), t)
+@inline label_in(lbl::Int, t::NTuple{N, Int}) where {N} = any(==(lbl), t)
 
 # The M/N/K ranks: with A = M ∪ K, B = N ∪ K, C = M ∪ N, solve
 # NA = |M| + |K|, NB = |N| + |K|, NC = |M| + |N|. Meaningful only for input that
-# `_classify_labels` accepts, which asserts them against the counts it finds.
-@inline _group_ranks(NA::Int, NB::Int, NC::Int) =
+# `classify_labels` accepts, which asserts them against the counts it finds.
+@inline group_ranks(NA::Int, NB::Int, NC::Int) =
     ((NA + NC - NB) ÷ 2, (NB + NC - NA) ÷ 2, (NA + NB - NC) ÷ 2)
 
-@noinline _throw_rank_mismatch(which::Symbol, found::Int, derived::Int) = throw(
+@noinline throw_rank_mismatch(which::Symbol, found::Int, derived::Int) = throw(
     ArgumentError(
         "internal error: $which label count $found does not match the rank $derived " *
             "derived from the label tuple lengths"
@@ -19,13 +19,13 @@
 )
 
 # Set element `n` of `out`, ignoring an `n` past the end (input about to be rejected).
-@inline function _push_label(out::NTuple{D, Int}, n::Int, x::Int) where {D}
-    return n <= D ? _tupleset(out, n, x) : out
+@inline function push_label(out::NTuple{D, Int}, n::Int, x::Int) where {D}
+    return n <= D ? Base.setindex(out, x, n) : out
 end
 
 # (mlabels, nlabels, klabels) in indA/indB order. Per (inA, inB, inC):
 # (T,F,T) -> M, (F,T,T) -> N, (T,T,F) -> K, anything else is an ArgumentError.
-function _classify_labels(
+function classify_labels(
         indA::NTuple{NA, Int}, indB::NTuple{NB, Int},
         indC::NTuple{NC, Int}
     ) where {NA, NB, NC}
@@ -36,15 +36,15 @@ function _classify_labels(
     allunique(indC) ||
         throw(ArgumentError("indC has a repeated label (diagonal), not supported: $indC"))
 
-    DM, DN, DK = _group_ranks(NA, NB, NC)
+    DM, DN, DK = group_ranks(NA, NB, NC)
     mlabels = ntuple(_ -> 0, Val(max(DM, 0)))
     nlabels = ntuple(_ -> 0, Val(max(DN, 0)))
     klabels = ntuple(_ -> 0, Val(max(DK, 0)))
     nm = 0
     nk = 0
     for lbl in indA
-        inB = _label_in(lbl, indB)
-        inC = _label_in(lbl, indC)
+        inB = label_in(lbl, indB)
+        inC = label_in(lbl, indC)
         if inB && inC
             throw(
                 ArgumentError(
@@ -54,10 +54,10 @@ function _classify_labels(
             )
         elseif inB && !inC
             nk += 1
-            klabels = _push_label(klabels, nk, lbl)
+            klabels = push_label(klabels, nk, lbl)
         elseif !inB && inC
             nm += 1
-            mlabels = _push_label(mlabels, nm, lbl)
+            mlabels = push_label(mlabels, nm, lbl)
         else
             throw(
                 ArgumentError(
@@ -70,13 +70,13 @@ function _classify_labels(
 
     nn = 0
     for lbl in indB
-        inA = _label_in(lbl, indA)
-        inC = _label_in(lbl, indC)
+        inA = label_in(lbl, indA)
+        inC = label_in(lbl, indC)
         if inA
             continue  # K, or already rejected while scanning indA
         elseif inC
             nn += 1
-            nlabels = _push_label(nlabels, nn, lbl)
+            nlabels = push_label(nlabels, nn, lbl)
         else
             throw(
                 ArgumentError(
@@ -88,49 +88,30 @@ function _classify_labels(
     end
 
     for lbl in indC
-        inA = _label_in(lbl, indA)
-        inB = _label_in(lbl, indB)
+        inA = label_in(lbl, indA)
+        inB = label_in(lbl, indB)
         (inA || inB) ||
             throw(ArgumentError("label $lbl appears in indC but not in indA or indB"))
     end
 
     # Unreachable after the checks above; guards against a silently truncated list.
-    nm == DM || _throw_rank_mismatch(:M, nm, DM)
-    nn == DN || _throw_rank_mismatch(:N, nn, DN)
-    nk == DK || _throw_rank_mismatch(:K, nk, DK)
+    nm == DM || throw_rank_mismatch(:M, nm, DM)
+    nn == DN || throw_rank_mismatch(:N, nn, DN)
+    nk == DK || throw_rank_mismatch(:K, nk, DK)
     return mlabels, nlabels, klabels
-end
-
-@noinline _throw_label_length(lbl::Int, l1::Int, l2::Int) = throw(
-    DimensionMismatch("label $lbl has mismatched axis length: $l1 vs $l2")
-)
-
-# Stable insertion sort of the permutation `perm` by `key[perm[j]]`, ascending
-# (n <= ndims, and unlike `sortperm` it allocates nothing).
-@inline function _sort_perm(perm::NTuple{D, Int}, key::NTuple{D, Int}) where {D}
-    out = perm
-    @inbounds for i in 2:D
-        x = out[i]
-        kx = key[x]
-        j = i - 1
-        while j >= 1 && key[out[j]] > kx
-            out = _tupleset(out, j + 1, out[j])
-            j -= 1
-        end
-        out = _tupleset(out, j + 1, x)
-    end
-    return out
 end
 
 # `labels` stably sorted by `abs(stride)` of their axis in `C` (every label must
 # be in `indC`): a composite enumerates its first label fastest, so this walks
 # C's fastest axis fastest.
-function _order_free_labels(
+# `TupleTools.sortperm` is a merge sort that keeps ties in order (relied on here
+# and in `order_contract_labels`).
+function order_free_labels(
         labels::NTuple{D, Int}, indC::NTuple{NC, Int}, C::StridedView
     ) where {D, NC}
     st = Base.strides(C)
     key = map(l -> abs(st[findfirst(==(l), indC)::Int]), labels)
-    return map(i -> @inbounds(labels[i]), _sort_perm(ntuple(identity, Val(D)), key))
+    return TupleTools.getindices(labels, TupleTools.sortperm(key))
 end
 
 # ----------------------------------------------------------------------------
@@ -143,7 +124,7 @@ end
 #
 #     cost = n * walk * amplification
 #
-#   * `walk` is `_K_WALK_FAR_PENALTY` when the fastest K axis steps more than a
+#   * `walk` is `K_WALK_FAR_PENALTY` when the fastest K axis steps more than a
 #     page (a chain of demand misses no prefetcher follows), else 1.
 #   * `amplification` is how often a cache line is fetched: 1 when the slivers
 #     are whole lines, when the operand's smallest-stride axis `u` is the
@@ -152,28 +133,12 @@ end
 #     `min(L_u, line_bytes / stride_u)`.
 # ----------------------------------------------------------------------------
 
-const _K_WALK_FAR_BYTES = 4096
-const _K_WALK_FAR_PENALTY = 3
-const _K_LINE_BYTES = 64
-
-# The core's private L2 share, or 1 MB when undetected.
-function _l2_core_bytes(profile::TargetProfile)
-    l2 = profile.l2
-    l2.bytes > 0 || return 1 << 20
-    smt = max(1, profile.l1d.sharing)
-    return l2.bytes ÷ max(1, l2.sharing ÷ smt)
-end
-
-# Through the per-eltype cache; an eltype without a slot fails later in planning.
-@inline _l2_core_bytes(::Type{T}) where {T} =
-    _defaults_slot(T) === nothing ? _l2_core_bytes(target_profile()) : _resolved_defaults(T).l2_core
-
 # What the cost model reads of one operand, gathered once per plan in `klabels`
 # order: each K label's extent and |stride|, the element count and size, and
 # whether its register slivers are whole lines (the free composite's first
 # non-singleton axis is unit-stride and at least a line long). A candidate
 # order is then a permutation of `1:DK`.
-struct _KOperand{DK}
+struct KOperand{DK}
     len::NTuple{DK, Int}
     st::NTuple{DK, Int}
     n::Int
@@ -181,9 +146,9 @@ struct _KOperand{DK}
     wholeline::Bool
 end
 
-@inline function _k_operand(
+@inline function k_operand(
         klabels::NTuple{DK, Int}, ind::NTuple{N, Int}, v::StridedView,
-        free::NTuple{DF, Int}
+        free::NTuple{DF, Int}, line::Int
     ) where {DK, N, DF}
     st = Base.strides(v)
     sz = size(v)
@@ -192,7 +157,7 @@ end
     ps = map(pos, klabels)
     len = map(p -> sz[p], ps)
     kst = map(p -> abs(st[p]), ps)
-    line_elems = max(1, _K_LINE_BYTES ÷ S)
+    line_elems = max(1, line ÷ S)
     wholeline = false
     for l in free
         p = pos(l)
@@ -200,12 +165,12 @@ end
         wholeline = st[p] == 1 && sz[p] >= line_elems
         break
     end
-    return _KOperand{DK}(len, kst, length(v), S, wholeline)
+    return KOperand{DK}(len, kst, length(v), S, wholeline)
 end
 
 # Cost of packing one operand under the K order `perm`; `Qfree` is its free extent.
-function _k_order_cost(
-        perm::NTuple{DK, Int}, op::_KOperand{DK}, Qfree::Int, l2bytes::Int
+function k_order_cost(
+        perm::NTuple{DK, Int}, op::KOperand{DK}, Qfree::Int, l2bytes::Int, line::Int
     ) where {DK}
     len, st, S = op.len, op.st, op.S
     kfast = 0
@@ -216,7 +181,7 @@ function _k_order_cost(
         end
     end
     kfast == 0 && return 0  # all-singleton K: nothing walks
-    walk = @inbounds(st[kfast]) * S > _K_WALK_FAR_BYTES ? _K_WALK_FAR_PENALTY : 1
+    walk = @inbounds(st[kfast]) * S > K_WALK_FAR_BYTES ? K_WALK_FAR_PENALTY : 1
     op.wholeline && return op.n * walk
 
     # The smallest-stride K axis `u` (first in this order among equal strides).
@@ -232,46 +197,38 @@ function _k_order_cost(
     # One element of `u` per line exactly when su*S > line/2 (len[u] >= 2);
     # tested first so the division is only paid where its value is used.
     suS = su * S
-    (2 * suS > _K_LINE_BYTES || u == kfast) && return op.n * walk
+    (2 * suS > line || u == kfast) && return op.n * walk
 
     faster = 1
     @inbounds for i in perm
         i == u && break
         faster *= len[i]
     end
-    footprint = Int128(faster) * Int128(Qfree) * Int128(_K_LINE_BYTES)
+    footprint = Int128(faster) * Int128(Qfree) * Int128(line)
     footprint <= l2bytes && return op.n * walk
-    share = min(@inbounds(len[u]), _K_LINE_BYTES ÷ suS)
+    share = min(@inbounds(len[u]), line ÷ suS)
     return op.n * walk * share
 end
 
 # Zero or one K label returns at a compile-time branch, before the model.
-@inline function _order_contract_labels(
-        klabels::NTuple{DK, Int},
-        indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
-        indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
-        Qm::Int, Qn::Int
-    ) where {DK, NA, NB, DM, DN}
-    DK <= 1 && return klabels
-    return _choose_k_order(klabels, indA, A, morder, indB, B, norder, Qm, Qn, nothing)
-end
-
 # `l2bytes = nothing`: the core's L2 share, looked up only once a cost is needed.
-function _choose_k_order(
+@inline function order_contract_labels(
         klabels::NTuple{DK, Int},
         indA::NTuple{NA, Int}, A::StridedView, morder::NTuple{DM, Int},
         indB::NTuple{NB, Int}, B::StridedView, norder::NTuple{DN, Int},
-        Qm::Int, Qn::Int, l2bytes::Union{Int, Nothing}
+        m_length::Int, n_length::Int, l2bytes::Union{Int, Nothing} = nothing
     ) where {DK, NA, NB, DM, DN}
     DK <= 1 && return klabels
-    opA = _k_operand(klabels, indA, A, morder)
-    opB = _k_operand(klabels, indB, B, norder)
+    profile = target_profile()
+    line = line_bytes(profile)
+    opA = k_operand(klabels, indA, A, morder, line)
+    opB = k_operand(klabels, indB, B, norder, line)
     id = ntuple(identity, Val(DK))
-    permA = _sort_perm(id, opA.st)
-    permB = _sort_perm(id, opB.st)
+    permA = TupleTools.sortperm(opA.st)
+    permB = TupleTools.sortperm(opB.st)
     permA == id && permB == id && return klabels
-    l2 = l2bytes === nothing ? _l2_core_bytes(eltype(A)) : l2bytes
-    cost(perm) = _k_order_cost(perm, opA, Qm, l2) + _k_order_cost(perm, opB, Qn, l2)
+    l2 = l2bytes === nothing ? l2_core_bytes(profile) : l2bytes
+    cost(perm) = k_order_cost(perm, opA, m_length, l2, line) + k_order_cost(perm, opB, n_length, l2, line)
     best = id
     bestcost = cost(id)
     for cand in (permA, permB)
@@ -282,14 +239,14 @@ function _choose_k_order(
             bestcost = c
         end
     end
-    return map(i -> @inbounds(klabels[i]), best)
+    return TupleTools.getindices(klabels, best)
 end
 
 # Length of the leading unit-stride run in C when `labels` is enumerated
 # first-label-fastest: the first non-singleton label needs C-stride exactly +1,
 # and each following one extends the run only if its stride equals the run so
 # far. 1 when no run starts, 0 if an empty axis is met first.
-function _leading_unit_run(
+function leading_unit_run(
         labels::NTuple{D, Int}, indC::NTuple{NC, Int}, C::StridedView
     ) where {D, NC}
     st = Base.strides(C)
@@ -307,7 +264,7 @@ end
 
 # Swap the operand roles (B feeds M) when the as-is M run cannot fill a register
 # sliver of the kernel it would run and the swapped one can: the vectorized
-# store needs `mr` consecutive M coordinates unit-stride in C, so a shorter run
-# buys nothing.
-_prefer_swap(run_m::Int, run_n::Int, mr_asis::Int, mr_swapped::Int = mr_asis) =
-    run_m < mr_asis && run_n >= mr_swapped
+# store needs `m_tile` consecutive M coordinates unit-stride in C, so a shorter
+# run buys nothing.
+prefer_swap(run_m::Int, run_n::Int, m_tile_asis::Int, m_tile_swapped::Int = m_tile_asis) =
+    run_m < m_tile_asis && run_n >= m_tile_swapped

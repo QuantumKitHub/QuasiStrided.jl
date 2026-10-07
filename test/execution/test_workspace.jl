@@ -1,166 +1,51 @@
-# ContractWorkspace, the `workspace`/`allocator`/`oracle` keywords, and the
-# SIMDKernel default.
+# ContractWorkspace and the `allocator` keyword.
 
-_ws_lengths(ws) = [
-    length(getfield(ws, f)) for f in fieldnames(typeof(ws)) if getfield(ws, f) isa AbstractVector
-]
+include("helpers.jl")
 
-@testset "plan_contract: SIMDKernel is the engine-wide default kernel" begin
-    for T in (Float64, Float32)
-        Random.seed!(5150)
-        Amat, Bmat = randn(T, 9, 10), randn(T, 10, 8)
-        Cmat = zeros(T, 9, 8)
-        plan = _mm_plan(Cmat, Amat, Bmat)
-
-        # The shape is hardware- and extent-dependent: pin the resolution.
-        @test plan.kernel isa QuasiStrided.SIMDKernel
-        @test QuasiStrided.scalartype(plan.kernel) === T
-        @test plan.kernel === QuasiStrided._default_kernel(T, size(Amat, 1), size(Bmat, 2))
-        execute!(plan, one(T), zero(T))
-        @test Cmat ≈ Amat * Bmat
-
-        Cmat2 = zeros(T, 9, 8)
-        contract!(
-            StridedView(Cmat2), one(T), StridedView(Amat), (1, 2),
-            StridedView(Bmat), (2, 3), zero(T), (1, 3)
-        )
-        @test Cmat2 == Cmat
-    end
-end
-
-@testset "ContractWorkspace: reuse across shapes is bitwise identical to fresh plans" begin
+@testset "ContractWorkspace: plan reuse refills every buffer before reading it" begin
     kernel = ScalarKernel(Val(4), Val(3), Float64)
-    mc, kc, nc = 8, 6, 7
-    alpha, beta = 1.75, -0.5
-
-    # Not monotone: sized by the first, grown by the second, then oversized.
-    shapes = ((13, 11, 10), (23, 19, 17), (4, 3, 2), (9, 10, 8), (1, 1, 1), (16, 5, 6))
-
-    ws = nothing
-    lengths_before = nothing
-    for (idx, (Ma, Ka, Na)) in enumerate(shapes)
-        Random.seed!(31_000 + idx)
-        Amat, Bmat = randn(Ma, Ka), randn(Ka, Na)
-        Cstart = randn(Ma, Na)
-
-        Cfresh = copy(Cstart)
-        execute!(_mm_plan(Cfresh, Amat, Bmat; kernel = kernel, mc = mc, kc = kc, nc = nc), alpha, beta)
-
-        Creuse = copy(Cstart)
-        plan = _mm_plan(
-            Creuse, Amat, Bmat;
-            kernel = kernel, mc = mc, kc = kc, nc = nc, workspace = ws
-        )
-        execute!(plan, alpha, beta)
-
-        @test Creuse == Cfresh
-
-        if ws !== nothing
-            @test plan.workspace === ws
-            @test all(_ws_lengths(ws) .>= lengths_before)
-        end
-        ws = plan.workspace
-        lengths_before = _ws_lengths(ws)
-    end
-
-    Amat32, Bmat32, Cmat32 = randn(Float32, 4, 4), randn(Float32, 4, 4), zeros(Float32, 4, 4)
-    @test_throws ArgumentError _mm_plan(
-        Cmat32, Amat32, Bmat32;
-        kernel = ScalarKernel(Val(4), Val(3), Float32), workspace = ws
-    )
-end
-
-@testset "ContractWorkspace: an oversized reused buffer is not read beyond its live region" begin
-    kernel = ScalarKernel(Val(4), Val(3), Float64)
-    mc, kc, nc = 8, 6, 7
     alpha, beta = 2.5, -0.75
 
     Random.seed!(606)
-    Abig, Bbig = randn(23, 19), randn(19, 17)
-    Cbig = zeros(23, 17)
-    big = _mm_plan(Cbig, Abig, Bbig; kernel = kernel, mc = mc, kc = kc, nc = nc)
-    execute!(big, 1.0, 0.0)
-    ws = big.workspace
-
-    Ma, Ka, Na = 5, 4, 3
-    Amat, Bmat = randn(Ma, Ka), randn(Ka, Na)
-    Cstart = randn(Ma, Na)
-
+    Amat, Bmat = randn(23, 19), randn(19, 17)
+    Cstart = randn(23, 17)
     Cref = copy(Cstart)
-    execute!(_mm_plan(Cref, Amat, Bmat; kernel = kernel, mc = mc, kc = kc, nc = nc), alpha, beta)
+    execute!(_mm_plan(Cref, Amat, Bmat; kernel = kernel, m_block = 8, k_block = 6, n_block = 7), alpha, beta)
 
-    # Poison every reused buffer: a stale packed slot yields NaN, a stale
-    # offset or descriptor addresses far outside the operand.
+    C = copy(Cstart)
+    plan = _mm_plan(C, Amat, Bmat; kernel = kernel, m_block = 8, k_block = 6, n_block = 7)
+    execute!(plan, alpha, beta)
+    copyto!(C, Cstart)
+
+    # A stale packed slot yields NaN, a stale offset or descriptor addresses far
+    # outside the operand.
+    ws = plan.workspace
     fill!(ws.packed_a, NaN)
     fill!(ws.packed_b, NaN)
-    for buf in (ws.m_buf_A, ws.m_buf_C, ws.n_buf_B, ws.n_buf_C, ws.k_buf_A, ws.k_buf_B)
+    for buf in (ws.m.offsets..., ws.n.offsets..., ws.k...)
         fill!(buf, typemin(Int) ÷ 4)
     end
     poison = BlockDescriptor(typemin(Int) ÷ 4, 0, 1, true)
-    for desc in (ws.m_desc_A, ws.m_desc_C, ws.n_desc_B, ws.n_desc_C)
-        fill!(desc, poison)
-    end
-
-    lengths_before = _ws_lengths(ws)
-    Cpoisoned = copy(Cstart)
-    plan = _mm_plan(
-        Cpoisoned, Amat, Bmat;
-        kernel = kernel, mc = mc, kc = kc, nc = nc, workspace = ws
-    )
-    @test _ws_lengths(ws) == lengths_before
-    @test length(ws.packed_a) > cld(Ma, 4) * 4 * min(kc, Ka)
-    @test length(ws.packed_b) > cld(Na, 3) * 3 * min(kc, Ka)
+    foreach(d -> fill!(d, poison), (ws.m.descriptors..., ws.n.descriptors...))
 
     execute!(plan, alpha, beta)
-    @test all(isfinite, Cpoisoned)
-    @test Cpoisoned == Cref
+    @test C == Cref
+
+    # The beta-only pass borrows the M/N offset buffers.
+    foreach(buf -> fill!(buf, typemin(Int) ÷ 4), (ws.m.offsets..., ws.n.offsets...))
+    execute!(plan, 0.0, 0.5)
+    @test C == 0.5 .* Cref
 end
 
-@testset "plan_contract: oracle = false skips execute_tilewise!'s buffers" begin
-    Random.seed!(909)
-    kernel = ScalarKernel(Val(4), Val(3), Float64)
-    Ma, Ka, Na = 9, 10, 8
-    Amat, Bmat = randn(Ma, Ka), randn(Ka, Na)
-
-    Cmat = zeros(Ma, Na)
-    plan = _mm_plan(Cmat, Amat, Bmat; kernel = kernel, kc = 4, oracle = false)
-    ws = plan.workspace
-
-    @test isempty(ws.tw_packed_a)
-    @test isempty(ws.tw_packed_b)
-    @test isempty(ws.tw_k_buf_A)
-    @test isempty(ws.tw_k_buf_B)
-    # The tile buffers serve the beta-only pass too.
-    @test length(ws.tile_m_buf_A) == 4
-    @test length(ws.tile_n_buf_C) == 3
-
-    execute!(plan, 1.0, 0.0)
-    @test Cmat ≈ Amat * Bmat
-
-    Cstart = randn(Ma, Na)
-    Cbeta = copy(Cstart)
-    execute!(_mm_plan(Cbeta, Amat, Bmat; kernel = kernel, oracle = false), 0.0, 0.5)
-    @test Cbeta ≈ 0.5 .* Cstart
-
-    @test_throws ArgumentError execute_tilewise!(plan, 1.0, 0.0)
-
-    Ctw = zeros(Ma, Na)
-    plan_tw = _mm_plan(Ctw, Amat, Bmat; kernel = kernel, kc = 4, workspace = ws, oracle = true)
-    @test plan_tw.workspace === ws
-    @test !isempty(ws.tw_packed_a)
-    execute_tilewise!(plan_tw, 1.0, 0.0)
-    @test Ctw ≈ Amat * Bmat
-end
-
-@testset "plan_contract: explicit allocators size the packed panels exactly once" begin
+@testset "plan_contract: explicit allocators serve the packed panels" begin
     Random.seed!(1717)
     kernel = SIMDKernel(Val(4), Val(3), Float64)
     Ma, Ka, Na = 19, 23, 17
-    mc, kc, nc = 8, 6, 7
+    m_block, k_block, n_block = 8, 6, 7
     Amat, Bmat = randn(Ma, Ka), randn(Ka, Na)
 
     Cdefault = zeros(Ma, Na)
-    default_plan = _mm_plan(Cdefault, Amat, Bmat; kernel = kernel, mc = mc, kc = kc, nc = nc)
+    default_plan = _mm_plan(Cdefault, Amat, Bmat; kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block)
     execute!(default_plan, 1.5, 0.0)
     @test default_plan.workspace.packed_a isa Vector{Float64}
 
@@ -170,18 +55,17 @@ end
         Cmat = zeros(Ma, Na)
         plan = _mm_plan(
             Cmat, Amat, Bmat;
-            kernel = kernel, mc = mc, kc = kc, nc = nc,
-            allocator = allocator, oracle = false
+            kernel = kernel, m_block = m_block, k_block = k_block, n_block = n_block,
+            allocator = allocator
         )
         ws = plan.workspace
 
         @test isconcretetype(typeof(ws))
         @test all(isconcretetype, fieldtypes(typeof(ws)))
-        @test length(ws.packed_a) == cld(plan.blocking.mc, 4) * 4 * plan.blocking.kc
-        @test length(ws.packed_b) == cld(plan.blocking.nc, 3) * 3 * plan.blocking.kc
-        @test isempty(ws.tw_packed_a)
-        @test ws.m_buf_A isa Vector{Int}
-        @test ws.k_buf_B isa Vector{Int}
+        @test length(ws.packed_a) == cld(plan.blocking.m_block, 4) * 4 * plan.blocking.k_block
+        @test length(ws.packed_b) == cld(plan.blocking.n_block, 3) * 3 * plan.blocking.k_block
+        @test ws.m.offsets[1] isa Vector{Int}
+        @test ws.k[2] isa Vector{Int}
 
         execute!(plan, 1.5, 0.0)
         @test Cmat == Cdefault
@@ -189,24 +73,6 @@ end
         QuasiStrided.release!(ws, allocator)
         TO.allocator_reset!(allocator, checkpoint)
     end
-
-    # Allocator-owned temporaries are never resized.
-    manual = TO.ManualAllocator()
-    Cmanual = zeros(Ma, Na)
-    manual_plan = _mm_plan(
-        Cmanual, Amat, Bmat;
-        kernel = kernel, mc = mc, kc = kc, nc = nc, allocator = manual, oracle = false
-    )
-    @test_throws MethodError QuasiStrided.reserve!(
-        manual_plan.workspace, kernel, manual_plan.blocking, false
-    )
-    QuasiStrided.release!(manual_plan.workspace, manual)
-
-    @test_throws ArgumentError _mm_plan(
-        zeros(Ma, Na), Amat, Bmat;
-        kernel = kernel, allocator = TO.ManualAllocator(),
-        workspace = default_plan.workspace
-    )
 end
 
 @testset "ContractWorkspace: storage type T, packed panels of real(T)" begin
@@ -214,23 +80,28 @@ end
     k32 = SIMDKernel(Val(8), Val(6), Float32)
     b = Blocking(16, 8, 12)
 
-    ws = QuasiStrided.ContractWorkspace(Float64, k64, b; oracle = true)
+    ws = QuasiStrided.ContractWorkspace(Float64, k64, b)
     @test ws isa QuasiStrided.ContractWorkspace{Float64, Vector{Float64}}
     @test eltype(ws.packed_a) === Float64
 
-    wsc = QuasiStrided.ContractWorkspace(ComplexF64, k64, b; oracle = true)
+    wsc = QuasiStrided.ContractWorkspace(ComplexF64, k64, b)
     @test wsc isa QuasiStrided.ContractWorkspace{ComplexF64, Vector{Float64}}
-    @test eltype(wsc.packed_a) === Float64 === eltype(wsc.tw_packed_b)
+    @test eltype(wsc.packed_a) === Float64 === eltype(wsc.packed_b)
     @test all(isconcretetype, fieldtypes(typeof(wsc)))
     @test !any(t -> t isa Union, fieldtypes(typeof(wsc)))
 
     @test_throws ArgumentError QuasiStrided.ContractWorkspace(ComplexF64, k32, b)
     @test_throws ArgumentError QuasiStrided.ContractWorkspace(Float64, k32, b)
     @test_throws ArgumentError QuasiStrided.ContractWorkspace(ComplexF32, k64, b)
+end
 
-    Amat, Bmat, Cmat = randn(6, 5), randn(5, 4), zeros(6, 4)
-    @test_throws ArgumentError plan_contract(
-        StridedView(Cmat), StridedView(Amat), (1, 2), StridedView(Bmat), (2, 3), (1, 3);
-        workspace = wsc
-    )
+@testset "ContractWorkspace: the dot and outer-product paths get no packed panels" begin
+    dot = plan_contract(StridedView(zeros(ComplexF64, 1, 9)), StridedView(randn(ComplexF64, 1, 64)), (1, 2), StridedView(randn(ComplexF64, 64, 9)), (2, 3), (1, 3))
+    outer = plan_contract(StridedView(zeros(64, 40)), StridedView(randn(64)), (1,), StridedView(randn(40)), (2,), (1, 2))
+    @test dot.path isa QuasiStrided.DotPath && outer.path isa QuasiStrided.OuterPath
+    for plan in (dot, outer)
+        @test isempty(plan.workspace.packed_a) && isempty(plan.workspace.packed_b)
+    end
+    @test length(dot.workspace.dot_vector) == 2 * dot.blocking.k_block
+    @test isempty(outer.workspace.dot_vector)
 end

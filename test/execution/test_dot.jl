@@ -1,10 +1,10 @@
 # The dot-product path: `execute!` on `M == 1` or `N == 1` with a K-contiguous
-# matrix operand runs a K-vectorized gemv. Results match the nest and the
-# reference to a tolerance (the K summation order differs).
+# matrix operand runs a K-vectorized gemv. Results match the reference to a
+# tolerance (the K summation order differs).
 
-_dot_takes(plan) = _path_of(plan) isa QuasiStrided._DotPath
+include("helpers.jl")
 
-const _DOT_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
+const DOT_TYPES = (Float64, Float32, ComplexF64, ComplexF32)
 
 # `C[cde] = A[ab] * B[abcde]` (M = 1, matrix B K-fastest) at leg dimension `d`:
 #   :permvec  A stored [b,a]: the vector's K map is not a ramp (the matrix's is)
@@ -34,17 +34,15 @@ _dot_n1_maker(::Type{T}, d, K, seed) where {T} = function ()
     return (StridedView(randn(rng, T, d, d)), StridedView(randn(rng, T, K, d, d)), (3, 1, 2), StridedView(randn(rng, T, K)), (3,), (1, 2))
 end
 
-# The dot path against the nest and the reference.
+# The dot path against the reference.
 function _dot_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     C_dot, plan = _run_fresh(execute!, mk, alpha, beta; conjA, conjB, plankw...)
-    C_nest, _ = _run_fresh(_run_nest!, mk, alpha, beta; conjA, conjB, plankw...)
     @test _dot_takes(plan)
-    @test C_dot ≈ C_nest
     return @test C_dot ≈ _ref_of(mk, alpha, beta; conjA, conjB)
 end
 
-@testset "dot path: which plans it takes ($T)" for T in _DOT_TYPES
-    W = QuasiStrided._dot_lanewidth(T)
+@testset "dot path: which plans it takes ($T)" for T in DOT_TYPES
+    W = _lanes(T)
     for variant in (:plain, :permvec, :permC, :offsetB)
         @test _dot_takes(plan_contract(_dot_gemv_maker(T, 4, 1; variant)()...))
     end
@@ -60,20 +58,20 @@ end
     end
 end
 
-@testset "dot path: matches the nest and the reference ($T)" for T in _DOT_TYPES
+@testset "dot path: matches the reference ($T)" for T in DOT_TYPES
     ab = ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
     for d in (2, 6), variant in (:plain, :permvec, :permC, :offsetB), (alpha, beta) in ab
         mk = _dot_gemv_maker(T, d, 10 * d; variant)
-        if d * d >= QuasiStrided._dot_lanewidth(T)
+        if d * d >= _lanes(T)
             _dot_check(mk, alpha, beta)
         else
             @test !_dot_takes(plan_contract(mk()...))
         end
     end
-    # N = 1: K tails, several K blocks (`kc = 64`) and output blocks (`mc = 7`).
-    W = QuasiStrided._dot_lanewidth(T)
+    # N = 1: K tails, several K blocks (`k_block = 64`) and output blocks (`m_block = 7`).
+    W = _lanes(T)
     for (d, K) in ((3, W), (5, 3W - 1), (2, 1000)), (alpha, beta) in ab
-        _dot_check(_dot_n1_maker(T, d, K, 3K + d), alpha, beta; kc = 64, mc = 7)
+        _dot_check(_dot_n1_maker(T, d, K, 3K + d), alpha, beta; k_block = 64, m_block = 7)
     end
     # A scalar output, C[] = sum_k a[k] b[k].
     K = 5W + 3
@@ -110,14 +108,14 @@ end
     end
 end
 
-@testset "dot path: allocation-free, and through the backend ($T)" for T in _DOT_TYPES
-    for (mk, kw) in ((_dot_gemv_maker(T, 6, 4), (;)), (_dot_n1_maker(T, 5, 300, 4), (kc = 64, mc = 8)))
-        plan = plan_contract(mk()...; oracle = false, kw...)
+@testset "dot path: allocation-free, and through the backend ($T)" for T in DOT_TYPES
+    for (mk, kw) in ((_dot_gemv_maker(T, 6, 4), (;)), (_dot_n1_maker(T, 5, 300, 4), (k_block = 64, m_block = 8)))
+        plan = plan_contract(mk()...; kw...)
         @test _dot_takes(plan)
         execute!(plan, 1.0, 0.0)
         @test (@allocated execute!(plan, 1.0, 0.0)) == 0 skip = (VERSION < v"1.11")
     end
-    # The backend runs the path predicted before planning (`_path_hint`).
+    # The backend plans and runs in one call.
     d = 6
     A, B, C = randn(T, d, d), randn(T, d, d, d, d, d), zeros(T, d, d, d)
     pA, pB, pAB = TO.contract_indices((:a, :b), (:a, :b, :c, :d, :e), (:c, :d, :e))

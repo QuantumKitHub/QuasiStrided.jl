@@ -2,11 +2,11 @@
 # default choice and OpenBLAS `gemm!`, single core.
 #
 #   julia --project=benchmark benchmark/bench_kernels.jl [--dtypes Float64,ComplexF64]
-#       [--shapes 64x64x64,2048x2048x2048] [--reps 11] [--outdir DIR]
+#       [--shapes 64x64x64,2048x2048x2048] [--reps 11] [--smoke] [--outdir DIR]
 #
 # Arms:
-#   kernel  (real dtypes) the ceiling of each menu tile: `unsafe_execute_tile!`
-#           on one L1-resident packed A and B sliver at the tile's default `kc`.
+#   kernel  (real dtypes) the ceiling of each menu tile: `@inbounds execute_tile!`
+#           on one L1-resident packed A and B sliver at the tile's default `k_block`.
 #   engine  per dtype and shape: OpenBLAS, the default plan, and every menu
 #           kernel (of every complex method, for complex dtypes) at its own
 #           default blocking; all configurations of a shape back to back.
@@ -21,31 +21,33 @@
 
 include(joinpath(@__DIR__, "harness.jl"))
 
-using QuasiStrided: RealMethod, PlanarMethod, OneMMethod, FMAddSubMethod, kernel_shapes,
-    _kernel_from_shape, default_blocking, packed_panel, unsafe_execute_tile!,
-    DestinationTile, AffineAxis, target_profile
+using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel, kernel_shapes,
+    kernel_from_shape, default_blocking, packed_panel, execute_tile!,
+    Tile, AffineAxis, target_profile
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32,ComplexF64,ComplexF32"))
 const SHAPES = let s = argval("shapes")
-    s === nothing ? vcat(MAIN_SHAPES, EXTRA_SHAPES, SMALL_SHAPES, [ShapeSpec(2048, 2048, 2048)]) :
-        [ShapeSpec(parse_ints(replace(x, 'x' => ','))...) for x in split(s, ',')]
+    thin(
+        s === nothing ? vcat(MAIN_SHAPES, EXTRA_SHAPES, SMALL_SHAPES, [ShapeSpec(2048, 2048, 2048)]) :
+            [ShapeSpec(parse_ints(replace(x, 'x' => ','))...) for x in split(s, ',')]
+    )
 end
-const REPS = argopt("reps", 11)
+const REPS = reps_arg(11)
 const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "bench_kernels.csv")
 const SUMMARY_PATH = joinpath(OUTDIR, "summary_kernels.txt")
 
-tag(k) = "$(mr(k))x$(nr(k))/W$(lanewidth(k))"
-menu_methods(::Type{T}) where {T} = T <: Complex ? (PlanarMethod(), OneMMethod(), FMAddSubMethod()) : (RealMethod(),)
+tag(k) = "$(tile_size(k, 1))x$(tile_size(k, 2))/W$(lanewidth(k))"
+menu_kernels(::Type{T}) where {T} = T <: Complex ? (PlanarKernel, OneMKernel, FMAddSubKernel) : (SIMDKernel,)
 
 csv = open(CSV_PATH, "w")
-println(csv, "arm,dtype,shape,M,K,N,config,kernel,mc,kc,nc,seconds,gflops,frac_openblas")
+println(csv, "arm,dtype,shape,M,K,N,config,kernel,m_block,k_block,n_block,seconds,gflops,frac_openblas")
 rows = NamedTuple[]
 function record!(arm, T, spec, config, kernel, blk, t, t_blas)
     gf = gflops(T, spec.Ma, spec.Ka, spec.Na, t)
     println(
         csv, "$arm,$T,$(spec.name),$(spec.Ma),$(spec.Ka),$(spec.Na),$config,$kernel,",
-        blk === nothing ? ",," : "$(blk.mc),$(blk.kc),$(blk.nc)", ",",
+        blk === nothing ? ",," : "$(blk.m_block),$(blk.k_block),$(blk.n_block)", ",",
         @sprintf("%.9f,%.3f,%.4f", t, gf, t_blas / t)
     )
     flush(csv)
@@ -56,27 +58,27 @@ print_env_header(stdout, "bench_kernels.jl")
 println("target = ", target_profile())
 canaries = [run_canary(MersenneTwister(0xCA), "start")]
 
-function kernel_hot!(kernel, C, apack, bpack, kc, reps)
+function kernel_hot!(kernel, C, apack, bpack, k_block, reps)
     GC.@preserve apack bpack begin
         ap = packed_panel(apack, 1, length(apack))
         bp = packed_panel(bpack, 1, length(bpack))
-        dest = DestinationTile(C, 0, AffineAxis(0, 1, mr(kernel)), AffineAxis(0, mr(kernel), nr(kernel)))
+        dest = Tile(C, 0, AffineAxis(0, 1, tile_size(kernel, 1)), AffineAxis(0, tile_size(kernel)...))
         for _ in 1:reps
-            unsafe_execute_tile!(kernel, dest, ap, bp, kc, one(eltype(C)), one(eltype(C)))
+            @inbounds execute_tile!(kernel, dest, ap, bp, k_block, one(eltype(C)), one(eltype(C)))
         end
     end
     return nothing
 end
 
-for T in filter(t -> t <: Real, RUN_DTYPES), sh in kernel_shapes(T)
-    kernel = _kernel_from_shape(sh, T)
+for T in filter(t -> t <: Real, RUN_DTYPES), sh in thin(kernel_shapes(T))
+    kernel = kernel_from_shape(sh, T)
     MR, NR = sh
-    kc = default_blocking(kernel).kc
-    apack = rand(T, MR * kc); bpack = rand(T, NR * kc); C = zeros(T, MR * NR)
-    kernel_hot!(kernel, C, apack, bpack, kc, 10)
-    reps = max(100, round(Int, 0.05 / @elapsed(kernel_hot!(kernel, C, apack, bpack, kc, 100)) * 100))
-    t = median_time_s(() -> kernel_hot!(kernel, C, apack, bpack, kc, reps); reps = REPS) / reps
-    record!("kernel", T, ShapeSpec("l1_tile", MR, kc, NR), "menu", tag(kernel), nothing, t, NaN)
+    k_block = default_blocking(kernel).k_block
+    apack = rand(T, MR * k_block); bpack = rand(T, NR * k_block); C = zeros(T, MR * NR)
+    kernel_hot!(kernel, C, apack, bpack, k_block, 10)
+    reps = max(100, round(Int, 0.05 / @elapsed(kernel_hot!(kernel, C, apack, bpack, k_block, 100)) * 100))
+    t = median_time_s(() -> kernel_hot!(kernel, C, apack, bpack, k_block, reps); reps = REPS) / reps
+    record!("kernel", T, ShapeSpec("l1_tile", MR, k_block, NR), "menu", tag(kernel), nothing, t, NaN)
 end
 
 function time_plan(fx, ::Type{T}; kw...) where {T}
@@ -91,11 +93,11 @@ for spec in SHAPES, T in RUN_DTYPES
     td, pd = time_plan(fx, T)
     @assert isapprox(fx.Cmat, fx.Amat * fx.Bmat; rtol = sqrt(eps(real(T))))
     record!("engine", T, spec, "default", tag(pd.kernel), pd.blocking, td, tb)
-    for m in menu_methods(T), sh in kernel_shapes(T, m)
-        k = _kernel_from_shape(sh, T, m)
+    for K in menu_kernels(T), sh in thin(kernel_shapes(T, K))
+        k = kernel_from_shape(sh, T, K)
         b = default_blocking(k)
-        t, _ = time_plan(fx, T; kernel = k, mc = b.mc, kc = b.kc, nc = b.nc)
-        record!("engine", T, spec, lowercase(replace(string(nameof(typeof(m))), "Method" => "")), tag(k), b, t, tb)
+        t, _ = time_plan(fx, T; kernel = k, m_block = b.m_block, k_block = b.k_block, n_block = b.n_block)
+        record!("engine", T, spec, lowercase(replace(string(nameof(K)), "Kernel" => "")), tag(k), b, t, tb)
     end
     println("  ", rpad(string(T), 11), rpad(spec.name, 22), @sprintf("default %7.2f GF/s  %.2fx OpenBLAS", gflops(T, spec.Ma, spec.Ka, spec.Na, td), tb / td))
 end

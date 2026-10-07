@@ -3,59 +3,64 @@
 # the fixed fallback shapes.
 
 """
-    CacheLevel(bytes, ways, line, sharing)
+    CacheLevel(bytes, line, sharing)
 
 One detected cache level; any field may be `0` for "not detected". `sharing` is
 the number of logical CPUs sharing this level.
 """
 struct CacheLevel
     bytes::Int
-    ways::Int
     line::Int
     sharing::Int
 end
-CacheLevel() = CacheLevel(0, 0, 0, 0)
+CacheLevel() = CacheLevel(0, 0, 0)
 
 """
-    TargetProfile
+    TargetProfile(isa, cpu_name, l1d, l2, l3)
 
 What was detected about the host CPU. `isa` is one of `:avx512`, `:avx2`,
-`:neon` or `:unknown`.
+`:neon` or `:unknown`, and fixes `vector_bytes` and `nregisters`. The core's
+share of L2 and L3 (`l2_share`, `l3_share`, in bytes) and whether 512-bit FMAs
+are double-pumped (`double_pumped`) are derived as well.
 """
 struct TargetProfile
     isa::Symbol
-    arch::Symbol
     cpu_name::String
     vector_bytes::Int
     nregisters::Int
     l1d::CacheLevel
     l2::CacheLevel
     l3::CacheLevel
-end
+    # Derived here: planning reads them on every call.
+    l2_share::Int
+    l3_share::Int
+    double_pumped::Bool
 
-unknown_target() = TargetProfile(
-    :unknown, Sys.ARCH, "", 0, 0, CacheLevel(), CacheLevel(), CacheLevel()
-)
-
-# LLVM CPU name -> vector ISA. Unlisted names fall through to the CPUID probe.
-const _UARCH_ISA = Dict{String, Symbol}(
-    n => :avx512 for n in (
-            "skylake-avx512", "cascadelake", "cooperlake", "cannonlake",
-            "icelake-client", "icelake-server", "tigerlake", "rocketlake",
-            "sapphirerapids", "emeraldrapids", "graniterapids", "knl", "knm",
-            "znver4", "znver5",
+    function TargetProfile(isa::Symbol, cpu_name::AbstractString, l1d::CacheLevel, l2::CacheLevel, l3::CacheLevel)
+        isa in (:avx512, :avx2, :neon, :unknown) ||
+            throw(ArgumentError("TargetProfile: unknown ISA $(repr(isa))"))
+        return new(
+            isa, cpu_name, isa_vector_bytes(isa), isa_nregisters(isa), l1d, l2, l3,
+            core_bytes(l1d, l2), core_bytes(l1d, l3), cpu_name in DOUBLE_PUMPED_CPUS
         )
-)
-for n in (
-        "haswell", "broadwell", "skylake", "alderlake", "raptorlake",
-        "meteorlake", "sierraforest", "grandridge", "tremont", "goldmont",
-        "goldmont-plus", "znver1", "znver2", "znver3", "bdver4",
-    )
-    _UARCH_ISA[n] = :avx2
+    end
 end
+
+# This core's share of `level`: the CPUs sharing it over the SMT threads per
+# core, which are the CPUs sharing L1d.
+core_bytes(l1d::CacheLevel, level::CacheLevel) = level.bytes ÷ max(1, level.sharing ÷ max(1, l1d.sharing))
+
+# AMD's AVX-512 cores, which double-pump 512-bit FMAs.
+const DOUBLE_PUMPED_CPUS = ("znver4", "znver5")
+
+unknown_target() = TargetProfile(:unknown, "", CacheLevel(), CacheLevel(), CacheLevel())
+
+# The register count is the ISA's, not the lane width's: AVX512VL gives 32 ymm registers.
+isa_vector_bytes(isa::Symbol) = isa === :avx512 ? 64 : isa === :avx2 ? 32 : isa === :neon ? 16 : 0
+isa_nregisters(isa::Symbol) = isa === :avx512 ? 32 : isa === :avx2 ? 16 : isa === :neon ? 32 : 0
 
 # `Base.BinaryPlatforms.CPUID` is undocumented, so a failure degrades to `:unknown`.
-function _isa_from_cpuid()
+function isa_from_cpuid()
     return try
         C = Base.BinaryPlatforms.CPUID
         C.test_cpu_feature(C.JL_X86_avx512f) ? :avx512 :
@@ -65,39 +70,25 @@ function _isa_from_cpuid()
     end
 end
 
-_isa_rank(k::Symbol) = k === :avx512 ? 2 : k === :avx2 ? 1 : 0
-
-function _detect_isa()
-    if Sys.ARCH === :x86_64 || Sys.ARCH === :i686
-        key = get(_UARCH_ISA, Sys.CPU_NAME, :miss)
-        key === :miss && return _isa_from_cpuid()
-        # A hypervisor can mask CPUID features without changing the CPU name;
-        # AVX-512 code would then SIGILL, so a narrower live probe wins.
-        probe = _isa_from_cpuid()
-        probe === :unknown && return key
-        return _isa_rank(probe) < _isa_rank(key) ? probe : key
-    elseif Sys.ARCH === :aarch64
-        # SVE is not detected: its runtime vector length cannot be a fixed kernel shape.
-        return :neon
-    end
+function detect_isa()
+    (Sys.ARCH === :x86_64 || Sys.ARCH === :i686) && return isa_from_cpuid()
+    # SVE is not detected: its runtime vector length cannot be a fixed kernel shape.
+    Sys.ARCH === :aarch64 && return :neon
     return :unknown
 end
 
-# The register count is the ISA's, not the lane width's: AVX512VL gives 32 ymm registers.
-_isa_vector_bytes(::Val{K}) where {K} = K === :avx512 ? 64 : K === :avx2 ? 32 : K === :neon ? 16 : 0
-_isa_nregisters(::Val{K}) where {K} = K === :avx512 ? 32 : K === :avx2 ? 16 : K === :neon ? 32 : 0
-
 # "32K" / "1024K" / "2M" as Linux sysfs writes them.
-function _parse_size(s::AbstractString)
+function parse_size(s::AbstractString)
     s = strip(s)
     isempty(s) && return 0
-    mult = get(Dict('K' => 1024, 'M' => 1024^2, 'G' => 1024^3), uppercase(s[end]), 1)
+    unit = uppercase(s[end])
+    mult = unit == 'K' ? 1024 : unit == 'M' ? 1024^2 : unit == 'G' ? 1024^3 : 1
     mult == 1 || (s = s[1:(end - 1)])
     return something(tryparse(Int, strip(s)), 0) * mult
 end
 
 # "0,16" -> 2; "0-7,16-23" -> 16; "" -> 0.
-function _count_cpu_list(s::AbstractString)
+function count_cpu_list(s::AbstractString)
     n = 0
     for part in split(strip(s), ',')
         isempty(part) && continue
@@ -110,31 +101,30 @@ function _count_cpu_list(s::AbstractString)
     return n
 end
 
-_read_or(path, default = "") = try
+read_or(path, default = "") = try
     isfile(path) ? chomp(read(path, String)) : default
 catch
     default
 end
-_int_or(path) = something(tryparse(Int, _read_or(path)), 0)
+int_or(path) = something(tryparse(Int, read_or(path)), 0)
 
-function _cache_topology_linux()
+function cache_topology_linux()
     base = "/sys/devices/system/cpu/cpu0/cache"
     isdir(base) || return nothing
     levels = Dict{Symbol, CacheLevel}()
     for entry in readdir(base)
         startswith(entry, "index") || continue
         d = joinpath(base, entry)
-        level = tryparse(Int, _read_or(joinpath(d, "level")))
+        level = tryparse(Int, read_or(joinpath(d, "level")))
         level === nothing && continue
-        kind = _read_or(joinpath(d, "type"))
+        kind = read_or(joinpath(d, "type"))
         key = level == 1 ? (kind == "Data" ? :l1d : :skip) :
             level == 2 ? :l2 : level == 3 ? :l3 : :skip
         key === :skip && continue
         levels[key] = CacheLevel(
-            _parse_size(_read_or(joinpath(d, "size"))),
-            _int_or(joinpath(d, "ways_of_associativity")),
-            _int_or(joinpath(d, "coherency_line_size")),
-            _count_cpu_list(_read_or(joinpath(d, "shared_cpu_list"))),
+            parse_size(read_or(joinpath(d, "size"))),
+            int_or(joinpath(d, "coherency_line_size")),
+            count_cpu_list(read_or(joinpath(d, "shared_cpu_list"))),
         )
     end
     return (
@@ -143,25 +133,25 @@ function _cache_topology_linux()
     )
 end
 
-_sysctl_int(name) = try
+sysctl_int(name) = try
     something(tryparse(Int, chomp(read(`sysctl -n $name`, String))), 0)
 catch
     0
 end
 
 # macOS exposes no associativity; `cpusperl2` gives the L2 sharing.
-function _cache_topology_darwin()
-    line = _sysctl_int("hw.cachelinesize")
-    pick(a, b) = (v = _sysctl_int(a); v == 0 ? _sysctl_int(b) : v)
+function cache_topology_darwin()
+    line = sysctl_int("hw.cachelinesize")
+    pick(a, b) = (v = sysctl_int(a); v == 0 ? sysctl_int(b) : v)
     return (
-        l1d = CacheLevel(pick("hw.perflevel0.l1dcachesize", "hw.l1dcachesize"), 0, line, 1),
+        l1d = CacheLevel(pick("hw.perflevel0.l1dcachesize", "hw.l1dcachesize"), line, 1),
         l2 = CacheLevel(
-            pick("hw.perflevel0.l2cachesize", "hw.l2cachesize"), 0, line,
-            _sysctl_int("hw.perflevel0.cpusperl2")
+            pick("hw.perflevel0.l2cachesize", "hw.l2cachesize"), line,
+            sysctl_int("hw.perflevel0.cpusperl2")
         ),
         l3 = CacheLevel(
-            _sysctl_int("hw.l3cachesize"), 0, line,
-            _sysctl_int("hw.perflevel0.logicalcpu")
+            sysctl_int("hw.l3cachesize"), line,
+            sysctl_int("hw.perflevel0.logicalcpu")
         ),
     )
 end
@@ -174,25 +164,21 @@ Linux sysfs or macOS `sysctl`, or `nothing` if unavailable.
 """
 function cache_topology()
     return try
-        Sys.islinux() ? _cache_topology_linux() :
-            Sys.isapple() ? _cache_topology_darwin() : nothing
+        Sys.islinux() ? cache_topology_linux() :
+            Sys.isapple() ? cache_topology_darwin() : nothing
     catch
         nothing
     end
 end
 
-function _detect_target()
-    key = _detect_isa()
+function detect_target()
     topo = cache_topology()
     l1d, l2, l3 = topo === nothing ?
         (CacheLevel(), CacheLevel(), CacheLevel()) : (topo.l1d, topo.l2, topo.l3)
-    return TargetProfile(
-        key, Sys.ARCH, Sys.CPU_NAME,
-        _isa_vector_bytes(Val(key)), _isa_nregisters(Val(key)), l1d, l2, l3
-    )
+    return TargetProfile(detect_isa(), Sys.CPU_NAME, l1d, l2, l3)
 end
 
-const _TARGET = Ref{TargetProfile}(unknown_target())
+const TARGET = Ref{TargetProfile}(unknown_target())
 
 """
     target_profile() -> TargetProfile
@@ -200,19 +186,24 @@ const _TARGET = Ref{TargetProfile}(unknown_target())
 The [`TargetProfile`](@ref) detected for this process (all `:unknown` if
 detection failed).
 """
-target_profile() = _TARGET[]
+target_profile() = TARGET[]
 
-function _init_target!()
-    _TARGET[] = try
-        _detect_target()
-    catch
-        unknown_target()
-    end
-    return nothing
-end
+init_target!() = (TARGET[] = detect_target(); nothing)
 
-# Shared by the deinterleaving complex packer and the planar store: both pay
-# off only with 512-bit vector registers.
-@inline _complex_fastpath_isa_eligible(profile::TargetProfile) =
-    profile.vector_bytes == _isa_vector_bytes(Val(:avx512))
-@inline _complex_fastpath_isa_eligible() = _complex_fastpath_isa_eligible(target_profile())
+# The core's private L2 share, or 1 MB when undetected.
+l2_core_bytes(profile::TargetProfile) = profile.l2_share > 0 ? profile.l2_share : 1 << 20
+
+# Default `SIMD.Vec` lane count: one 256-bit register.
+default_lanewidth(::Type{Float64}) = 4
+default_lanewidth(::Type{Float32}) = 8
+
+# Lanes of `R` in one hardware vector register.
+vector_lanes(profile::TargetProfile, ::Type{R}) where {R} =
+    profile.vector_bytes > 0 ? profile.vector_bytes ÷ sizeof(R) : default_lanewidth(R)
+
+line_bytes(profile::TargetProfile) = profile.l1d.line > 0 ? profile.l1d.line : 64
+
+# A K step at least a page apart: a chain of demand misses no prefetcher
+# follows, which the K-order model charges this factor.
+const K_WALK_FAR_BYTES = 4096
+const K_WALK_FAR_PENALTY = 3

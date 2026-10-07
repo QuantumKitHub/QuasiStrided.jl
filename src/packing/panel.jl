@@ -1,6 +1,7 @@
-# GUARDRAIL: packed micro-panels reach the kernel as borrowed pointers, never
-# `view`s: a `SubArray`'s address arithmetic evicts the accumulator at large
-# register tiles and heap-allocates per `execute!`.
+# GUARDRAIL: packers and kernels read and write packed micro-panels only as
+# `PackedPanel`s, borrowed pointers, never `view`s: a `SubArray`'s address
+# arithmetic evicts the accumulator at large register tiles and heap-allocates
+# per `execute!`. Only the checked entry points also take a `DenseVector`.
 
 using SIMD: Vec, vload, vstore
 
@@ -17,16 +18,9 @@ Base.eltype(::Type{PackedPanel{T}}) where {T} = T
 @inline packed_panel(buffer::AbstractVector{T}, first1::Int, len::Int) where {T} =
     PackedPanel{T}(pointer(buffer, first1), len)
 
-# Zero-based panel element access; the `AbstractVector` methods serve `Vector`
-# and `view` destinations.
+# Zero-based panel element access.
 @inline panel_vload(::Type{Vec{W, T}}, p::PackedPanel{T}, o::Int) where {W, T} =
     vload(Vec{W, T}, p.ptr + sizeof(T) * o)
-@inline panel_vload(::Type{Vec{W, T}}, v::AbstractVector{T}, o::Int) where {W, T} =
-    vload(Vec{W, T}, v, o + 1)
-
 @inline panel_load(p::PackedPanel{T}, o::Int) where {T} = unsafe_load(p.ptr + sizeof(T) * o)
-@inline panel_load(v::AbstractVector, o::Int) = @inbounds v[o + 1]
-
 @inline panel_store!(p::PackedPanel{T}, o::Int, x::T) where {T} =
     unsafe_store!(p.ptr + sizeof(T) * o, x)
-@inline panel_store!(v::AbstractVector{T}, o::Int, x::T) where {T} = @inbounds v[o + 1] = x

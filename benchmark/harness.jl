@@ -1,9 +1,9 @@
 # Shared helpers for the benchmark scripts (`include`d, not a module):
 # single-threaded warm-up-then-median timing, fixtures, a drift canary, CLI
-# parsing and output paths.
+# parsing, the `--smoke` mode and output paths.
 
 using QuasiStrided
-using QuasiStrided: SIMDKernel, mr, nr, lanewidth, plan_contract, execute!
+using QuasiStrided: SIMDKernel, tile_size, lanewidth, plan_contract, execute!
 using StridedViews: StridedView
 using LinearAlgebra
 using Statistics: median
@@ -61,11 +61,6 @@ function build_plain(::Type{T}, spec::ShapeSpec, rng) where {T}
     )
 end
 
-full_grid(mcs, kcs, ncs) = [(mc, kc, nc) for kc in kcs for mc in mcs for nc in ncs]
-
-const DTYPES = (Float64, Float32)
-const CDTYPES = (ComplexF64, ComplexF32)
-
 # Complex is charged the textbook 8 flops per multiply-accumulate, never an
 # induced method's lower count, so methods compare on equal terms.
 gflops(::Type{T}, Ma::Int, Ka::Int, Na::Int, seconds::Float64) where {T} =
@@ -105,7 +100,7 @@ function run_canary(rng, label::String)
     fx = build_plain(Float64, ShapeSpec("canary_64^3", 64, 64, 64), rng)
     plan = plan_contract(
         fx.Cv, fx.Av, fx.indA, fx.Bv, fx.indB, fx.indC;
-        kernel = SIMDKernel(Val(8), Val(6), Float64), mc = 128, kc = 256, nc = 1536
+        kernel = SIMDKernel(Val(8), Val(6), Float64), m_block = 128, k_block = 256, n_block = 1536
     )
     t = median_time_s(() -> execute!(plan, 1.0, 0.0); reps = 15)
     println("canary[$label] median = $(t) s")
@@ -125,6 +120,11 @@ end
 hasflag(name::String) = "--$name" in ARGS
 argopt(name::String, default::AbstractString) = something(argval(name), default)
 argopt(name::String, default::Integer) = something(tryparse(Int, something(argval(name), "")), default)
+
+# `--smoke`: one rep on the first few cases, to check that a script runs.
+const SMOKE = hasflag("smoke")
+thin(v) = SMOKE ? v[1:min(end, 3)] : v
+reps_arg(default::Int) = SMOKE ? 1 : argopt("reps", default)
 
 const DTYPE_BY_NAME = Dict(
     "Float64" => Float64, "Float32" => Float32, "ComplexF64" => ComplexF64, "ComplexF32" => ComplexF32,

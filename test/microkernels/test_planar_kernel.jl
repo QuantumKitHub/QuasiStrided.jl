@@ -1,4 +1,6 @@
-using QuasiStrided: PlanarKernel, PlanarMethod, complex_method, lanewidth,
+include("helpers.jl")
+
+using QuasiStrided: PlanarKernel, lanewidth,
     KERNEL_SHAPES_C64_PLANAR, KERNEL_SHAPES_C32_PLANAR
 
 @testset "PlanarKernel" begin
@@ -11,14 +13,9 @@ using QuasiStrided: PlanarKernel, PlanarMethod, complex_method, lanewidth,
     end
 
     k = PlanarKernel(Val(16), Val(6), ComplexF64, Val(8))
-    @test complex_method(k) === PlanarMethod()
     @test lanewidth(PlanarKernel(Val(8), Val(4), ComplexF64)) == 4  # from the REAL type
     @test lanewidth(PlanarKernel(Val(8), Val(4), ComplexF32)) == 8
     @test_throws ArgumentError PlanarKernel(Val(6), Val(4), ComplexF64, Val(4))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), ComplexF64, Val(0))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), Float64)
-    # A complex kernel is never asked for a single-plane offset.
-    @test_throws MethodError QuasiStrided.packed_a_offset(k, 0, 0)
-
-    mk_e2e(ComplexF64, nothing)
 end

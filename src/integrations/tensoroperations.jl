@@ -1,7 +1,6 @@
 # TensorOperations backend. The engine itself knows nothing about TO.
 import TensorOperations as TO
 using TensorOperations: Index2Tuple, linearize
-import TupleTools
 using StridedViews: StridedView, isstrided
 
 """
@@ -32,40 +31,13 @@ end
 
 QuasiStridedBackend(; accumulator = nothing) = QuasiStridedBackend{accumulator}()
 
-# Task-local pool of workspaces, keyed by the compute type only: all complex
-# methods pack into `Vector{real(T)}` and `reserve!` is grow-only, so they can
-# share one.
-const _QS_WORKSPACE_KEY = :quasistrided_contract_workspaces
-
-@inline function _qs_workspace_pool()
-    return get!(task_local_storage(), _QS_WORKSPACE_KEY) do
-        return Dict{DataType, ContractWorkspace}()
-    end::Dict{DataType, ContractWorkspace}
-end
-
-@inline function _qs_task_workspace(::Type{T}) where {T}
-    pool = _qs_workspace_pool()
-    ws = get(pool, T, nothing)
-    # Both assertions are needed: without them the branches join to the abstract
-    # `ContractWorkspace`, and the call into `_planned` boxes its arguments.
-    ws === nothing || return ws::ContractWorkspace{T, Vector{real(T)}, Vector{T}}
-    return _qs_build_task_workspace!(pool, T)::ContractWorkspace{T, Vector{real(T)}, Vector{T}}
-end
-
-@noinline function _qs_build_task_workspace!(pool::Dict{DataType, ContractWorkspace}, ::Type{T}) where {T}
-    kernel = _default_kernel(T)
-    new_ws = ContractWorkspace(T, kernel, default_blocking(kernel), false, TO.DefaultAllocator())
-    pool[T] = new_ws
-    return new_ws
-end
-
 # TO's `pA`/`pB`/`pAB` -> one `Int` label per axis: `1:NoA` for A's open axes
 # (in `pA[1]` order), `NoA+1:NoA+NoB` for B's open axes, `-1:-1:-Nk` for the
 # contracted pairs; `indC` is then `linearize(pAB)`. For example
 #     pA = ((3,1,4),(2,5)), pB = ((3,1),(2,4)), pAB = ((4,2),(5,1,3))
 #     -> indA = (2,-1,1,3,-2), indB = (-2,4,-1,5), indC = (4,2,5,1,3).
 # No validation: `TO.argcheck_tensorcontract` runs first.
-function _qs_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
+function contraction_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
     NoA, Nk = TO.numout(pA), TO.numin(pA)
     qA = TupleTools.invperm(linearize(pA))
     qB = TupleTools.invperm(linearize(pB))
@@ -74,88 +46,44 @@ function _qs_labels(pA::Index2Tuple, pB::Index2Tuple, pAB::Index2Tuple)
     return indA, indB, linearize(pAB)
 end
 
-@noinline _qs_throw(msg::AbstractString) = throw(ArgumentError(msg))
-
-@noinline function _qs_check_eligible(C, A, B)
-    f = TO.tensorcontract!
-    all(isstrided, (A, B, C)) || _qs_throw(
-        "QuasiStridedBackend requires strided arrays for $f, got " *
-            join(map(typeof, (C, A, B)), ", ")
+@noinline function check_strided(C, A, B)
+    all(isstrided, (A, B, C)) || throw(
+        ArgumentError(
+            "QuasiStridedBackend requires strided arrays for $(TO.tensorcontract!), got " *
+                join(map(typeof, (C, A, B)), ", ")
+        )
     )
     return nothing
 end
 
-# Checks shared by both `tensorcontract!` methods. The eltype and conjugated-C
-# checks precede `plan_contract`'s so that a rejected call never acquires or
-# grows a pooled workspace (the workspace is an argument to `plan_contract`).
-@inline function _qs_prepare(C, A, pA, B, pB, pAB, α, β, accumulator)
-    T = _compute_type(eltype(A), eltype(B), eltype(C), accumulator)
-    _qs_check_eligible(C, A, B)
+# The aliasing check runs on the views in `planned`: Base has no `dataids` for
+# a `PermutedDimsArray`, but a `StridedView` forwards to its parent.
+@inline function prepare_contraction(C, A, pA, B, pB, pAB, α, β, accumulator)
+    T = compute_type(eltype(A), eltype(B), eltype(C), accumulator)
+    check_strided(C, A, B)
     TO.argcheck_tensorcontract(C, A, pA, B, pB, pAB)
     TO.dimcheck_tensorcontract(C, A, pA, B, pB, pAB)
-
-    Cv, Av, Bv = StridedView(C), StridedView(A), StridedView(B)
-    # On the wrapped views: Base has no `dataids` for `PermutedDimsArray`, but a
-    # `StridedView` forwards to its parent.
-    (Base.mightalias(Cv, Av) || Base.mightalias(Cv, Bv)) && _qs_throw(
-        "output tensor must not be aliased with an input tensor in $(TO.tensorcontract!)"
-    )
-    _qs_isconj(Cv, false) && _qs_throw(
-        "output tensor of $(TO.tensorcontract!) must not be a conjugated view: " *
-            "QuasiStrided writes through to the parent array and does not apply " *
-            "`StridedView.op` on store, so a conjugated `C` would be silently wrong"
-    )
-
-    # Dropping `Zero()`/`One()` is safe: the kernels branch on `iszero(alpha/beta)`.
-    indA, indB, indC = _qs_labels(pA, pB, pAB)
-    return Cv, Av, Bv, indA, indB, indC, convert(T, α), convert(T, β)
+    # `Zero()`/`One()` become numbers: `static_beta` recovers the β cases
+    # at the branch points.
+    indA, indB, indC = contraction_labels(pA, pB, pAB)
+    return StridedView(C), StridedView(A), StridedView(B), indA, indB, indC, convert(T, α), convert(T, β)
 end
 
-# Default allocator: pooled task-local workspace. `_planned` builds and runs the
-# plan behind the kernel dispatch barrier, so the plan is never boxed (as
-# `execute!(plan_contract(...), ...)` would be).
+# `planned` builds, runs and releases the plan behind the kernel dispatch
+# barrier, so the plan is never boxed (as `execute!(plan_contract(...), ...)`
+# would be). Bracketed with checkpoint/reset like TO's own `blas_contract!`.
 function TO.tensorcontract!(
         C::AbstractArray,
         A::AbstractArray, pA::Index2Tuple, conjA::Bool,
         B::AbstractArray, pB::Index2Tuple, conjB::Bool,
         pAB::Index2Tuple,
         α::Number, β::Number,
-        backend::QuasiStridedBackend{AC},
-        allocator::TO.DefaultAllocator = TO.DefaultAllocator()
+        backend::QuasiStridedBackend{AC}, allocator = TO.DefaultAllocator()
     ) where {AC}
-    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β, AC)
-    _planned(
-        _Execute(α′, β′), Cv, Av, indA, Bv, indB, indC,
-        nothing, conjA, conjB, nothing, nothing, nothing,
-        _qs_task_workspace(typeof(α′)), allocator, false, AC  # α′ has the compute type
-    )
-    return C
-end
-
-# Explicit allocator: a workspace scoped to this call, bracketed with
-# checkpoint/reset like TO's own `blas_contract!`. This method needs the plan
-# back to release it, hence `plan_contract` rather than `_planned`.
-function TO.tensorcontract!(
-        C::AbstractArray,
-        A::AbstractArray, pA::Index2Tuple, conjA::Bool,
-        B::AbstractArray, pB::Index2Tuple, conjB::Bool,
-        pAB::Index2Tuple,
-        α::Number, β::Number,
-        backend::QuasiStridedBackend{AC}, allocator
-    ) where {AC}
-    Cv, Av, Bv, indA, indB, indC, α′, β′ = _qs_prepare(C, A, pA, B, pB, pAB, α, β, AC)
+    Cv, Av, Bv, indA, indB, indC, α′, β′ = prepare_contraction(C, A, pA, B, pB, pAB, α, β, AC)
     checkpoint = TO.allocator_checkpoint!(allocator)
-    plan = plan_contract(
-        Cv, Av, indA, Bv, indB, indC;
-        conjA = conjA, conjB = conjB,
-        workspace = nothing, allocator = allocator, oracle = false, accumulator = AC
-    )
-    try
-        execute!(plan, α′, β′)
-    finally
-        release!(plan.workspace, allocator)
-        TO.allocator_reset!(allocator, checkpoint)
-    end
+    planned(Cv, Av, indA, Bv, indB, indC, α′, β′; conjA, conjB, allocator, accumulator = AC)
+    TO.allocator_reset!(allocator, checkpoint)
     return C
 end
 

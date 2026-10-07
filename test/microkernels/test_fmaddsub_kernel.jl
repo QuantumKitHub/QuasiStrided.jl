@@ -1,23 +1,23 @@
-using QuasiStrided: FMAddSubKernel, FMAddSubMethod, PlanarKernel, PlanarMethod, OneMKernel,
-    InterleavedFormat, SourceTile, complex_method, lanewidth, kernel_shapes, packed_panel,
-    _kernel_from_shape, _default_method, accumulator_planes, target_profile, PackedPanel
+include("helpers.jl")
+
+using QuasiStrided: FMAddSubKernel, lanewidth, kernel_shapes, packed_panel,
+    accumulator_planes, target_profile, PackedPanel
 using SIMD: Vec
 using InteractiveUtils: code_native
 
-const _QSF = QuasiStrided
+const QSF = QuasiStrided
 
 @testset "FMAddSubKernel" begin
     full = ((ComplexF64, (12, 8, 8)), (ComplexF32, (8, 5, 8)))
     for (T, (MR, NR, W)) in full
         mk_contract(FMAddSubKernel(Val(MR), Val(NR), T, Val(W)))
     end
-    for T in (ComplexF64, ComplexF32), s in (kernel_shapes(T, FMAddSubMethod())..., (2, 3, 4))
+    for T in (ComplexF64, ComplexF32), s in (kernel_shapes(T, FMAddSubKernel)..., (2, 3, 4))
         (T, s) in full || mk_contract(FMAddSubKernel(Val(s[1]), Val(s[2]), T, Val(s[3])); full = false)
     end
 
     @testset "construction" begin
-        @test complex_method(FMAddSubKernel(Val(8), Val(4), ComplexF64)) === FMAddSubMethod()
-        @test accumulator_planes(FMAddSubMethod()) == 1
+        @test accumulator_planes(FMAddSubKernel) == 1
         @test lanewidth(FMAddSubKernel(Val(8), Val(4), ComplexF32)) == 8
         @test_throws ArgumentError FMAddSubKernel(Val(12), Val(8), ComplexF64, Val(16))
         @test_throws ArgumentError FMAddSubKernel(Val(3), Val(4), ComplexF64, Val(3))  # odd W
@@ -26,20 +26,20 @@ const _QSF = QuasiStrided
         @test_throws ArgumentError FMAddSubKernel(Val(8), Val(4), Float64, Val(4))
     end
 
-    @testset "_fmaddsub is lane-exact x86 fmaddsub; _swap_pairs swaps pairs" begin
+    @testset "fmaddsub is lane-exact x86 fmaddsub; swap_pairs swaps pairs" begin
         rng = MersenneTwister(0xADD5)
         for R in (Float64, Float32), N in (2, 4, 8, 16), _ in 1:10
             x, y, c = (Vec{N, R}(ntuple(_ -> randn(rng, R), N)) for _ in 1:3)
             # One fused rounding per lane, with an exactly negated addend in even lanes.
-            @test Tuple(_QSF._fmaddsub(x, y, c)) ===
+            @test Tuple(QSF.fmaddsub(x, y, c)) ===
                 ntuple(l -> isodd(l) ? fma(x[l], y[l], -c[l]) : fma(x[l], y[l], c[l]), N)
-            @test Tuple(_QSF._swap_pairs(x)) === ntuple(l -> isodd(l) ? x[l + 1] : x[l - 1], N)
+            @test Tuple(QSF.swap_pairs(x)) === ntuple(l -> isodd(l) ? x[l + 1] : x[l - 1], N)
         end
         x = Vec{4, Float64}((0.0, -0.0, Inf, 1.0))
         y = Vec{4, Float64}((1.0, 1.0, 1.0, NaN))
         c = Vec{4, Float64}((0.0, 0.0, 1.0, 1.0))
         @test isequal(
-            Tuple(_QSF._fmaddsub(x, y, c)),
+            Tuple(QSF.fmaddsub(x, y, c)),
             (fma(0.0, 1.0, -0.0), fma(-0.0, 1.0, 0.0), fma(Inf, 1.0, -1.0), fma(1.0, NaN, 1.0))
         )
     end
@@ -50,9 +50,9 @@ const _QSF = QuasiStrided
             b = Complex{R}(7, -2)
             c = Vec{2, R}((R(11), R(13)))
             br, bi = Vec{2, R}(real(b)), Vec{2, R}(imag(b))
-            right = _QSF._fmaddsub(a, br, _QSF._fmaddsub(_QSF._swap_pairs(a), bi, c))
+            right = QSF.fmaddsub(a, br, QSF.fmaddsub(QSF.swap_pairs(a), bi, c))
             @test Complex(right[1], right[2]) == Complex{R}(11, 13) + Complex{R}(3, 5) * b
-            wrong = _QSF._fmaddsub(_QSF._swap_pairs(a), bi, _QSF._fmaddsub(a, br, c))
+            wrong = QSF.fmaddsub(QSF.swap_pairs(a), bi, QSF.fmaddsub(a, br, c))
             @test wrong[1] == R(11) + R(5) * imag(b) - R(3) * real(b)
         end
     end
@@ -68,7 +68,7 @@ const _QSF = QuasiStrided
     end
 
     @testset "instruction selection: vfmaddsub, no separate mul/add/sub, no spill" begin
-        # Exact instruction counts in the hot loop of `accumulate`, so only on
+        # Exact instruction counts in the hot loop of `add_tile`, so only on
         # an FMA3 x86 host and not on hosted CI, whose virtualized CPU feature
         # sets do not reliably match.
         isa = target_profile().isa
@@ -93,7 +93,7 @@ const _QSF = QuasiStrided
             R = real(T)
             asm = sprint() do io
                 code_native(
-                    io, Base.accumulate,
+                    io, QuasiStrided.add_tile,
                     (typeof(k), typeof(zero_accumulator(k)), PackedPanel{R}, PackedPanel{R}, Int);
                     debuginfo = :none, syntax = :intel
                 )
@@ -106,68 +106,5 @@ const _QSF = QuasiStrided
             @test count(r"v(shufp|permilp)", loop) == MV skip = !has_fma
             @test count(r"\[r[sb]p", loop) == 0 skip = !has_fma
         end
-    end
-
-    @testset "pack_a! InterleavedFormat: scalar loop and fast path vs local layout" begin
-        # Bitwise (`isequal` separates -0.0): packing is a copy, or a sign flip under conj.
-        for T in (ComplexF64, ComplexF32), (MR, NR, W) in (kernel_shapes(T, FMAddSubMethod())..., (3, 2, 2))
-            R = real(T)
-            k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
-            kc, lda, base = 7, MR + 3, 2
-            vals = [T(10i + 1, -(10i + 2)) for i in 1:(lda * kc + 4)]
-            vals[5] = T(0, 0)
-            vals[9] = T(R(-0.0), R(0))
-            for f in (identity, conj), m in (MR, max(1, MR - 1))
-                src = SourceTile(vals, base, AffineAxis(0, 1, m), AffineAxis(0, lda, kc))
-                A = zeros(T, MR, kc)
-                A[1:m, :] = f.(reshape(vals[(base + 1):(base + lda * kc)], lda, kc)[1:m, :])
-                want = mk_pack_a(k, A)
-                bufv = fill(R(-777), packed_a_length(k, kc))  # a Vector: the scalar loop
-                pack_a!(bufv, src, k, f)
-                @test isequal(bufv, want)
-                bufp = fill(R(-777), packed_a_length(k, kc))  # a PackedPanel: the fast path where gated in
-                GC.@preserve bufp pack_a!(packed_panel(bufp, 1, length(bufp)), src, k, f)
-                @test isequal(bufp, want)
-            end
-            src = SourceTile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, kc))
-            bufp = zeros(R, packed_a_length(k, kc))
-            GC.@preserve bufp begin
-                pp = packed_panel(bufp, 1, length(bufp))
-                @test _QSF._pack_complex_contiguous_eligible(
-                    pp, vals, src.rows, identity, InterleavedFormat(), MR, Val(MR), T
-                ) == _QSF._complex_fastpath_isa_eligible()
-            end
-        end
-    end
-
-    @testset "blocking and selection" begin
-        for T in (ComplexF64, ComplexF32)
-            bf = default_blocking(FMAddSubKernel(Val(8), Val(8), T, Val(8)))
-            bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
-            @test (bf.mc, bf.kc, bf.nc) == (bp.mc, bp.kc, bp.nc)  # planar's packed reals
-            for s in kernel_shapes(T, FMAddSubMethod())
-                @test _kernel_from_shape(s, T, FMAddSubMethod()) isa FMAddSubKernel{s[1], s[2], T, s[3]}
-            end
-            @test_throws ArgumentError _kernel_from_shape((7, 7, 7), T, FMAddSubMethod())
-            @test !(_QSF._default_kernel(T, 1024, 1024) isa FMAddSubKernel)
-        end
-    end
-
-    mk_e2e(ComplexF64, FMAddSubKernel(Val(4), Val(5), ComplexF64, Val(4)))
-    mk_e2e(ComplexF32, FMAddSubKernel(Val(8), Val(5), ComplexF32, Val(8)))
-
-    @testset "end to end: permuted/strided tensor contraction" begin
-        T = ComplexF64
-        rng = MersenneTwister(99)
-        A = rand(rng, T, 5, 9, 7)  # a, k, b: non-unit-stride M composite
-        B = rand(rng, T, 6, 9)     # n, k: transposed
-        C = zeros(T, 5, 6, 7)
-        plan = plan_contract(
-            StridedView(C), StridedView(A), (1, 2, 3), StridedView(B), (4, 2), (1, 4, 3);
-            kernel = FMAddSubKernel(Val(12), Val(8), T, Val(8))
-        )
-        execute!(plan, one(T), zero(T))
-        want = [sum(A[a, k, b] * B[n, k] for k in 1:9) for a in 1:5, n in 1:6, b in 1:7]
-        @test maximum(abs, C .- want) <= 64 * mk_tol(T)
     end
 end

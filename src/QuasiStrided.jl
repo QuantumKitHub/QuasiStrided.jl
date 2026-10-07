@@ -1,7 +1,9 @@
 module QuasiStrided
 
-using LinearAlgebra
 using StridedViews: StridedView, offset
+import TupleTools
+using Base.Checked: checked_abs, checked_add, checked_mul
+using VectorInterface: Zero, One
 
 # TensorOperations names are always qualified: a bare `using` collides on `scalartype`.
 import TensorOperations as TO
@@ -16,7 +18,6 @@ include("hardware/target.jl")
 
 # --- Layout: zero-based strided/scattered addressing ---
 include("layout/axis_group.jl")
-include("layout/pair_group.jl")
 include("layout/tiles.jl")
 
 # --- Packing: packed-panel formats and the packers that fill them ---
@@ -24,34 +25,29 @@ include("packing/format.jl")
 include("packing/panel.jl")
 include("packing/pack.jl")
 include("packing/pack_contiguous.jl")
-include("packing/transposed.jl")
+include("packing/line_packing.jl")
 
-# --- Microkernels: accumulate over one packed K panel, store into C ---
+# --- Microkernels: add one packed K block to a register tile, store into C ---
 include("microkernels/interface.jl")
-include("microkernels/scalar.jl")
-include("microkernels/simd.jl")
-include("microkernels/planar.jl")
-include("microkernels/onem.jl")
-include("microkernels/fmaddsub.jl")
-include("microkernels/mixed.jl")
+include("microkernels/kernels.jl")
+include("microkernels/vecops.jl")
+# B read in place: a B source beside `PackedPanel`, ahead of the K steps' generators.
+include("packing/unpacked_b.jl")
+include("microkernels/steps.jl")
+include("microkernels/stores.jl")
 
-# --- Planning: labels, conjugation, kernel and blocking choice, the plan ---
+# --- Planning: labels, kernel and blocking choice, the plan ---
 include("planning/labels.jl")
-include("planning/conjugation.jl")
 include("planning/kernel_selection.jl")
 include("planning/blocking.jl")
-include("planning/defaults.jl")
-include("planning/pack_split.jl")
+include("execution/paths.jl")
 include("execution/workspace.jl")
-include("execution/barrier.jl")
 include("planning/plan.jl")
 
-# --- Execution: the five-loop nest, the tile-by-tile oracle and the
-# specialised paths ---
-include("execution/macrokernel.jl")
+# --- Execution: the five-loop nest and the specialised paths ---
+include("execution/nest.jl")
 include("execution/execute.jl")
-include("execution/oracle.jl")
-include("execution/unpackedb.jl")
+include("execution/c_panel.jl")
 include("execution/dot.jl")
 include("execution/outer.jl")
 
@@ -63,7 +59,7 @@ export QuasiStridedBackend
 # Detect the hardware per process, not at precompile time: a cached .ji may be
 # loaded on a different CPU.
 function __init__()
-    _init_target!()
+    init_target!()
     return nothing
 end
 
@@ -71,7 +67,7 @@ end
     eval(
         Expr(
             :public, :contract!, :plan_contract, :execute!, :ContractPlan,
-            :ContractWorkspace, :Blocking, :default_blocking,
+            :ContractWorkspace, :Blocking, :default_blocking, :tile_size, :sliver_width,
             :ScalarKernel, :SIMDKernel, :PlanarKernel, :OneMKernel, :FMAddSubKernel,
             :ComplexRealKernel, :RealComplexKernel,
             :target_profile, :cache_topology,

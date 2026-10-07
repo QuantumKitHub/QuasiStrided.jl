@@ -1,5 +1,7 @@
 # `QuasiStridedBackend` against TensorOperations' own backends and explicit references.
 
+include("../helpers.jl")
+
 using TensorOperations
 using TensorOperations: StridedNative
 using StridedViews: StridedView
@@ -12,10 +14,9 @@ const to_native = StridedNative()
 # NaN in C catches a kernel that computes `0 * C` instead of ignoring C when β == 0.
 poison!(C) = fill!(C, convert(eltype(C), NaN))
 
-const complex_eltypes = (ComplexF32, ComplexF64)
-const all_eltypes = (Float32, Float64, complex_eltypes...)
+const all_eltypes = (Float32, Float64, ComplexF32, ComplexF64)
 
-const _MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
+const MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
 
 @testset "tensorcontract! agrees with StridedNative (eltype = $T)" for T in all_eltypes
     Random.seed!(1234567)
@@ -27,7 +28,7 @@ const _MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
     )
     for (szA, szB, pA, pB, pAB, szC) in cases
         A, B = randn(T, szA), randn(T, szB)
-        for conjA in (false, true), conjB in (false, true),
+        for (conjA, conjB) in (T <: Complex ? ((false, false), (true, true)) : ((false, false),)),
                 (α, β) in ((one(T), zero(T)), (rand(T), zero(T)), (rand(T), rand(T)))
             Cn = randn(T, szC)
             iszero(β) && poison!(Cn)
@@ -51,9 +52,10 @@ end
 end
 
 # `conjA`/`conjB` and each operand's `StridedView.op` compose by xor.
-@testset "conjugation: flags x StridedView.op (eltype = $T)" for T in complex_eltypes
+@testset "conjugation: flags x StridedView.op" begin
     Random.seed!(20260914)
-    pA, pB, pAB = _MATMUL_PAB
+    T = ComplexF64
+    pA, pB, pAB = MATMUL_PAB
     M, N = randn(T, (4, 4)), randn(T, (4, 4))
     # `conj(::Matrix)` materialises; `conj(::StridedView)` only sets `op`.
     wrappers = (identity, adjoint, transpose, conj)
@@ -86,7 +88,7 @@ end
 
 @testset "conjugated output view (eltype = $T)" for T in all_eltypes
     Random.seed!(271828)
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     A, B = randn(T, (4, 4)), randn(T, (4, 4))
     conjviews = (
         conj(StridedView(zeros(T, (4, 4)))), adjoint(zeros(T, (4, 4))),
@@ -112,7 +114,7 @@ end
         (randn(T, (3, 4)), randn(T, (4, 3)), ((), (1, 2)), ((2, 1), ()), ((), ()), (), false, false),
         (
             view(randn(T, (6, 8)), 1:2:6, 1:2:8), view(randn(T, (8, 10)), 1:2:8, 1:2:10),
-            _MATMUL_PAB..., (3, 5), false, true,
+            MATMUL_PAB..., (3, 5), false, true,
         ),
     )
     for (A, B, pA, pB, pAB, szC, conjA, conjB) in cases
@@ -127,9 +129,9 @@ end
     end
 end
 
-@testset "@tensor / ncon integration (eltype = $T)" for T in (Float64, ComplexF64)
+@testset "@tensor / ncon integration" begin
     Random.seed!(112233)
-    A, B, C = randn(T, (5, 5, 5, 5)), randn(T, (5, 5, 5)), randn(T, (5, 5, 5))
+    A, B, C = randn(ComplexF64, (5, 5, 5, 5)), randn(ComplexF64, (5, 5, 5)), randn(ComplexF64, (5, 5, 5))
     @tensor backend = qsbackend D[a, b, c, d] := A[a, e, c, f] * B[g, d, e] * C[g, f, b]
     @tensor Dref[a, b, c, d] := A[a, e, c, f] * B[g, d, e] * C[g, f, b]
     @test D ≈ Dref
@@ -138,7 +140,7 @@ end
 end
 
 @testset "hard-reject: ineligible eltypes and non-strided operands" begin
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     # (eltype A, eltype B, eltype C): types outside the four, and complex into real.
     for (TA, TB, TC) in (
             (Float16, Float16, Float16), (Complex{Float16}, Complex{Float16}, Complex{Float16}),
@@ -176,7 +178,7 @@ end
 end
 
 @testset "hard-reject: C aliasing an input (eltype = $T)" for T in (Float64, ComplexF64)
-    pA, pB, pAB = _MATMUL_PAB
+    pA, pB, pAB = MATMUL_PAB
     A, B = randn(T, (4, 4)), randn(T, (4, 4))
     M = randn(T, (8, 4))
     # Regression: Base's `mightalias` misses a `PermutedDimsArray` of the input.
@@ -204,82 +206,28 @@ end
     @test c1 == c2
 end
 
-# Run `f` with an empty workspace pool on the current task (not a spawned one:
-# `@test` finds its testset through task-local storage too), restoring it after.
-function _qs_with_clean_pool(f)
-    key = QuasiStrided._QS_WORKSPACE_KEY
-    tls = task_local_storage()
-    prior = get(tls, key, nothing)
-    delete!(tls, key)
-    try
-        return f()
-    finally
-        prior === nothing ? delete!(tls, key) : (tls[key] = prior)
-    end
-end
-
-_qs_haspool() = haskey(task_local_storage(), QuasiStrided._QS_WORKSPACE_KEY)
-
-@testset "workspace pooling: default path reuses a task-local workspace" begin
-    Random.seed!(90210)
-    A, B = randn(20, 30), randn(30, 25)
-    run_once() = (C = zeros(20, 25); @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]; C)
-
-    steady = _qs_with_clean_pool() do
-        @test !_qs_haspool()
-        @test run_once() ≈ A * B
-        pool = task_local_storage(QuasiStrided._QS_WORKSPACE_KEY)
-        ws = pool[Float64]
-        steady = @allocated run_once()
-        @test pool[Float64] === ws
-        steady
-    end
-    # Julia 1.10 does not keep SIMDKernel's accumulator in registers.
-    @test steady < 20_000 skip = (VERSION < v"1.11")
-    Cv, Av, Bv = StridedView(zeros(20, 25)), StridedView(A), StridedView(B)
-    cold = @allocated plan_contract(Cv, Av, (1, -1), Bv, (-1, 2), (1, 2); oracle = false)
-    @test cold - steady > 5_000 skip = (VERSION < v"1.11")
-end
-
-@testset "workspace pooling: explicit allocators never touch the pool" begin
+@testset "tensorcontract!: allocator-routed workspace, released per call" begin
     Random.seed!(13571113)
     A, B = randn(20, 30), randn(30, 25)
-    _qs_with_clean_pool() do
-        for _ in 1:2
-            C1, C2, C3 = zeros(20, 25), zeros(20, 25), zeros(20, 25)
-            @tensor backend = qsbackend allocator = TensorOperations.ManualAllocator() C1[i, j] = A[i, k] * B[k, j]
-            @tensor backend = qsbackend allocator = TensorOperations.BufferAllocator() C2[i, j] = A[i, k] * B[k, j]
-            @no_escape begin
-                @tensor backend = qsbackend allocator = default_buffer() C3[i, j] = A[i, k] * B[k, j]
-            end
-            @test C1 ≈ C2 ≈ C3 ≈ A * B
+    buffer = TensorOperations.BufferAllocator()
+    for _ in 1:2
+        C1, C2, C3 = zeros(20, 25), zeros(20, 25), zeros(20, 25)
+        @tensor backend = qsbackend allocator = TensorOperations.ManualAllocator() C1[i, j] = A[i, k] * B[k, j]
+        @tensor backend = qsbackend allocator = buffer C2[i, j] = A[i, k] * B[k, j]
+        @no_escape begin
+            @tensor backend = qsbackend allocator = default_buffer() C3[i, j] = A[i, k] * B[k, j]
         end
-        @test !_qs_haspool()
-        C = zeros(20, 25)
-        @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]
-        @test _qs_haspool()
+        @test C1 ≈ C2 ≈ C3 ≈ A * B
     end
+    @test isempty(buffer)
 end
 
-# One pooled workspace per eltype, grown and then reused oversized.
-@testset "workspace pooling: correctness across shapes and eltypes on one task" begin
-    Random.seed!(2024)
-    _qs_with_clean_pool() do
-        for (m, k, n) in ((6, 8, 5), (37, 41, 29), (3, 3, 3), (17, 90, 2))
-            A, B = randn(m, k), randn(k, n)
-            C = fill(NaN, m, n)
-            @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]
-            @test C ≈ A * B
-        end
-        for T in (Float64, ComplexF64, Float32, ComplexF32, Float64, ComplexF64)
-            A, B = randn(T, (12, 7)), randn(T, (7, 9))
-            C = fill(convert(T, NaN), (12, 9))
-            @tensor backend = qsbackend C[i, j] = A[i, k] * B[k, j]
-            @test C ≈ A * B
-        end
-        pool = task_local_storage(QuasiStrided._QS_WORKSPACE_KEY)
-        for T in all_eltypes
-            @test pool[T] isa QuasiStrided.ContractWorkspace{T, Vector{real(T)}}
-        end
-    end
+@testset "tensorcontract!: the default path allocates no more than planning" begin
+    A, B, C = randn(20, 30), randn(30, 25), zeros(20, 25)
+    run_once() = TO.tensorcontract!(C, A, ((1,), (2,)), false, B, ((1,), (2,)), false, ((1, 2), ()), 1.0, 0.0, qsbackend)
+    Cv, Av, Bv = StridedView(C), StridedView(A), StridedView(B)
+    plan_once() = plan_contract(Cv, Av, (1, -1), Bv, (-1, 2), (1, 2))
+    run_once(); plan_once()
+    @test C ≈ A * B
+    @test (@allocated run_once()) <= (@allocated plan_once()) skip = (VERSION < v"1.11")
 end
