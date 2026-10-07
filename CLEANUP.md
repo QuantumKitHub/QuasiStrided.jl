@@ -31,7 +31,7 @@ TTFX when codegen is touched).
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | done |
 | 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | done |
-| 19 | Benchmarks (optional) | `benchmark/` | |
+| 19 | Benchmarks (optional) | `benchmark/` | in progress |
 
 ## Decisions
 
@@ -344,6 +344,20 @@ family and every path-flag value still reaches the nest. Slowest file is now
 `test_unpackedb` (148 s; audit item 11, not taken). Pre-existing gap: eight
 mixed-domain menu shapes (ComplexReal/RealComplex) are compiled by no test.
 
+### D22. Benchmarks (chunk 19, decided)
+
+Cleanup only (the outer/unpacked-B benchmark ideas stay recorded). Delete the
+answered `bench_complex_blocking.jl`/`bench_ramp_flags.jl`; the probes become
+the standard checks (`probe_ttfx.jl`, `probe_call_floor.jl`, new
+`probe_specialisations.jl`), usable directly and through `submit_ab.sh`;
+trim unused harness helpers; a uniform `--smoke` flag, every script
+smoke-run once; a short `benchmark/README.md`. Suite plots: two overview
+figures per dtype panel, throughput vs arithmetic intensity (colour = total
+size, marker = backend) and time ratio vs total size (colour = intensity,
+marker = category), with geomean/faster-count annotations and the most
+extreme ratios labelled by case; tag filters (dtype, category, source/topic)
+instead of per-group detail figures; violins dropped.
+
 ### Complex blocking benchmark (after chunk 11)
 
 Same-node A/B, `bench_complex_blocking.jl`, jobs 7160147–9: the kernel's own
@@ -359,7 +373,7 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Chunk 19 (optional): benchmarks (`benchmark/`). Then the final passes: `_UPPER` constants (D2), PrecompileTools workload (D4), delete this file before merging.
+1. Chunk 19 (optional): benchmarks (`benchmark/`). Then the final passes: PrecompileTools workload (D4), delete this file before merging.
 2. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
@@ -399,8 +413,6 @@ blocking.jl (uncommitted until the full suite passes).
 ## Open items (to revisit in their chunk)
 
 
-- Internal constants still use `_UPPER` names; drop the underscores in one pass
-  at the end (D2).
 
 - Path types carry compile-time parameters (lane width, nest flags), which is
   why they are structs, not functions. Measure whether the six `NestPath` ramp
