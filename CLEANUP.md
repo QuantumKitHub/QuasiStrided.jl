@@ -30,7 +30,7 @@ TTFX when codegen is touched).
 | 15 | Alternative paths | `unpackedb.jl` (oracle gone in chunk 12) | done |
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | done |
-| 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | in progress |
+| 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | done |
 | 19 | Benchmarks (optional) | `benchmark/` | |
 
 ## Decisions
@@ -317,7 +317,7 @@ https://github.com/lkdvos/QuasiStrided.jl/issues/18; `build_plan`
 specialises separately for plan-only and executing requests (200 → 304 on a
 mixed workload, nothing below it grows).
 
-### D21. Test infrastructure (chunk 18, decided)
+### D21. Test infrastructure (chunk 18, applied)
 
 Data: the suite is ~98% compilation (10m22s outside `Pkg.test`; 19–22 min
 under `Pkg.test`'s `--check-bounds=yes`, which stays the default; document
@@ -330,6 +330,19 @@ concern, label-order tests to `test_labels.jl`, panel tests to
 of what is tested more than once (low-level tests subsumed by high-level ones
 or vice versa) and of compile-heavy loops, then agreed trims, checked against
 the set of kernel/path/store instantiations the suite compiles.
+Pass 1 applied (5920edb, be8b025): `Pkg.test` 21m53s → 3m44s (30 workers),
+2m36s with `--check-bounds=auto`; 32163 tests kept (+1 Aqua). Audit (report
+in the session scratchpad): line coverage saturated; low-level tests check
+what end-to-end tests cannot (bitwise layouts, NaN in C at β = 0,
+allocations, errors); the cost is extra compiled combinations, spread over
+~15 testsets. Pass 2 applies the audit's trims 1–9 (≈100 s of per-file
+compile, no src line lost); item 10 (single-precision kernel menus) is not
+taken, so every shipped kernel shape stays compiled somewhere.
+Pass 2 applied (6b2c50d, plus 1m pack coverage in the next commit): 32164 →
+30888 tests, `Pkg.test` 218 s → 173 s; 0 src lines lost; every eltype ×
+family and every path-flag value still reaches the nest. Slowest file is now
+`test_unpackedb` (148 s; audit item 11, not taken). Pre-existing gap: eight
+mixed-domain menu shapes (ComplexReal/RealComplex) are compiled by no test.
 
 ### Complex blocking benchmark (after chunk 11)
 
@@ -346,7 +359,7 @@ blocking.jl (uncommitted until the full suite passes).
 
 ## Resume here
 
-1. Chunk 18: test infrastructure (`runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/`; suite time, cross-file helpers, misplaced testsets).
+1. Chunk 19 (optional): benchmarks (`benchmark/`). Then the final passes: `_UPPER` constants (D2), PrecompileTools workload (D4), delete this file before merging.
 2. Workflow: present each chunk (purpose, reading order, design decisions,
    proposed fixes, questions), then hand the agreed changes to an Opus agent
    with the standard checks (Runic, full suite, per-call floor/allocations,
