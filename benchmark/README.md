@@ -7,7 +7,7 @@ and every `bench_*.jl` takes `--smoke` (one rep on a few cases) to check that it
 | Script | Use it to |
 |:-|:-|
 | `bench_to_suite.jl` | compare QuasiStridedBackend with StridedBLAS on the upstream TensorOperations suite (`:contract`, `:network`); the overall picture after any change |
-| `plot_bench_to_suite.jl` | plot a `bench_to_suite.csv`: throughput vs arithmetic intensity and the time ratio vs size, per dtype, with `--dtypes`/`--categories`/`--tags` filters |
+| `plot_bench_to_suite.jl` | plot a `bench_to_suite.csv`: per dtype, both backends' GFLOP/s and their time ratio against arithmetic intensity, with `--dtypes`/`--categories`/`--tags` filters |
 | `bench_kernels.jl` | measure every register tile of the kernel menu against the default choice and OpenBLAS, after kernel or kernel-selection changes |
 | `bench_blocking_model.jl` | check the cache-blocking model against a sweep of `(m_block, k_block, n_block)`, after blocking changes |
 | `bench_mixed.jl` | compare the mixed real/complex kernels with promotion and the real GEMM of equal FMA count |
