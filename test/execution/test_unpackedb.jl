@@ -55,7 +55,7 @@ end
     k0 = plan_contract(_mm_maker(T, 64, 8, 8, 2)()...).kernel
     W = lanewidth(k0)
     kernels = T <: Real ? (k0, SIMDKernel(Val(8), Val(6), T)) :
-        (k0, QuasiStrided.PlanarKernel(Val(W), Val(5), T, Val(W)), QuasiStrided.FMAddSubKernel(Val(W), Val(5), T, Val(W)))
+        (k0, QuasiStrided.PlanarKernel(Val(W), Val(5), T, Val(W)), QuasiStrided.FMAddSubKernel(Val(W), Val(6), T, Val(W)))
     for k in kernels, (m_block, k_block, n_block) in ((8, 3, 6), (40, 1, 100))
         _ub_check(_mm_maker(T, 2 * tile_size(k, 1) + 1, 13, 2 * tile_size(k, 2) + 1, 3), 1.5, 0.5; kernel = k, m_block, k_block, n_block)
     end

@@ -7,7 +7,7 @@ using SIMD: Vec
 const QSF = QuasiStrided
 
 @testset "FMAddSubKernel" begin
-    full = ((ComplexF64, (12, 8, 8)), (ComplexF32, (8, 5, 8)))
+    full = ((ComplexF64, (12, 8, 8)), (ComplexF32, (8, 6, 8)))
     for (T, (MR, NR, W)) in full
         mk_contract(FMAddSubKernel(Val(MR), Val(NR), T, Val(W)))
     end
@@ -57,7 +57,7 @@ const QSF = QuasiStrided
     end
 
     @testset "PackedPanel operands (the driver's form) give the same bits as Vectors" begin
-        for (T, (MR, NR, W)) in ((ComplexF64, (4, 5, 4)), (ComplexF32, (16, 8, 16)))
+        for (T, (MR, NR, W)) in ((ComplexF64, (4, 6, 4)), (ComplexF32, (16, 8, 16)))
             k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
             rng = MersenneTwister(3)
             pa, pb = mk_pack(k, rand(rng, T, MR, 9), rand(rng, T, 9, NR))
@@ -70,7 +70,7 @@ const QSF = QuasiStrided
         # Exact instruction counts in the hot loop of `add_tile`, so only on
         # an FMA3 x86 host and not on hosted CI, whose virtualized CPU feature
         # sets do not reliably match.
-        avx2 = ((ComplexF64, (4, 5, 4)), (ComplexF32, (8, 5, 8)), (ComplexF64, (4, 6, 4)), (ComplexF32, (8, 6, 8)))
+        avx2 = ((ComplexF64, (4, 6, 4)), (ComplexF32, (8, 6, 8)))
         shapes = target_profile().isa === :avx512 ? ((ComplexF64, (8, 8, 8)), (ComplexF32, (16, 8, 16)), avx2...) : avx2
         for (T, (MR, NR, W)) in shapes
             loop = mk_hot_loop(FMAddSubKernel(Val(MR), Val(NR), T, Val(W)))

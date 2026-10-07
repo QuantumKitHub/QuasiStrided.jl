@@ -235,6 +235,22 @@ end
     end
 end
 
+@testset "AVX2 complex: fmaddsub where C's rows take its vector store, else planar" begin
+    saved = QuasiStrided.TARGET[]
+    try
+        QuasiStrided.TARGET[] = synthetic(:avx2)
+        for T in (ComplexF64, ComplexF32)
+            W = 32 ÷ sizeof(real(T))
+            fms, planar = ((W, NR_DEFAULT, W), Val(FMAddSubKernel)), ((W, 5, W), Val(PlanarKernel))
+            select(m_length, run) = QuasiStrided.select_shape(T, PlanarKernel, m_length, 64, run)
+            @test select(64, 64) === select(64, 2W) === select(1, 1) === fms
+            @test select(64, W + 2) === select(64, 1) === planar
+        end
+    finally
+        QuasiStrided.TARGET[] = saved
+    end
+end
+
 @testset "mixed-domain selection: the real default of real(T), mapped" begin
     CR, RC = QuasiStrided.ComplexRealKernel, QuasiStrided.RealComplexKernel
     mapped(m, (MR, NR, W)) = m === CR ? (MR ÷ 2, NR, W) : (MR, NR ÷ 2, W)
@@ -307,10 +323,10 @@ end
         profile = target_profile()
         @test planar_pressure(shape...) <= (profile.nregisters > 0 ? profile.nregisters : 16)
         profile.isa === :avx512 && @test shape === first(kernel_shapes(T, PlanarKernel))
-        @test auto_kernel(T, 1024) isa QuasiStrided.PlanarKernel
-        # The small-M demotion: FMAddSub on AVX-512, planar elsewhere.
-        small = auto_kernel(T, 1)
-        @test small isa (profile.isa === :avx512 ? QuasiStrided.FMAddSubKernel : QuasiStrided.PlanarKernel)
+        fms = profile.isa in (:avx512, :avx2)
+        @test auto_kernel(T, 1024) isa (profile.isa === :avx2 ? QuasiStrided.FMAddSubKernel : QuasiStrided.PlanarKernel)
+        # The small-M demotion: FMAddSub on AVX-512 (and AVX2's default), planar elsewhere.
+        @test auto_kernel(T, 1) isa (fms ? QuasiStrided.FMAddSubKernel : QuasiStrided.PlanarKernel)
 
         shape1m = first(kernel_shapes(T, OneMKernel))
         k1m = QuasiStrided.kernel_from_shape(shape1m, T, OneMKernel)
