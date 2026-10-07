@@ -14,13 +14,15 @@ const FASTPATH_ON = complex_fastpath_isa_eligible()
 # The extremes of each kernel's menu plus extents that are not multiples of any
 # lane width (interleaved shares 1e's shuffle); B is planar under every kernel.
 _menu_extremes(T, K, i) = extrema(s[i] for s in kernel_shapes(T, K))
+# Every 1m menu MR: no other test compiles the 1e A packing.
+_menu_rows(T, K) = K === OneMKernel ? Tuple(s[1] for s in kernel_shapes(T, K)) : _menu_extremes(T, K, 1)
 const FAST_A_CASES = [
     (T, fa, MR) for T in (ComplexF64, ComplexF32)
         for (fa, K, extra) in (
             (PlanarFormat(), PlanarKernel, (1, 7)), (OneEFormat(), OneMKernel, (1, 7)),
             (InterleavedFormat(), FMAddSubKernel, ()),
         )
-        for MR in unique((_menu_extremes(T, K, 1)..., extra...))
+        for MR in unique((_menu_rows(T, K)..., extra...))
 ]
 const FAST_B_NRS = (1, 3, 7, 8)
 
