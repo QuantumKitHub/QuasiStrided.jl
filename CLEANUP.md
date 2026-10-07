@@ -31,7 +31,7 @@ TTFX when codegen is touched).
 | 16 | Degenerate paths | `dot.jl`, `outer.jl` | done |
 | 17 | TensorOperations backend | `integrations/tensoroperations.jl` | done |
 | 18 | Test infrastructure | `runtests.jl`, `helpers.jl`, `forced_isa_runner.jl`, `quality/` | done |
-| 19 | Benchmarks (optional) | `benchmark/` | in progress |
+| 19 | Benchmarks (optional) | `benchmark/` | done (plots under review) |
 
 ## Decisions
 
@@ -344,7 +344,7 @@ family and every path-flag value still reaches the nest. Slowest file is now
 `test_unpackedb` (148 s; audit item 11, not taken). Pre-existing gap: eight
 mixed-domain menu shapes (ComplexReal/RealComplex) are compiled by no test.
 
-### D22. Benchmarks (chunk 19, decided)
+### D22. Benchmarks (chunk 19, applied: 0a1c746, b627c94)
 
 Cleanup only (the outer/unpacked-B benchmark ideas stay recorded). Delete the
 answered `bench_complex_blocking.jl`/`bench_ramp_flags.jl`; the probes become
