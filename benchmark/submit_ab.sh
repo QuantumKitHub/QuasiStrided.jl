@@ -4,9 +4,9 @@
 #   sbatch [--reservation=rocky8] [--constraint=icelake|genoa|rome] [--time=..] \
 #       benchmark/submit_ab.sh <rev_a> <rev_b> <script.jl> [script args...]
 #
-# e.g. `sbatch --constraint=genoa benchmark/submit_ab.sh main HEAD bench_ramp_flags.jl`.
+# e.g. `sbatch --constraint=genoa benchmark/submit_ab.sh main HEAD probes/probe_call_floor.jl`.
 # Each revision runs from its own temporary worktree with its own copy of the
-# script, alternately a, b, a, b, ... for $QS_AB_ROUNDS rounds (default 2), so
+# script (the submitting checkout's when the revision lacks it), alternately a, b, a, b, ... for $QS_AB_ROUNDS rounds (default 2), so
 # slow drift on the node hits both alike. Outputs go to
 # benchmark/results/<script>-ab-<jobid>-<host>/<a|b>-r<round>/. See
 # https://wiki.flatironinstitute.org/SCC/Software/Slurm.
@@ -64,6 +64,7 @@ for side in a b; do
     # The submitting checkout's resolved versions, when it has them, so both
     # sides differ only in QuasiStrided.
     [ -f benchmark/Manifest.toml ] && cp benchmark/Manifest.toml "$WORK/$side/benchmark/"
+    [ -f "$WORK/$side/benchmark/$SCRIPT" ] || install -D "benchmark/$SCRIPT" "$WORK/$side/benchmark/$SCRIPT"
     "$JULIA" --project="$WORK/$side/benchmark" -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 done
 

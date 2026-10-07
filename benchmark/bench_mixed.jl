@@ -5,7 +5,9 @@
 # fraction of real efficiency reached.
 #
 #   julia --project=benchmark benchmark/bench_mixed.jl [--dtypes ComplexF64,ComplexF32]
-#       [--sizes 512,2048] [--reps 5] [--outdir DIR]
+#       [--sizes 512,2048] [--reps 5] [--smoke] [--outdir DIR]
+#
+# `--smoke` defaults the sizes to 64.
 
 include(joinpath(@__DIR__, "harness.jl"))
 
@@ -13,8 +15,8 @@ using QuasiStrided: ComplexRealKernel, RealComplexKernel, PlanarKernel, target_p
     derived_shape, kernel_from_shape
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "ComplexF64,ComplexF32"))
-const SIZES = parse_ints(argopt("sizes", "512,2048"))
-const REPS = argopt("reps", 5)
+const SIZES = parse_ints(argopt("sizes", SMOKE ? "64" : "512,2048"))
+const REPS = reps_arg(5)
 const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "bench_mixed.csv")
 

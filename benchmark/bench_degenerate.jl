@@ -9,12 +9,12 @@
 # dense matrices for scale. Modes are interleaved rep by rep; each rep times a
 # batch of calls sized to ~200 us. Prints median ns per call and [q25, q75].
 #
-#   julia --project=benchmark benchmark/bench_degenerate.jl [--reps 31]
+#   julia --project=benchmark benchmark/bench_degenerate.jl [--reps 31] [--smoke]
 
 include(joinpath(@__DIR__, "harness.jl"))
 using Statistics: quantile
 
-const REPS = argopt("reps", 31)
+const REPS = reps_arg(31)
 
 function batchsize(f!)
     f!()
@@ -60,13 +60,13 @@ for T in (Float64, ComplexF64)
         am = reshape(a, d, 1); bm = reshape(b, 1, d)
         row("outer $(d)x$(d)", :outer, args, () -> mul!(C, am, bm))
     end
-    for d in (6, 8, 12, 16)
+    for d in thin((6, 8, 12, 16))
         A = randn(T, d, d); B = randn(T, d, d, d, d, d); C = zeros(T, d, d, d)
         args = (StridedView(C), StridedView(A), (1, 2), StridedView(B), (1, 2, 3, 4, 5), (3, 4, 5))
         Bm = reshape(B, d^2, d^3); av = vec(A); cv = vec(C)
         row("dot 1x$(d^2)x$(d^3)", :dot, args, () -> mul!(cv, transpose(Bm), av))
     end
-    for d in (16, 32, 64, 128)
+    for d in thin((16, 32, 64, 128))
         A = randn(T, d, d); B = randn(T, d, d); C = zeros(T, d, d)
         args = (StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3))
         row("unpackedB $(d)^3", :unpacked_b, args, () -> mul!(C, A, B))

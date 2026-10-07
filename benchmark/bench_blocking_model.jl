@@ -16,9 +16,10 @@ include(joinpath(@__DIR__, "harness.jl"))
 using QuasiStrided: Blocking, target_profile, unknown_target, default_blocking,
     kernel_from_shape, derived_shape
 
-const SMOKE = hasflag("smoke")
-const REPS = SMOKE ? 1 : argopt("reps", 21)
-thin(v) = SMOKE ? v[1:min(end, 3)] : v
+const REPS = reps_arg(21)
+const DTYPES = (Float64, Float32)
+const CDTYPES = (ComplexF64, ComplexF32)
+full_grid(m_blocks, k_blocks, n_blocks) = [(m_block, k_block, n_block) for k_block in k_blocks for m_block in m_blocks for n_block in n_blocks]
 
 const GRID_SHAPES = vcat(MAIN_SHAPES, EXTRA_SHAPES, SMALL_SHAPES)
 const BIG_SHAPE = ShapeSpec(2048, 256, 2048)
@@ -82,7 +83,7 @@ function summarize(io, raw, canaries)
     @printf(io, "canary spread = %.1f%%  %s\n", 100 * relative_spread(canaries), canaries)
     grid_names = [s.name for s in GRID_SHAPES]
     for T in DTYPES
-        println(io, "\n## $T   ", named_rows(T))
+        println(io, "\n## $T   ", named_rows(host_kernel(T)))
         w = score(raw, T, grid_names, r -> (r.m_block, r.k_block, r.n_block); sets = ("wide",))
         @printf(
             io, "wide grid: best %.4f %s  worst %.4f %s  spread %.1f%%\n",

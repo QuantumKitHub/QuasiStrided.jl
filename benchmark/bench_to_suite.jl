@@ -23,6 +23,8 @@
 #   --max-bytes 2147483648             # per-case skip ceiling
 #   --max-flops 200000000000           # per-case skip ceiling
 #   --outdir <path>                    # default benchmark/results/<host>-<date>
+#   --smoke                            # 1 rep, smallest size, first 3 cases
+#                                      #   per source/topic
 #
 # Each source/topic generator gets its own size sweep (upstream shares one per
 # category), since a leg dim sensible for a rank-4 synthetic shape is far too
@@ -32,8 +34,8 @@
 # `batch` separate tensorcontract! calls (per-call overhead is the point).
 #
 # Writes bench_to_suite.csv (per-rep GF/s min/std next to the median-based
-# rate, for the plot's violins), canary_to_suite.csv, summary_to_suite.txt,
-# mismatches_to_suite.txt and PROVENANCE_to_suite.txt.
+# rate; plotted by plot_bench_to_suite.jl), canary_to_suite.csv,
+# summary_to_suite.txt, mismatches_to_suite.txt and PROVENANCE_to_suite.txt.
 
 using TensorOperations
 using TensorOperations: StridedBLAS
@@ -49,8 +51,8 @@ include(joinpath(@__DIR__, "harness.jl"))
 
 const TOB = TensorOperationsBenchmarks
 
-const REPS = argopt("reps", 21)
-const MIN_REPS = 5
+const REPS = reps_arg(21)
+const MIN_REPS = SMOKE ? 1 : 5
 const TIME_BUDGET = parse(Float64, argopt("time-budget", "10"))
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32"))
 const CATEGORIES = Symbol.(split(argopt("categories", "contract"), ','))
@@ -97,7 +99,7 @@ function _generate(generators, selected, category)
     cases = BenchmarkCase[]
     for (name, (gen, sizes)) in pairs(generators)
         name in selected || continue
-        for case in gen(sizes)
+        for case in thin(gen(SMOKE ? sizes[1:1] : sizes))
             @assert case.category === category
             push!(cases, case)
         end

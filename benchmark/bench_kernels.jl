@@ -2,7 +2,7 @@
 # default choice and OpenBLAS `gemm!`, single core.
 #
 #   julia --project=benchmark benchmark/bench_kernels.jl [--dtypes Float64,ComplexF64]
-#       [--shapes 64x64x64,2048x2048x2048] [--reps 11] [--outdir DIR]
+#       [--shapes 64x64x64,2048x2048x2048] [--reps 11] [--smoke] [--outdir DIR]
 #
 # Arms:
 #   kernel  (real dtypes) the ceiling of each menu tile: `@inbounds execute_tile!`
@@ -27,10 +27,12 @@ using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel, kernel
 
 const RUN_DTYPES = parse_dtypes(argopt("dtypes", "Float64,Float32,ComplexF64,ComplexF32"))
 const SHAPES = let s = argval("shapes")
-    s === nothing ? vcat(MAIN_SHAPES, EXTRA_SHAPES, SMALL_SHAPES, [ShapeSpec(2048, 2048, 2048)]) :
-        [ShapeSpec(parse_ints(replace(x, 'x' => ','))...) for x in split(s, ',')]
+    thin(
+        s === nothing ? vcat(MAIN_SHAPES, EXTRA_SHAPES, SMALL_SHAPES, [ShapeSpec(2048, 2048, 2048)]) :
+            [ShapeSpec(parse_ints(replace(x, 'x' => ','))...) for x in split(s, ',')]
+    )
 end
-const REPS = argopt("reps", 11)
+const REPS = reps_arg(11)
 const OUTDIR = outdir()
 const CSV_PATH = joinpath(OUTDIR, "bench_kernels.csv")
 const SUMMARY_PATH = joinpath(OUTDIR, "summary_kernels.txt")
@@ -68,7 +70,7 @@ function kernel_hot!(kernel, C, apack, bpack, k_block, reps)
     return nothing
 end
 
-for T in filter(t -> t <: Real, RUN_DTYPES), sh in kernel_shapes(T)
+for T in filter(t -> t <: Real, RUN_DTYPES), sh in thin(kernel_shapes(T))
     kernel = kernel_from_shape(sh, T)
     MR, NR = sh
     k_block = default_blocking(kernel).k_block
@@ -91,7 +93,7 @@ for spec in SHAPES, T in RUN_DTYPES
     td, pd = time_plan(fx, T)
     @assert isapprox(fx.Cmat, fx.Amat * fx.Bmat; rtol = sqrt(eps(real(T))))
     record!("engine", T, spec, "default", tag(pd.kernel), pd.blocking, td, tb)
-    for K in menu_kernels(T), sh in kernel_shapes(T, K)
+    for K in menu_kernels(T), sh in thin(kernel_shapes(T, K))
         k = kernel_from_shape(sh, T, K)
         b = default_blocking(k)
         t, _ = time_plan(fx, T; kernel = k, m_block = b.m_block, k_block = b.k_block, n_block = b.n_block)

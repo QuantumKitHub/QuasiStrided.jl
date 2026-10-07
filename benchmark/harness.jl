@@ -1,6 +1,6 @@
 # Shared helpers for the benchmark scripts (`include`d, not a module):
 # single-threaded warm-up-then-median timing, fixtures, a drift canary, CLI
-# parsing and output paths.
+# parsing, the `--smoke` mode and output paths.
 
 using QuasiStrided
 using QuasiStrided: SIMDKernel, tile_size, lanewidth, plan_contract, execute!
@@ -61,11 +61,6 @@ function build_plain(::Type{T}, spec::ShapeSpec, rng) where {T}
     )
 end
 
-full_grid(m_blocks, k_blocks, n_blocks) = [(m_block, k_block, n_block) for k_block in k_blocks for m_block in m_blocks for n_block in n_blocks]
-
-const DTYPES = (Float64, Float32)
-const CDTYPES = (ComplexF64, ComplexF32)
-
 # Complex is charged the textbook 8 flops per multiply-accumulate, never an
 # induced method's lower count, so methods compare on equal terms.
 gflops(::Type{T}, Ma::Int, Ka::Int, Na::Int, seconds::Float64) where {T} =
@@ -125,6 +120,11 @@ end
 hasflag(name::String) = "--$name" in ARGS
 argopt(name::String, default::AbstractString) = something(argval(name), default)
 argopt(name::String, default::Integer) = something(tryparse(Int, something(argval(name), "")), default)
+
+# `--smoke`: one rep on the first few cases, to check that a script runs.
+const SMOKE = hasflag("smoke")
+thin(v) = SMOKE ? v[1:min(end, 3)] : v
+reps_arg(default::Int) = SMOKE ? 1 : argopt("reps", default)
 
 const DTYPE_BY_NAME = Dict(
     "Float64" => Float64, "Float32" => Float32, "ComplexF64" => ComplexF64, "ComplexF32" => ComplexF32,
