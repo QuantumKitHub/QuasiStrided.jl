@@ -151,6 +151,8 @@ function overview_figure()
         ps = filter(p -> p.dtype == dtype, PAIRS)
         rv = [p.qs.t / p.blas.t for p in ps]
         ylim = isempty(ps) ? (0.5, 2.0) : extrema(rv) .* (0.8, 1.25)
+        # An empty band below the data for the summary box, so it hides no point.
+        ylim = (ylim[1] / (ylim[2] / ylim[1])^0.3, ylim[2])
         ax = Axis(
             fig[i, 3]; xscale = log10, yscale = log10, xticks, xtickformat = plainticks, xlabel,
             yticks = ratio_ticks(ylim...), ytickformat = plainticks,
