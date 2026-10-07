@@ -1,13 +1,15 @@
-# Overview plot of bench_to_suite.jl's CSV: one column per dtype, rows
+# Overview plot of bench_to_suite.jl's CSV: one row per dtype, columns
 # sharing the arithmetic-intensity axis: QuasiStrided GFLOP/s, StridedBLAS
 # GFLOP/s (same scale) and the QuasiStrided/StridedBLAS time ratio (< 1 =
-# QuasiStrided faster; geomean and faster count in its title). Colour = total
+# QuasiStrided faster, with the geomean and faster count). Colour = total
 # work, marker = category.
 #
 #   julia --project=benchmark benchmark/plot_bench_to_suite.jl [csv_path]
 #       [--dtypes ComplexF64] [--categories network] [--tags source=tccg,topic=mps]
 #
 # Without `csv_path`, uses the newest benchmark/results/*/bench_to_suite.csv.
+# Without `--dtypes`, plots whichever of Float64 and ComplexF64 the CSV has,
+# or every dtype it has if neither.
 # `--tags` selects on the case params: a case is kept when it carries at least
 # one of the named keys and matches one of the values given for each key it
 # carries, so `source=tccg,topic=mps` keeps the TCCG and the MPS cases. Writes
@@ -63,10 +65,18 @@ function tags_match(params)
         all(k -> any(kv -> kv == (k => params[k]), TAGS_FILTER), keys_present)
 end
 
-keep(r) = (DTYPES_FILTER === nothing || r.dtype in DTYPES_FILTER) &&
-    (CATEGORIES_FILTER === nothing || r.category in CATEGORIES_FILTER) && tags_match(r.params)
+const ALL_ROWS = read_rows(CSV_PATH)
+const PLOT_DTYPES = something(
+    DTYPES_FILTER, let present = unique(r.dtype for r in ALL_ROWS)
+        default = filter(in(present), ["Float64", "ComplexF64"])
+        isempty(default) ? present : default
+    end
+)
 
-const ROWS = filter(keep, read_rows(CSV_PATH))
+keep(r) = r.dtype in PLOT_DTYPES && (CATEGORIES_FILTER === nothing || r.category in CATEGORIES_FILTER) &&
+    tags_match(r.params)
+
+const ROWS = filter(keep, ALL_ROWS)
 isempty(ROWS) && error("no rows left after filtering $CSV_PATH")
 
 const SUFFIX = join(
@@ -119,22 +129,22 @@ end
 work(r) = hasproperty(r, :flops) ? r.flops : r.blas.flops
 
 function overview_figure()
-    ncol = length(PANEL_DTYPES)
-    fig = Figure(size = (600 * ncol + 150, 1150))
-    Label(fig[0, 1:ncol], TITLE; fontsize = 13, color = GREY)
+    nrow = length(PANEL_DTYPES)
+    fig = Figure(size = (1700, 430 * nrow + 170))
+    Label(fig[0, 1:3], TITLE; fontsize = 13, color = GREY)
     crange = extrema(log10(r.flops) for r in ROWS)
     xticks = log_ticks(extrema(r.intensity for r in ROWS)...)
     axes = Axis[]
-    for (j, dtype) in enumerate(PANEL_DTYPES)
-        rate_axes = map(enumerate(("QuasiStrided", "StridedBLAS"))) do (i, backend)
+    for (i, dtype) in enumerate(PANEL_DTYPES)
+        last = i == nrow
+        xlabel = last ? "arithmetic intensity (flop/byte)" : ""
+        rate_axes = map(enumerate(("QuasiStrided", "StridedBLAS"))) do (j, backend)
             ax = Axis(
-                fig[i, j]; xscale = log10, yscale = log10, xticks, xtickformat = plainticks,
+                fig[i, j]; xscale = log10, yscale = log10, xticks, xtickformat = plainticks, xlabel,
                 yticks = log_ticks(extrema(r.gflops for r in ROWS if r.dtype == dtype)...), ytickformat = plainticks,
-                title = i == 1 ? dtype : "", titlesize = 16,
-                ylabel = j == 1 ? "$backend throughput (GFLOP/s)" : ""
+                title = i == 1 ? backend : "", titlesize = 16, ylabel = j == 1 ? "throughput (GFLOP/s)" : ""
             )
             points!(ax, filter(r -> r.dtype == dtype && r.backend == backend, ROWS), r -> r.intensity, r -> r.gflops, crange)
-            hidexdecorations!(ax; grid = false, minorgrid = false)
             ax
         end
         linkyaxes!(rate_axes...)
@@ -142,26 +152,33 @@ function overview_figure()
         rv = [p.qs.t / p.blas.t for p in ps]
         ylim = isempty(ps) ? (0.5, 2.0) : extrema(rv) .* (0.8, 1.25)
         ax = Axis(
-            fig[3, j]; xscale = log10, yscale = log10, xticks, xtickformat = plainticks,
+            fig[i, 3]; xscale = log10, yscale = log10, xticks, xtickformat = plainticks, xlabel,
             yticks = ratio_ticks(ylim...), ytickformat = plainticks,
-            title = isempty(ps) ? "" : @sprintf("geomean %.2f, QuasiStrided faster in %d of %d", geomean(rv), count(<(1), rv), length(rv)),
-            titlefont = :regular, xlabel = "arithmetic intensity (flop/byte)",
-            ylabel = j == 1 ? "time QuasiStrided / StridedBLAS\n(< 1: QuasiStrided faster)" : ""
+            title = i == 1 ? "QuasiStrided / StridedBLAS time" : "", titlesize = 16,
+            ylabel = "time ratio (< 1: QuasiStrided faster)"
         )
         hlines!(ax, [1.0]; color = :black, linewidth = 1, linestyle = :dash)
         points!(ax, ps, p -> p.blas.intensity, p -> p.qs.t / p.blas.t, crange)
         ylims!(ax, ylim)
+        if !isempty(ps)
+            textlabel!(
+                ax, Point2f(0.98, 0.03); space = :relative, text_align = (:right, :bottom), fontsize = 13,
+                text = @sprintf("geomean %.2f\nQuasiStrided faster in %d of %d", geomean(rv), count(<(1), rv), length(rv)),
+                background_color = (:white, 0.85), strokecolor = (:black, 0.3), cornerradius = 3, justification = :left
+            )
+        end
+        last || foreach(a -> hidexdecorations!(a; grid = false, minorgrid = false), (rate_axes..., ax))
+        Label(fig[i, 0], dtype; rotation = pi / 2, fontsize = 16, font = :bold, tellheight = false)
         append!(axes, rate_axes)
         push!(axes, ax)
     end
     linkxaxes!(axes...)
-    Colorbar(fig[1:3, ncol + 1]; colormap = CMAP, limits = crange, label = "total work (log10 flop)")
+    Colorbar(fig[1:nrow, 4]; colormap = CMAP, limits = crange, label = "total work (log10 flop)")
     Legend(
-        fig[4, 1:ncol],
+        fig[nrow + 1, 1:3],
         [MarkerElement(; MARKERS[Symbol(c)]..., color = GREY, strokewidth = 0.4, strokecolor = :black) for c in CATEGORIES],
         CATEGORIES; orientation = :horizontal, framevisible = false
     )
-    rowgap!(fig.layout, 1, 8)
     return fig
 end
 
