@@ -1,9 +1,8 @@
 include("helpers.jl")
 
 using QuasiStrided: FMAddSubKernel, lanewidth, kernel_shapes, packed_panel,
-    accumulator_planes, target_profile, PackedPanel
+    accumulator_planes, target_profile
 using SIMD: Vec
-using InteractiveUtils: code_native
 
 const QSF = QuasiStrided
 
@@ -71,40 +70,16 @@ const QSF = QuasiStrided
         # Exact instruction counts in the hot loop of `add_tile`, so only on
         # an FMA3 x86 host and not on hosted CI, whose virtualized CPU feature
         # sets do not reliably match.
-        isa = target_profile().isa
-        has_fma = Sys.ARCH === :x86_64 && isa in (:avx2, :avx512) && get(ENV, "CI", "false") != "true"
-        function hot_loop(asm)
-            lines = split(asm, '\n')
-            labels = Dict{String, Int}()
-            best = nothing
-            for (n, l) in enumerate(lines)
-                m = match(r"^(\.LBB\w+):", l)
-                m === nothing || (labels[m[1]] = n)
-                b = match(r"^\s+j\w+\s+(\.LBB\w+)", l)
-                b !== nothing && haskey(labels, b[1]) && (best = (labels[b[1]], n))
-            end
-            return best === nothing ? "" : join(lines[best[1]:best[2]], '\n')
-        end
-        shapes = isa === :avx512 ?
-            ((ComplexF64, (8, 8, 8)), (ComplexF32, (16, 8, 16)), (ComplexF64, (4, 5, 4))) :
-            ((ComplexF64, (4, 5, 4)), (ComplexF32, (8, 5, 8)))
+        avx2 = ((ComplexF64, (4, 5, 4)), (ComplexF32, (8, 5, 8)), (ComplexF64, (4, 6, 4)), (ComplexF32, (8, 6, 8)))
+        shapes = target_profile().isa === :avx512 ? ((ComplexF64, (8, 8, 8)), (ComplexF32, (16, 8, 16)), avx2...) : avx2
         for (T, (MR, NR, W)) in shapes
-            k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
-            R = real(T)
-            asm = sprint() do io
-                code_native(
-                    io, QuasiStrided.add_tile,
-                    (typeof(k), typeof(zero_accumulator(k)), PackedPanel{R}, PackedPanel{R}, Int);
-                    debuginfo = :none, syntax = :intel
-                )
-            end
-            loop = hot_loop(asm)
+            loop = mk_hot_loop(FMAddSubKernel(Val(MR), Val(NR), T, Val(W)))
             MV = (2 * MR) ÷ W
-            @test count(r"vfmaddsub\d+p", loop) == 2 * MV * NR skip = !has_fma
-            @test count(r"vf(n?madd|n?msub)\d+p[sd]", loop) == 0 skip = !has_fma
-            @test count(r"v(mul|add|sub)p[sd]", loop) == 0 skip = !has_fma
-            @test count(r"v(shufp|permilp)", loop) == MV skip = !has_fma
-            @test count(r"\[r[sb]p", loop) == 0 skip = !has_fma
+            @test count(r"vfmaddsub\d+p", loop) == 2 * MV * NR skip = !MK_HAS_FMA
+            @test count(r"vf(n?madd|n?msub)\d+p[sd]", loop) == 0 skip = !MK_HAS_FMA
+            @test count(r"v(mul|add|sub)p[sd]", loop) == 0 skip = !MK_HAS_FMA
+            @test count(r"v(shufp|permilp)", loop) == MV skip = !MK_HAS_FMA
+            @test count(r"\[r[sb]p", loop) == 0 skip = !MK_HAS_FMA
         end
     end
 end

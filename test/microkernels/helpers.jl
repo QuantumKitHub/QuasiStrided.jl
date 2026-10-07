@@ -7,8 +7,10 @@
 
 include("../helpers.jl")
 using QuasiStrided: SIMDKernel, PlanarKernel, OneMKernel, FMAddSubKernel
+using QuasiStrided: PackedPanel
 using SIMD: Vec
 using StridedViews: StridedView
+using InteractiveUtils: code_native
 
 # `[x0, y0, x1, y1, ...]`
 mk_ilv(x, y) = vec(permutedims(hcat(x, y)))
@@ -206,4 +208,29 @@ function mk_contract_full(k)
         @test count(!isnan, storage) == m * n
     end
     return nothing
+end
+
+# The innermost loop of `add_tile`'s native code over packed panels, for exact
+# instruction counts. Only on an FMA3 x86 host and not on hosted CI, whose
+# virtualized CPU feature sets do not reliably match.
+const MK_HAS_FMA = Sys.ARCH === :x86_64 && target_profile().isa in (:avx2, :avx512) && get(ENV, "CI", "false") != "true"
+function mk_hot_loop(k)
+    R = realtype(k)
+    asm = sprint() do io
+        code_native(
+            io, QuasiStrided.add_tile,
+            (typeof(k), typeof(zero_accumulator(k)), PackedPanel{R}, PackedPanel{R}, Int);
+            debuginfo = :none, syntax = :intel
+        )
+    end
+    lines = split(asm, '\n')
+    labels = Dict{String, Int}()
+    best = nothing
+    for (n, l) in enumerate(lines)
+        m = match(r"^(\.LBB\w+):", l)
+        m === nothing || (labels[m[1]] = n)
+        b = match(r"^\s+j\w+\s+(\.LBB\w+)", l)
+        b !== nothing && haskey(labels, b[1]) && (best = (labels[b[1]], n))
+    end
+    return best === nothing ? "" : join(lines[best[1]:best[2]], '\n')
 end

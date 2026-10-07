@@ -37,6 +37,10 @@ using SIMD: Vec, shufflevector
     end
 end
 
+# Emits no instruction: a `memory` clobber that stops LLVM moving (or merging)
+# loads across it, while the register-only FMAs stay free to move.
+@inline memory_fence() = Base.llvmcall("call void asm sideeffect \"\", \"~{memory}\"()\nret void", Cvoid, Tuple{})
+
 # `[x1, x0, x3, x2, ...]`: one in-lane `vshufpd`/`vpermilps`.
 @generated function swap_pairs(x::Vec{N, R}) where {N, R}
     iseven(N) || return :(throw(ArgumentError("swap_pairs: expected even N, got $N")))

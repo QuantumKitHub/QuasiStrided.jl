@@ -131,56 +131,37 @@ end
     naiv = [Symbol(:nai, v) for v in 0:(MV - 1)]
     brv = [Symbol(:br, j) for j in 1:NR]
     biv = [Symbol(:bi, j) for j in 1:NR]
+    outs = [Symbol(:c, i) for i in 1:(2NV)]
 
-    load_a = Any[]
+    body = Any[]
     for v in 0:(MV - 1)
-        push!(
-            load_a,
-            :(
-                $(arv[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p)
-                )
-            )
-        )
-        push!(
-            load_a,
-            :(
-                $(aiv[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p, 1)
-                )
-            )
-        )
-        push!(load_a, :($(naiv[v + 1]) = -$(aiv[v + 1])))
+        push!(body, :($(arv[v + 1]) = panel_vload(Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p))))
+        push!(body, :($(aiv[v + 1]) = panel_vload(Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p, 1))))
+        push!(body, :($(naiv[v + 1]) = -$(aiv[v + 1])))
     end
-
-    load_b = Any[]
-    for j in 1:NR
-        push!(load_b, :(($(brv[j]), $(biv[j])) = b_complex(packed_b, kernel, $j, p)))
-    end
-
-    acc_exprs = Vector{Any}(undef, NA)
+    acc_exprs = Vector{Any}(undef, 2NV)
     for j in 1:NR, v in 0:(MV - 1)
-        idx = acc_index(MV, v, j)
-        acc_exprs[idx] = :(  # re: ar*br - ai*bi
-            muladd(
-                $(naiv[v + 1]), $(biv[j]),
-                muladd($(arv[v + 1]), $(brv[j]), acc[$idx])
-            )
-        )
-        acc_exprs[NV + idx] = :(  # im: ar*bi + ai*br
-            muladd(
-                $(aiv[v + 1]), $(brv[j]),
-                muladd($(arv[v + 1]), $(biv[j]), acc[$(NV + idx)])
-            )
-        )
+        i = acc_index(MV, v, j)
+        acc_exprs[i] = :(muladd($(naiv[v + 1]), $(biv[j]), muladd($(arv[v + 1]), $(brv[j]), acc[$i])))  # re: ar*br - ai*bi
+        acc_exprs[NV + i] = :(muladd($(aiv[v + 1]), $(brv[j]), muladd($(arv[v + 1]), $(biv[j]), acc[$(NV + i)])))  # im: ar*bi + ai*br
+    end
+    # At AVX2's 16 registers LLVM hoists every broadcast of the K step and
+    # spills them; a fence per column keeps them next to their FMAs.
+    fence = W * sizeof(R) == 32
+    for j in 1:NR
+        push!(body, :(($(brv[j]), $(biv[j])) = b_complex(packed_b, kernel, $j, p)))
+        fence || continue
+        for i in acc_index(MV, 0, j):acc_index(MV, MV - 1, j)
+            push!(body, :($(outs[i]) = $(acc_exprs[i])), :($(outs[NV + i]) = $(acc_exprs[NV + i])))
+        end
+        push!(body, :(memory_fence()))
     end
 
     return quote
         Base.@_inline_meta
         @inbounds begin
-            $(load_a...)
-            $(load_b...)
-            return $(Expr(:tuple, acc_exprs...))
+            $(body...)
+            return $(Expr(:tuple, (fence ? outs : acc_exprs)...))
         end
     end
 end
@@ -210,49 +191,55 @@ end
     ) where {MR, NR, T, W, R, NA, PA, PB}
     MV = (2 * MR) ÷ W
     check_acc(:accumulate_step, R, T, NA, MV * NR)
-
-    av = [Symbol(:a, v) for v in 0:(MV - 1)]
-    sv = [Symbol(:s, v) for v in 0:(MV - 1)]
-    brv = [Symbol(:br, j) for j in 1:NR]
-    biv = [Symbol(:bi, j) for j in 1:NR]
-
-    load_a = Any[]
+    loads = Any[]
     for v in 0:(MV - 1)
-        push!(
-            load_a,
-            :(
-                $(av[v + 1]) = panel_vload(
-                    Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p)
-                )
-            )
-        )
-        push!(load_a, :($(sv[v + 1]) = swap_pairs($(av[v + 1]))))
+        push!(loads, :(panel_vload(Vec{$W, $R}, packed_a, packed_a_offset(kernel, $(v * W + 1), p))))
     end
-
-    load_b = Any[]
-    for j in 1:NR
-        push!(load_b, :((br_s, bi_s) = b_complex(packed_b, kernel, $j, p)))
-        push!(load_b, :($(brv[j]) = Vec{$W, $R}(br_s)))
-        push!(load_b, :($(biv[j]) = Vec{$W, $R}(bi_s)))
-    end
-
-    acc_exprs = Vector{Any}(undef, NA)
+    # Per accumulator, the `swap(a)*bi` term into `m`, then the `a*br` term into `c`.
+    swapped, direct = Vector{Any}(undef, NA), Vector{Any}(undef, NA)
     for j in 1:NR, v in 0:(MV - 1)
-        idx = acc_index(MV, v, j)
-        acc_exprs[idx] = :(
-            fmaddsub(
-                $(av[v + 1]), $(brv[j]),
-                fmaddsub($(sv[v + 1]), $(biv[j]), acc[$idx])
-            )
-        )
+        i = acc_index(MV, v, j)
+        swapped[i] = :($(Symbol(:m, i)) = fmaddsub($(Symbol(:s, v)), $(Symbol(:bi, j)), acc[$i]))
+        direct[i] = :($(Symbol(:c, i)) = fmaddsub($(Symbol(:a, v)), $(Symbol(:br, j)), $(Symbol(:m, i))))
+    end
+    body = Any[]
+    if W * sizeof(R) == 32
+        # On AVX2 the two passes are fenced apart, the second on A loaded again,
+        # so `a` and `swap(a)` are never live together.
+        for v in 0:(MV - 1)
+            push!(body, :($(Symbol(:s, v)) = swap_pairs($(loads[v + 1]))))
+        end
+        for j in 1:NR
+            push!(body, :($(Symbol(:bi, j)) = Vec{$W, $R}(b_complex(packed_b, kernel, $j, p)[2])))
+            append!(body, swapped[acc_index(MV, 0, j):acc_index(MV, MV - 1, j)])
+        end
+        push!(body, :(memory_fence()))
+        for v in 0:(MV - 1)
+            push!(body, :($(Symbol(:a, v)) = $(loads[v + 1])))
+        end
+        for j in 1:NR
+            push!(body, :($(Symbol(:br, j)) = Vec{$W, $R}(b_complex(packed_b, kernel, $j, p)[1])))
+            append!(body, direct[acc_index(MV, 0, j):acc_index(MV, MV - 1, j)])
+        end
+        push!(body, :(memory_fence()))
+    else
+        for v in 0:(MV - 1)
+            push!(body, :($(Symbol(:a, v)) = $(loads[v + 1])), :($(Symbol(:s, v)) = swap_pairs($(Symbol(:a, v)))))
+        end
+        for j in 1:NR
+            push!(body, :((br_s, bi_s) = b_complex(packed_b, kernel, $j, p)))
+            push!(body, :($(Symbol(:br, j)) = Vec{$W, $R}(br_s)), :($(Symbol(:bi, j)) = Vec{$W, $R}(bi_s)))
+        end
+        for i in 1:NA
+            push!(body, swapped[i], direct[i])
+        end
     end
 
     return quote
         Base.@_inline_meta
         @inbounds begin
-            $(load_a...)
-            $(load_b...)
-            return $(Expr(:tuple, acc_exprs...))
+            $(body...)
+            return $(Expr(:tuple, (Symbol(:c, i) for i in 1:NA)...))
         end
     end
 end
