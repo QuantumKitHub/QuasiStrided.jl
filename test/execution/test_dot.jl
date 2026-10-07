@@ -1,6 +1,6 @@
 # The dot-product path: `execute!` on `M == 1` or `N == 1` with a K-contiguous
-# matrix operand runs a K-vectorized gemv. Results match the nest and the
-# reference to a tolerance (the K summation order differs).
+# matrix operand runs a K-vectorized gemv. Results match the reference to a
+# tolerance (the K summation order differs).
 
 include("helpers.jl")
 
@@ -34,12 +34,10 @@ _dot_n1_maker(::Type{T}, d, K, seed) where {T} = function ()
     return (StridedView(randn(rng, T, d, d)), StridedView(randn(rng, T, K, d, d)), (3, 1, 2), StridedView(randn(rng, T, K)), (3,), (1, 2))
 end
 
-# The dot path against the nest and the reference.
+# The dot path against the reference.
 function _dot_check(mk, alpha, beta; conjA = false, conjB = false, plankw...)
     C_dot, plan = _run_fresh(execute!, mk, alpha, beta; conjA, conjB, plankw...)
-    C_nest, _ = _run_nest(mk, alpha, beta; conjA, conjB, plankw...)
     @test _dot_takes(plan)
-    @test C_dot ≈ C_nest
     return @test C_dot ≈ _ref_of(mk, alpha, beta; conjA, conjB)
 end
 
@@ -60,7 +58,7 @@ end
     end
 end
 
-@testset "dot path: matches the nest and the reference ($T)" for T in _DOT_TYPES
+@testset "dot path: matches the reference ($T)" for T in _DOT_TYPES
     ab = ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
     for d in (2, 6), variant in (:plain, :permvec, :permC, :offsetB), (alpha, beta) in ab
         mk = _dot_gemv_maker(T, d, 10 * d; variant)

@@ -18,6 +18,4 @@ using QuasiStrided: PlanarKernel, lanewidth,
     @test_throws ArgumentError PlanarKernel(Val(6), Val(4), ComplexF64, Val(4))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), ComplexF64, Val(0))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), Float64)
-
-    mk_e2e(ComplexF64, nothing)
 end

@@ -69,15 +69,6 @@ using StridedViews: StridedView
         end
     end
 
-    @testset "shipped defaults are allocation-free on a scattered destination" begin
-        for T in (Float64, Float32)
-            plan = QuasiStrided.plan_contract(scattered_fixture(T)...)
-            QuasiStrided.execute!(plan, one(T), zero(T))
-            QuasiStrided.execute!(plan, one(T), zero(T))
-            @test (@allocated QuasiStrided.execute!(plan, one(T), zero(T))) == 0 skip = (VERSION < v"1.11")
-        end
-    end
-
     @testset "extent demotion when M cannot fill a register tile" begin
         for T in (Float64, Float32)
             MR = tile_size(host_kernel(T), 1)
@@ -334,6 +325,13 @@ end
         @test err isa ArgumentError
         @test occursin("SIMDKernel", err.msg) && occursin(string(T), err.msg)
     end
+    for T in (ComplexF64, ComplexF32), K in (PlanarKernel, OneMKernel, FMAddSubKernel)
+        for shape in kernel_shapes(T, K)
+            k = kernel_from_shape(shape, T, K)
+            @test k isa K && scalartype(k) === T && (tile_size(k)..., lanewidth(k)) === shape
+        end
+        @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, K)
+    end
     for T in (Float16, Int, ComplexF16)
         @test_throws ArgumentError QuasiStrided.kernel_from_shape((8, 6, 4), T)
     end
@@ -410,7 +408,8 @@ end
         @test Cex ≈ Cref
     end
 
-    # Plain GEMM: `m_length == run`, so no demotion.
+    # Plain GEMM: `m_length == run`, so no demotion; SIMDKernel is the
+    # engine-wide default, and `contract!` runs the same plan.
     for T in (Float64, Float32)
         Ma, Ka, Na = 37, 11, 23
         Amat = randn(T, Ma, Ka)
@@ -418,11 +417,13 @@ end
         Cmat = zeros(T, Ma, Na)
         Av, Bv, Cv = StridedView(Amat), StridedView(Bmat), StridedView(Cmat)
         plan = plan_contract(Cv, Av, (1, 2), Bv, (2, 3), (1, 3))
-        @test plan.kernel === auto_kernel(T, Ma)
+        @test plan.kernel isa SIMDKernel && plan.kernel === auto_kernel(T, Ma)
 
-        Cref = Amat * Bmat
-        execute!(plan, 1.0, 0.0)
-        @test Cmat ≈ Cref
+        execute!(plan, one(T), zero(T))
+        @test Cmat ≈ Amat * Bmat
+        C2 = zeros(T, Ma, Na)
+        contract!(StridedView(C2), one(T), Av, (1, 2), Bv, (2, 3), zero(T), (1, 3))
+        @test C2 == Cmat
     end
 end
 
@@ -485,28 +486,5 @@ end
         Cv_b1, Av_b1, Bv_b1 = _run_demote_fixture(T, a, kmax_of(T) + 1)
         plan_b1 = plan_contract(Cv_b1, Av_b1, indA, Bv_b1, indB, indC)
         @test plan_b1.kernel === default_kernel
-    end
-end
-
-@testset "plan_contract: SIMDKernel is the engine-wide default kernel" begin
-    for T in (Float64, Float32)
-        Random.seed!(5150)
-        Amat, Bmat = randn(T, 9, 10), randn(T, 10, 8)
-        Cmat = zeros(T, 9, 8)
-        plan = _mm_plan(Cmat, Amat, Bmat)
-
-        # The shape is hardware- and extent-dependent: pin the resolution.
-        @test plan.kernel isa QuasiStrided.SIMDKernel
-        @test QuasiStrided.scalartype(plan.kernel) === T
-        @test plan.kernel === auto_kernel(T, size(Amat, 1))
-        execute!(plan, one(T), zero(T))
-        @test Cmat ≈ Amat * Bmat
-
-        Cmat2 = zeros(T, 9, 8)
-        contract!(
-            StridedView(Cmat2), one(T), StridedView(Amat), (1, 2),
-            StridedView(Bmat), (2, 3), zero(T), (1, 3)
-        )
-        @test Cmat2 == Cmat
     end
 end

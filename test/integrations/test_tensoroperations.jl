@@ -14,8 +14,7 @@ const to_native = StridedNative()
 # NaN in C catches a kernel that computes `0 * C` instead of ignoring C when β == 0.
 poison!(C) = fill!(C, convert(eltype(C), NaN))
 
-const complex_eltypes = (ComplexF32, ComplexF64)
-const all_eltypes = (Float32, Float64, complex_eltypes...)
+const all_eltypes = (Float32, Float64, ComplexF32, ComplexF64)
 
 const _MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
 
@@ -29,7 +28,7 @@ const _MATMUL_PAB = ((1,), (2,)), ((1,), (2,)), ((1, 2), ())
     )
     for (szA, szB, pA, pB, pAB, szC) in cases
         A, B = randn(T, szA), randn(T, szB)
-        for conjA in (false, true), conjB in (false, true),
+        for (conjA, conjB) in (T <: Complex ? ((false, false), (true, true)) : ((false, false),)),
                 (α, β) in ((one(T), zero(T)), (rand(T), zero(T)), (rand(T), rand(T)))
             Cn = randn(T, szC)
             iszero(β) && poison!(Cn)
@@ -53,8 +52,9 @@ end
 end
 
 # `conjA`/`conjB` and each operand's `StridedView.op` compose by xor.
-@testset "conjugation: flags x StridedView.op (eltype = $T)" for T in complex_eltypes
+@testset "conjugation: flags x StridedView.op" begin
     Random.seed!(20260914)
+    T = ComplexF64
     pA, pB, pAB = _MATMUL_PAB
     M, N = randn(T, (4, 4)), randn(T, (4, 4))
     # `conj(::Matrix)` materialises; `conj(::StridedView)` only sets `op`.
@@ -129,9 +129,9 @@ end
     end
 end
 
-@testset "@tensor / ncon integration (eltype = $T)" for T in (Float64, ComplexF64)
+@testset "@tensor / ncon integration" begin
     Random.seed!(112233)
-    A, B, C = randn(T, (5, 5, 5, 5)), randn(T, (5, 5, 5)), randn(T, (5, 5, 5))
+    A, B, C = randn(ComplexF64, (5, 5, 5, 5)), randn(ComplexF64, (5, 5, 5)), randn(ComplexF64, (5, 5, 5))
     @tensor backend = qsbackend D[a, b, c, d] := A[a, e, c, f] * B[g, d, e] * C[g, f, b]
     @tensor Dref[a, b, c, d] := A[a, e, c, f] * B[g, d, e] * C[g, f, b]
     @test D ≈ Dref

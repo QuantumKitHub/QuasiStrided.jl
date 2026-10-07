@@ -76,3 +76,14 @@ end
     end
     @test default_blocking(kernel_from_shape((24, 3, 8), ComplexF64, PlanarKernel), u) === Blocking(64, 256, 384)
 end
+
+@testset "1m and FMAddSub kernels block by their packed reals on this host" begin
+    for T in (ComplexF64, ComplexF32)
+        bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
+        bm = default_blocking(OneMKernel(Val(8), Val(8), T, Val(8)))
+        bf = default_blocking(FMAddSubKernel(Val(8), Val(8), T, Val(8)))
+        # 1m: twice the packed A reals, rounded to MR = 8. FMAddSub: planar's.
+        @test (bm.k_block, bm.n_block) == (bp.k_block, bp.n_block) && bp.m_block - 2 * bm.m_block in (0, 8)
+        @test bf == bp
+    end
+end

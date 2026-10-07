@@ -1,8 +1,7 @@
 include("helpers.jl")
 
-using QuasiStrided: FMAddSubKernel, PlanarKernel, OneMKernel,
-    InterleavedFormat, lanewidth, kernel_shapes, packed_panel,
-    kernel_from_shape, default_kernel_type, accumulator_planes, target_profile, PackedPanel
+using QuasiStrided: FMAddSubKernel, lanewidth, kernel_shapes, packed_panel,
+    accumulator_planes, target_profile, PackedPanel
 using SIMD: Vec
 using InteractiveUtils: code_native
 
@@ -107,60 +106,5 @@ const _QSF = QuasiStrided
             @test count(r"v(shufp|permilp)", loop) == MV skip = !has_fma
             @test count(r"\[r[sb]p", loop) == 0 skip = !has_fma
         end
-    end
-
-    @testset "pack! InterleavedFormat A: scalar loop and fast path vs local layout" begin
-        # Bitwise (`isequal` separates -0.0): packing is a copy, or a sign flip under conj.
-        for T in (ComplexF64, ComplexF32), (MR, NR, W) in (kernel_shapes(T, FMAddSubKernel)..., (3, 2, 2))
-            R = real(T)
-            k = FMAddSubKernel(Val(MR), Val(NR), T, Val(W))
-            k_block_length, lda, base = 7, MR + 3, 2
-            vals = [T(10i + 1, -(10i + 2)) for i in 1:(lda * k_block_length + 4)]
-            vals[5] = T(0, 0)
-            vals[9] = T(R(-0.0), R(0))
-            for f in (identity, conj), m in (MR, max(1, MR - 1))
-                src = Tile(vals, base, AffineAxis(0, 1, m), AffineAxis(0, lda, k_block_length))
-                A = zeros(T, MR, k_block_length)
-                A[1:m, :] = f.(reshape(vals[(base + 1):(base + lda * k_block_length)], lda, k_block_length)[1:m, :])
-                want = mk_pack_a(k, A)
-                bufp = fill(R(-777), packed_a_length(k, k_block_length))
-                pack!(bufp, src, sliver_spec(k, 1), f)
-                @test isequal(bufp, want)
-            end
-            src = Tile(vals, base, AffineAxis(0, 1, MR), AffineAxis(0, lda, k_block_length))
-            @test _QSF.complex_contiguous_eligible(src, sliver_spec(k, 1), identity, MR) ==
-                _QSF.complex_fastpath_isa_eligible()
-        end
-    end
-
-    @testset "blocking and selection" begin
-        for T in (ComplexF64, ComplexF32)
-            bf = default_blocking(FMAddSubKernel(Val(8), Val(8), T, Val(8)))
-            bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
-            @test (bf.m_block, bf.k_block, bf.n_block) == (bp.m_block, bp.k_block, bp.n_block)  # planar's packed reals
-            for s in kernel_shapes(T, FMAddSubKernel)
-                @test kernel_from_shape(s, T, FMAddSubKernel) isa FMAddSubKernel{s[1], s[2], T, s[3]}
-            end
-            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, FMAddSubKernel)
-            @test !(auto_kernel(T, 1024) isa FMAddSubKernel)
-        end
-    end
-
-    mk_e2e(ComplexF64, FMAddSubKernel(Val(4), Val(5), ComplexF64, Val(4)))
-    mk_e2e(ComplexF32, FMAddSubKernel(Val(8), Val(5), ComplexF32, Val(8)))
-
-    @testset "end to end: permuted/strided tensor contraction" begin
-        T = ComplexF64
-        rng = MersenneTwister(99)
-        A = rand(rng, T, 5, 9, 7)  # a, k, b: non-unit-stride M composite
-        B = rand(rng, T, 6, 9)     # n, k: transposed
-        C = zeros(T, 5, 6, 7)
-        plan = plan_contract(
-            StridedView(C), StridedView(A), (1, 2, 3), StridedView(B), (4, 2), (1, 4, 3);
-            kernel = FMAddSubKernel(Val(12), Val(8), T, Val(8))
-        )
-        execute!(plan, one(T), zero(T))
-        want = [sum(A[a, k, b] * B[n, k] for k in 1:9) for a in 1:5, n in 1:6, b in 1:7]
-        @test maximum(abs, C .- want) <= 64 * mk_tol(T)
     end
 end

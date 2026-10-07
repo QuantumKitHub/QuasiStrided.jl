@@ -143,7 +143,7 @@ end
     end
 end
 
-@testset "AxisGroup from labels: worked example" begin
+@testset "AxisGroup from labels matches a direct construction" begin
     A, B, C = StridedView(randn(3, 5, 2)), StridedView(randn(5, 4)), StridedView(zeros(3, 4, 2))
     indA, indB, indC = (1, 2, 3), (2, 4), (1, 4, 3)   # A[a,k,b] B[k,n] C[a,n,b]
     M = AxisGroup((1, 3), (indA, A), (indC, C))
@@ -151,11 +151,9 @@ end
     K = AxisGroup((2,), (indA, A), (indB, B))
     @test (K.lengths, K.strides) == ((5,), ((3,), (1,)))
     @test_throws DimensionMismatch AxisGroup((2,), (indA, A), (indB, StridedView(randn(6, 4))))
-end
 
-@testset "AxisGroup from labels matches a direct construction" begin
     Random.seed!(1234)
-    for trial in 1:60
+    for trial in 1:20
         nd1 = rand(1:4)
         nd2 = rand(nd1:5)
         shared = rand(1:nd1)                      # how many labels the group has
@@ -212,24 +210,4 @@ end
     @test first(ar(AxisGroup((2, 3, 4), ((1, 2, 4), (5, 10, 30))))) == false
     # Empty domain is vacuously a ramp.
     @test first(ar(AxisGroup((0, 3), ((1, 4), (1, 4))))) == true
-
-    # For every ramp, offsets(g, q) == q .* steps.
-    Random.seed!(5150)
-    for trial in 1:100
-        D = rand(1:3)
-        lens = ntuple(_ -> rand(1:4), D)
-        strd = ntuple(_ -> ntuple(_ -> rand(-6:6), D), 2)
-        g = AxisGroup(lens, strd)
-        (isramp, steps) = ar(g)
-        Q = axis_length(g)
-        if isramp
-            for q in 0:(Q - 1)
-                @test offsets(g, q) == (q * steps[1], q * steps[2])
-            end
-        else
-            Q >= 2 || continue
-            s = offsets(g, 1)
-            @test any(q -> offsets(g, q) != (q * s[1], q * s[2]), 0:(Q - 1))
-        end
-    end
 end

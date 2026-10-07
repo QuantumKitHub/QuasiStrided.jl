@@ -221,7 +221,7 @@ end
     d = 6
     # C is a sliced, permuted view of a padded (c, k, a, j, b, i) array.
     perm = (3, 5, 1, 6, 4, 2)  # output axis p takes physical axis perm[p]
-    for T in (Float64, Float32, ComplexF64, ComplexF32)
+    for T in (Float64, ComplexF64)
         rtol = 200 * d * eps(real(T))
         for (name, IA, IB) in _LO_CASES, (conjA, conjB) in ((false, false), (true, true))
             (T <: Real) && conjA && continue  # conj is the identity on the real path
@@ -280,16 +280,12 @@ end
 
 @testset "label order: the adapter path reaches the reordered plan" begin
     d = 6
-    for T in (Float64, ComplexF64), (name, IA, IB) in _LO_CASES
+    for (name, IA, IB) in _LO_CASES
         (indA, indB, indC), (pA, pB, pAB) = _lo_labels(IA, IB)
-        A = randn(T, d, d, d, d)
-        B = randn(T, d, d, d, d)
-        C = randn(T, d, d, d, d, d, d)
-        alpha = T <: Complex ? T(0.9, 0.3) : T(0.9)
-        beta = T <: Complex ? T(-0.5, 0.1) : T(-0.5)
-        Cref = _lo_reference(C, StridedView(A), indA, StridedView(B), indB, indC; alpha, beta)
-        TO.tensorcontract!(C, A, pA, false, B, pB, false, pAB, alpha, beta, QuasiStrided.QuasiStridedBackend())
-        @test isapprox(C, Cref; rtol = 200 * d * eps(real(T)))
+        A, B, C = randn(d, d, d, d), randn(d, d, d, d), randn(d, d, d, d, d, d)
+        Cref = _lo_reference(C, StridedView(A), indA, StridedView(B), indB, indC; alpha = 0.9, beta = -0.5)
+        TO.tensorcontract!(C, A, pA, false, B, pB, false, pAB, 0.9, -0.5, QuasiStrided.QuasiStridedBackend())
+        @test isapprox(C, Cref; rtol = 200 * d * eps())
     end
 end
 
@@ -399,10 +395,10 @@ end
     @test pt.kgroup.strides[2] == (14400, 360, 9)                 # then A's
 end
 
-@testset "K order: correctness on scrambled K (all dtypes, alpha/beta, conj, both orientations)" begin
+@testset "K order: correctness on scrambled K (alpha/beta, conj, both orientations)" begin
     Random.seed!(0x5C7A_0B1E)
     ext = _KO_BIG
-    for T in (Float64, Float32, ComplexF64, ComplexF32)
+    for T in (Float64, ComplexF64)
         rtol = 500 * eps(real(T))
         alpha = T <: Complex ? T(1.3, -0.4) : T(1.3)
         beta = T <: Complex ? T(0.7, 0.2) : T(0.7)

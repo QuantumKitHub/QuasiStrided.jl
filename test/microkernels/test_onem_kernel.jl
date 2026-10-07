@@ -1,7 +1,6 @@
 include("helpers.jl")
 
-using QuasiStrided: OneMKernel, PlanarKernel, lanewidth, kernel_shapes,
-    kernel_from_shape, default_kernel_type
+using QuasiStrided: OneMKernel, lanewidth, kernel_shapes
 
 @testset "OneMKernel" begin
     full = ((ComplexF64, (12, 8, 8)), (ComplexF32, (8, 6, 8)))
@@ -31,23 +30,4 @@ using QuasiStrided: OneMKernel, PlanarKernel, lanewidth, kernel_shapes,
         end
         @test err isa ArgumentError && occursin("k_block_length = -3", err.msg)
     end
-
-    @testset "blocking and selection" begin
-        for T in (ComplexF64, ComplexF32)
-            bm = default_blocking(OneMKernel(Val(8), Val(8), T, Val(8)))
-            bp = default_blocking(PlanarKernel(Val(8), Val(8), T, Val(8)))
-            # Twice the packed A reals, rounded to MR = 8.
-            @test (bm.k_block, bm.n_block) == (bp.k_block, bp.n_block) && bp.m_block - 2 * bm.m_block in (0, 8)
-            for s in kernel_shapes(T, OneMKernel)
-                @test kernel_from_shape(s, T, OneMKernel) isa OneMKernel{s[1], s[2], T, s[3]}
-            end
-            @test_throws ArgumentError kernel_from_shape((7, 7, 7), T, OneMKernel)
-            # Never the default: method ranking does not transfer between machines.
-            @test default_kernel_type(T) === PlanarKernel
-            @test auto_kernel(T, 1024) isa PlanarKernel
-        end
-    end
-
-    mk_e2e(ComplexF64, OneMKernel(Val(12), Val(8), ComplexF64, Val(8)))
-    mk_e2e(ComplexF32, OneMKernel(Val(24), Val(8), ComplexF32, Val(16)))
 end

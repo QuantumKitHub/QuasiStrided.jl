@@ -126,6 +126,10 @@ end
         @test err isa ArgumentError
         @test occursin("conjugated", err.msg)
     end
+    # A non-conjugating op on a complex output is accepted.
+    Ctv = StridedView(Cc, (6, 4), (1, 6), 0, transpose)
+    execute!(plan_contract(Ctv, StridedView(Ac), (1, 2), StridedView(Bc), (2, 3), (1, 3)), 1.0, 0.0)
+    @test reshape(Cc, 6, 4) ≈ Ac * Bc
     # StridedViews bounds `op` to exactly the four functions `op_conjugates`
     # tabulates; fail here if that ever widens.
     @test_throws TypeError StridedView(Cc, (6, 4), (1, 6), 0, sin)

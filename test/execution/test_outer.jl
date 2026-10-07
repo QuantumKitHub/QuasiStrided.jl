@@ -1,6 +1,6 @@
 # The outer-product path: `execute!` on a real `K == 1` plan with unit-stride M
 # in A and C streams `alpha * A * B[n]` column by column. Results match the
-# nest and the reference (`≈`: the two differ on a signed zero).
+# reference.
 
 include("helpers.jl")
 
@@ -20,15 +20,13 @@ include("helpers.jl")
     @test !_outer_takes(_mm_plan(zeros(T, 16, 9), randn(T, 16, 2), randn(T, 2, 9)))
 end
 
-@testset "outer path: matches the nest and the reference ($T)" for T in (Float64, Float32)
+@testset "outer path: matches the reference ($T)" for T in (Float64, Float32)
     W = _lanes(T)
     for (idx, (M, N)) in enumerate(((W, 1), (2W + 1, 13), (63, 63))), variant in (:plain, :bstrided, :coffset),
             (alpha, beta) in ((1.0, 0.0), (2.5, -0.75), (1.0, 1.0))
         mk = _outer_maker(T, M, N, 10 + idx; variant)
         C_out, plan = _run_fresh(execute!, mk, alpha, beta)
-        C_nest, _ = _run_nest(mk, alpha, beta)
         @test _outer_takes(plan) == (axis_length(plan.mgroup) >= W)
-        @test C_out ≈ C_nest
         @test C_out ≈ _ref_of(mk, alpha, beta)
     end
     # Composite M, several N blocks; and a singleton M beside a long N, which

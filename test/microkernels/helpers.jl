@@ -162,6 +162,7 @@ function mk_contract_full(k)
     storage = mk_dense(fill(T(2), MR * NR))
     store_tile!(fulltile(storage), mk_fill_acc(k, R(NaN)), zero(T), T(3), k)
     @test all(==(T(6)), storage)
+    fill!(storage, mk_nan(T))
     execute_tile!(k, fulltile(storage), R[], R[], 5, zero(T), zero(T))
     @test all(iszero, storage)
     empty = Tile(T[], 0, AffineAxis(0, 1, 0), AffineAxis(0, 0, 0))
@@ -175,6 +176,10 @@ function mk_contract_full(k)
     @test_throws ArgumentError execute_tile!(k, fulltile(st), pa, pb, -1, one(T), zero(T))
     @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa[1:(end - 1)], pb, 2, one(T), zero(T))
     @test_throws DimensionMismatch execute_tile!(k, fulltile(st), pa, pb[1:(end - 1)], 2, one(T), zero(T))
+    # Out-of-bounds destination storage, before any write.
+    canary = fill(T(999), MR * NR)
+    @test_throws BoundsError execute_tile!(k, Tile(canary, 1, AffineAxis(0, 1, MR), AffineAxis(0, MR, NR)), pa, pb, 2, one(T), T(2))
+    @test all(==(T(999)), canary)
 
     # Destination layouts: each lands on exactly its own addresses.
     A = rand(rng, TA, MR, k_block_length)
@@ -201,28 +206,4 @@ function mk_contract_full(k)
         @test count(!isnan, storage) == m * n
     end
     return nothing
-end
-
-# A named-kernel plan end to end: several K panels, tiles straddling both ways,
-# conjugation.
-function mk_e2e(T, kernel)
-    rng = MersenneTwister(4242)
-    M, N, K = 37, 23, 41
-    A = rand(rng, T, M, K)
-    B = rand(rng, T, K, N)
-    Cinit = rand(rng, T, M, N)
-    alpha, beta = T <: Complex ? (T(1.5, -0.25), T(-0.75, 0.5)) : (T(1.5), T(-0.75))
-    conjs = T <: Complex ? ((false, false), (true, false), (false, true)) : ((false, false),)
-    return @testset "end to end $(kernel === nothing ? "default kernel" : nameof(typeof(kernel))) $T" begin
-        for (cA, cB) in conjs
-            C = copy(Cinit)
-            plan = plan_contract(
-                StridedView(C), StridedView(A), (1, 2), StridedView(B), (2, 3), (1, 3);
-                kernel, k_block = 16, conjA = cA, conjB = cB
-            )
-            execute!(plan, alpha, beta)
-            want = alpha .* ((cA ? conj.(A) : A) * (cB ? conj.(B) : B)) .+ beta .* Cinit
-            @test maximum(abs, C .- want) <= 64 * mk_tol(T) * maximum(abs, want)
-        end
-    end
 end

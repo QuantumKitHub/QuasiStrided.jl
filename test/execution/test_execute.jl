@@ -142,18 +142,16 @@ end
     @test C ≈ A * B
     @test allocs == 0 skip = (VERSION < v"1.11")
 
-    # Permuted A, reversed B, sliced C: the non-ramp path.
-    Ap = permutedims(randn(Ka, Ma), (2, 1))
-    Bn = view(randn(Ka, 2Na), :, (2Na):-1:(Na + 1))
-    Cs = view(zeros(2Ma, Na), 1:Ma, :)
-    ps = plan_contract(
-        StridedView(Cs), StridedView(Ap), (1, 2), StridedView(Bn), (2, 3), (1, 3)
-    )
-    execute!(ps, 1.0, 0.0)
-    execute!(ps, 1.0, 0.0)
-    allocs_s = @allocated execute!(ps, 1.0, 0.0)
-    @test Cs ≈ Ap * Bn
-    @test allocs_s == 0 skip = (VERSION < v"1.11")
+    # Permuted A with a zero stride, reversed B, sliced C: the non-ramp path,
+    # at both real eltypes' shipped defaults.
+    for T in (Float64, Float32)
+        Cv, Av, iA, Bv, iB, iC = scattered_fixture(T)
+        ps = plan_contract(Cv, Av, iA, Bv, iB, iC)
+        execute!(ps, one(T), zero(T))
+        execute!(ps, one(T), zero(T))
+        @test (@allocated execute!(ps, one(T), zero(T))) == 0 skip = (VERSION < v"1.11")
+        @test Cv ≈ _lo_reference(zeros(T, size(Cv)), Av, iA, Bv, iB, iC)
+    end
 
     # M, N and K composites ordered differently per operand: scattered tile axes.
     A4 = randn(5, 6, 7, 9); B4 = randn(7, 6, 11, 3); C4 = zeros(3, 9, 11, 5)

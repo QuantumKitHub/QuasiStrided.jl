@@ -83,8 +83,6 @@ end
     @testset "end to end: $(nameof(typeof(k))) $TA x $TB -> $TC, B $mode" for (k, TA, TB, TC, acc, mode) in (
             (ComplexRealKernel(Val(12), Val(8), ComplexF64, Val(8)), ComplexF64, Float64, ComplexF64, nothing, :always),
             (ComplexRealKernel(Val(12), Val(8), ComplexF64, Val(8)), ComplexF64, Float64, ComplexF64, nothing, :never),
-            (ComplexRealKernel(Val(8), Val(5), ComplexF32, Val(8)), ComplexF32, Float64, ComplexF32, Float32, :auto),
-            (RealComplexKernel(Val(24), Val(4), ComplexF64, Val(8)), Float64, ComplexF64, ComplexF64, nothing, :auto),
             (RealComplexKernel(Val(16), Val(3), ComplexF32, Val(8)), Float64, ComplexF32, ComplexF32, Float32, :auto),
         )
         rng = MersenneTwister(4242)

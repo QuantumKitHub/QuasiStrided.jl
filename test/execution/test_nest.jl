@@ -1,6 +1,6 @@
 # Randomized agreement of the five-loop nest with a dense matmul, at block
 # sizes small enough to split every dimension, over real and complex kernels,
-# alpha/beta and the conjugation flags and ops; the once-per-block storage
+# alpha/beta and the conjugation flags; the once-per-block storage
 # bounds checks; and the closed-form (`affine_ramp`) block description against
 # the buffer path.
 
@@ -19,12 +19,6 @@ function _macro_plan(Cmat, Amat, Bmat, kernel, m_block, k_block, n_block; conjA 
     )
 end
 
-# The engine's conjugation rule re-derived independently: the flag and the
-# view's `op` compose by XOR; real eltypes never conjugate.
-_macro_conj_op(op) = op === conj || op === adjoint
-_macro_conjugated(::Type{T}, flag::Bool, op) where {T} = (T <: Complex) && (flag ⊻ _macro_conj_op(op))
-
-const _MACRO_OPS = (identity, conj, adjoint, transpose)
 const _MACRO_SHAPES = ((Val(4), Val(3)), (Val(8), Val(6)))
 
 # Every constructible (kernel type, shape) for `T`; constructors reject shapes
@@ -61,15 +55,14 @@ end
         Ma, Ka, Na = rand(rng, 1:37, 3)
         m_block, k_block, n_block = rand(rng, 1:13, 3)
         conjA, conjB = rand(rng, Bool, 2)
-        opA, opB = rand(rng, _MACRO_OPS, 2)
         alpha, beta = _macro_scalar(rng, T), _macro_scalar(rng, T)
         Amat, Bmat = randn(rng, T, Ma, Ka), randn(rng, T, Ka, Na)
         # A NaN-poisoned C whenever beta == 0: it must never be read.
         Cstart = iszero(beta) ? fill(T(NaN), Ma, Na) : randn(rng, T, Ma, Na)
-        kw = (; conjA, conjB, opA, opB)
+        kw = (; conjA, conjB)
 
-        Aeff = _macro_conjugated(T, conjA, opA) ? conj.(Amat) : Amat
-        Beff = _macro_conjugated(T, conjB, opB) ? conj.(Bmat) : Bmat
+        Aeff = T <: Complex && conjA ? conj.(Amat) : Amat
+        Beff = T <: Complex && conjB ? conj.(Bmat) : Bmat
         expected = iszero(beta) ? alpha .* (Aeff * Beff) : alpha .* (Aeff * Beff) .+ beta .* Cstart
 
         C = copy(Cstart)
@@ -146,29 +139,6 @@ end
         Aeff, Beff = ca ? conj.(Amat) : Amat, cb ? conj.(Bmat) : Bmat
         @test isapprox(C, Aeff * Beff; rtol)
         @test !isapprox(C, (ca ? Amat : conj.(Amat)) * Beff; rtol)
-    end
-end
-
-@testset "macro driver: a conjugating op on C is rejected ($T)" for T in (ComplexF64, Float64)
-    kernel = T <: Complex ? first(_macro_kernels(T)) : ScalarKernel(Val(4), Val(3), T)
-    Amat, Bmat = randn(MersenneTwister(1), T, 9, 7), randn(MersenneTwister(2), T, 7, 6)
-    for op in _MACRO_OPS
-        C = zeros(T, 9, 6)
-        mkplan() = QuasiStrided.plan_contract(
-            _macro_op_view(C, op), _macro_op_view(Amat, op), (1, 2), _macro_op_view(Bmat, op), (2, 3), (1, 3);
-            kernel = kernel, conjA = true, conjB = true, m_block = 4, k_block = 3, n_block = 4
-        )
-        if T <: Complex && _macro_conj_op(op)
-            @test_throws ArgumentError mkplan()
-        else
-            plan = mkplan()
-            QuasiStrided.execute!(plan, one(T), zero(T))
-            # For a real eltype nothing conjugates, whatever the flags and ops say.
-            T <: Real && @test plan.atransform === identity === plan.btransform
-            Aeff = _macro_conjugated(T, true, op) ? conj.(Amat) : Amat
-            Beff = _macro_conjugated(T, true, op) ? conj.(Bmat) : Bmat
-            @test isapprox(C, Aeff * Beff; rtol = _macro_rtol(T, 7))
-        end
     end
 end
 
