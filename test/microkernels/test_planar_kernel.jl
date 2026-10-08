@@ -18,4 +18,11 @@ using QuasiStrided: PlanarKernel, lanewidth,
     @test_throws ArgumentError PlanarKernel(Val(6), Val(4), ComplexF64, Val(4))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), ComplexF64, Val(0))
     @test_throws ArgumentError PlanarKernel(Val(8), Val(4), Float64)
+
+    # The fenced AVX2 tiles keep every broadcast in registers.
+    for (T, (MR, NR, W)) in ((ComplexF64, (4, 5, 4)), (ComplexF32, (8, 5, 8)))
+        loop = mk_hot_loop(PlanarKernel(Val(MR), Val(NR), T, Val(W)))
+        @test count(r"vfn?madd\d+p", loop) == 4 * NR skip = !MK_HAS_FMA
+        @test count(r"\[r[sb]p", loop) == 0 skip = !MK_HAS_FMA
+    end
 end

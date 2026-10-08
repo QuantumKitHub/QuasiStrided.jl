@@ -2,8 +2,8 @@
 # not name one, a pure function of a `TargetProfile` and `T`.
 
 # Kernel types, unparameterised, name the complex-arithmetic schemes here.
-# `OneMKernel`/`FMAddSubKernel` are chosen only by naming the kernel (FMAddSub
-# also by the AVX-512 small-M demotion, `small_m_shape`).
+# `OneMKernel` is chosen only by naming the kernel; `FMAddSubKernel` also on
+# AVX2 and by the AVX-512 small-M demotion (`select_shape`).
 default_kernel_type(::Type{<:Real}) = SIMDKernel
 default_kernel_type(::Type{<:Complex}) = PlanarKernel
 
@@ -38,10 +38,9 @@ const KERNEL_SHAPES_C32_PLANAR = (
     (48, 3, 16), (32, 6, 16), (16, 8, 16), (8, 5, 8), (8, 6, 4), (4, 6, 4),
 )
 const KERNEL_SHAPES_C32_ONEM = ((24, 8, 16), (32, 6, 16), (16, 8, 16), (8, 6, 8))
-# FMAddSub starts from 1m's shapes (same accumulator layout); the `NR = 5` AVX2
-# entries fit 16 registers, where `NR = 6` spills.
-const KERNEL_SHAPES_C64_FMADDSUB = ((12, 8, 8), (8, 8, 8), (4, 6, 4), (4, 5, 4))
-const KERNEL_SHAPES_C32_FMADDSUB = ((24, 8, 16), (16, 8, 16), (8, 6, 8), (8, 5, 8))
+# FMAddSub starts from 1m's shapes (same accumulator layout).
+const KERNEL_SHAPES_C64_FMADDSUB = ((12, 8, 8), (8, 8, 8), (4, 6, 4))
+const KERNEL_SHAPES_C32_FMADDSUB = ((24, 8, 16), (16, 8, 16), (8, 6, 8))
 
 """
     kernel_shapes(T, K = default_kernel_type(T)) -> NTuple{<:Any,NTuple{3,Int}}
@@ -131,10 +130,9 @@ function shape_override(isa::Symbol, ::Type{T}, ::Type{K}) where {T, K}
     elseif K <: PlanarKernel && T === ComplexF32
         isa === :avx512 && return (48, 3, 16)
         isa === :avx2 && return (8, 5, 8)
-    elseif K <: OneMKernel && T === ComplexF64
-        # The AVX2-sized 1m shape, for a caller asking for `OneMKernel`'s shape
-        # (the fit would hand it an AVX-512 shape).
-        isa === :avx2 && return (4, 6, 4)
+    elseif K <: Union{OneMKernel, FMAddSubKernel}
+        # The AVX2-sized lane-pair shapes (the fit would hand them an AVX-512 one).
+        isa === :avx2 && return T === ComplexF64 ? (4, 6, 4) : (8, 6, 8)
     end
     return nothing
 end
@@ -218,7 +216,8 @@ with, for compute type `T` and kernel type `K = default_kernel_type(T, TA, TB)`,
 extents `m_length`/`k_length` and C's unit-stride run along M (`run`;
 `m_length` when no layout is known). The steps, in order:
 
- 1. The host's shape for `T` (`derived_shape`).
+ 1. The host's shape for `T` (`derived_shape`); for complex `T` on AVX2 the
+    FMAddSub one, where C's rows take its vector store.
  2. Extent (real): the MV = 4 shape steps down to MV = 2 where `m_length`
     pads less (`extent_shape`).
  3. Small M: an `m_length` below one tile takes the fitted shape, or for
@@ -232,6 +231,12 @@ tuple to `UnionAll`.
 """
 @inline function select_shape(::Type{T}, ::Type{K}, m_length::Int, k_length::Int, run::Int) where {T, K}
     profile = target_profile()
+    if K <: PlanarKernel && profile.isa === :avx2
+        # FMAddSub's one accumulator plane fits `NR = 6` with a register to spare
+        # (planar's two spill), but its scalar store is the slower one.
+        shape = derived_shape(profile, T, FMAddSubKernel)
+        (run == m_length || run % shape[1] == 0) && return (shape, Val(FMAddSubKernel))
+    end
     shape = extent_shape(derived_shape(profile, T, K), T, K, m_length)
     if m_length > 0 && m_length < shape[1]
         # Static, so a real `T`'s kernel type stays concrete.

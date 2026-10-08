@@ -95,11 +95,11 @@ end
 end
 
 @testset "complex pack fast path: ISA gate is a register-width question" begin
-    @test complex_fastpath_isa_eligible(synthetic(:avx512))
-    for key in (:avx2, :neon, :unknown)
+    @test complex_fastpath_isa_eligible(synthetic(:avx512)) && complex_fastpath_isa_eligible(synthetic(:avx2))
+    for key in (:neon, :unknown)
         @test !complex_fastpath_isa_eligible(synthetic(key))
     end
-    @test FASTPATH_ON == (target_profile().isa === :avx512)
+    @test FASTPATH_ON == (target_profile().isa in (:avx512, :avx2))
 end
 
 @testset "pack! contiguous fast path: fires exactly when eligible ($T, L=$L, side $i)" for

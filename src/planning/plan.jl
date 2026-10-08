@@ -225,8 +225,8 @@ function planned(
     morder = order_free_labels(mlabels, indC, C)
     norder = order_free_labels(nlabels, indC, C)
 
-    # Only real `T` swaps and only real kernels run-demote; `0` is a placeholder.
-    run_m = T <: Real || K isa MixedKernel ? leading_unit_run(morder, indC, C) : 0
+    # Only real `T` swaps, so `run_n` is a placeholder for complex.
+    run_m = leading_unit_run(morder, indC, C)
     run_n = T <: Real ? leading_unit_run(norder, indC, C) : 0
 
     mgroup = AxisGroup(morder, (indA, A), (indC, C))  # maps: (A, C)

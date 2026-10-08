@@ -20,9 +20,9 @@ lane_convertible(::Type, ::Type) = false
 lane_convertible(::Type{<:LaneFloat}, ::Type{<:LaneFloat}) = true
 lane_convertible(::Type{Complex{S}}, ::Type{Complex{T}}) where {S <: LaneFloat, T <: LaneFloat} = true
 
-# The deinterleaving complex packer and the planar store pay off only with
-# 512-bit vector registers.
-@inline complex_fastpath_isa_eligible(profile::TargetProfile) = profile.isa === :avx512
+# The deinterleaving complex packer and the complex vector stores (unmeasured
+# on NEON).
+@inline complex_fastpath_isa_eligible(profile::TargetProfile) = profile.isa in (:avx512, :avx2)
 @inline complex_fastpath_isa_eligible() = complex_fastpath_isa_eligible(target_profile())
 
 # --- Real ---
